@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "defaults": {
+    "quiz": {
+      "titleTemplate": "Chapter {{.chapter}} Quiz",
+      "counts": { "tf": 5, "ma": 3, "mc": 10 },
+      "mcOptions": { "min": 3, "max": 5 },
+      "maOptions": { "min": 3, "max": 5 }
+    },
+    "generation": {
+      "stages": ["tf", "ma", "mc"],
+      "seed": 42,
+      "provider": "openai",
+      "model": "gpt-4o",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    },
+    "validation": {
+      "maMaxCorrectDensity": 0.5,
+      "enforceUniqueOptionsPerQuestion": true,
+      "requireSequentialNumbering": true,
+      "requireExactlyOneCorrectForTfMc": true
+    },
+    "workflow": {
+      "outDir": "out",
+      "openReview": false,
+      "reviewTarget": ""
+    }
+  },
+  "sources": [
+    {
+      "id": "ch01",
+      "name": "Introduction",
+      "chapter": 1,
+      "pdf": "ch01.pdf"
+    }
+  ]
+}
