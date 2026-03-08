@@ -130,6 +130,99 @@ func TestEffectiveWorkflow_NoSourceOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveQuiz_SourceOverride(t *testing.T) {
+	customQuiz := &config.Quiz{TitleTemplate: "custom", Counts: config.Counts{TF: 5, MA: 5, MC: 5}}
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Quiz: config.Quiz{TitleTemplate: "default"},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Quiz: customQuiz},
+		},
+	}
+	got := c.EffectiveQuiz(&c.Sources[0])
+	if got.TitleTemplate != "custom" {
+		t.Errorf("expected custom quiz, got %q", got.TitleTemplate)
+	}
+}
+
+func TestEffectiveQuiz_NoSourceOverride(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Quiz: config.Quiz{TitleTemplate: "default"},
+		},
+		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+	}
+	got := c.EffectiveQuiz(&c.Sources[0])
+	if got.TitleTemplate != "default" {
+		t.Errorf("expected default quiz, got %q", got.TitleTemplate)
+	}
+}
+
+func TestEffectiveGeneration_SourceOverride(t *testing.T) {
+	customGen := &config.Generation{Model: "gpt-4o-mini"}
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Generation: config.Generation{Model: "gpt-4o"},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Generation: customGen},
+		},
+	}
+	got := c.EffectiveGeneration(&c.Sources[0])
+	if got.Model != "gpt-4o-mini" {
+		t.Errorf("expected gpt-4o-mini, got %q", got.Model)
+	}
+}
+
+func TestEffectiveGeneration_NoSourceOverride(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Generation: config.Generation{Model: "gpt-4o"},
+		},
+		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+	}
+	got := c.EffectiveGeneration(&c.Sources[0])
+	if got.Model != "gpt-4o" {
+		t.Errorf("expected gpt-4o, got %q", got.Model)
+	}
+}
+
+func TestEffectiveValidation_SourceOverride(t *testing.T) {
+	customVal := &config.Validation{MAMaxCorrectDensity: 0.3}
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Validation: config.Validation{MAMaxCorrectDensity: 0.5},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Validation: customVal},
+		},
+	}
+	got := c.EffectiveValidation(&c.Sources[0])
+	if got.MAMaxCorrectDensity != 0.3 {
+		t.Errorf("expected 0.3, got %f", got.MAMaxCorrectDensity)
+	}
+}
+
+func TestEffectiveValidation_NoSourceOverride(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Validation: config.Validation{MAMaxCorrectDensity: 0.5},
+		},
+		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+	}
+	got := c.EffectiveValidation(&c.Sources[0])
+	if got.MAMaxCorrectDensity != 0.5 {
+		t.Errorf("expected 0.5, got %f", got.MAMaxCorrectDensity)
+	}
+}
+
 func TestOutDir_Precedence(t *testing.T) {
 	tests := []struct {
 		name     string

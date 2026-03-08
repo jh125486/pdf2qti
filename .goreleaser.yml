@@ -1,4 +1,4 @@
-project_name: pdf2qti
+version: 2
 
 before:
   hooks:
@@ -16,21 +16,30 @@ builds:
     goarch:
       - amd64
       - arm64
+    ldflags:
+      - -s -w
 
 archives:
   - format: tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
     format_overrides:
       - goos: windows
         format: zip
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
