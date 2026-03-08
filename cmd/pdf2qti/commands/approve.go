@@ -1,11 +1,10 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/spf13/cobra"
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -13,22 +12,16 @@ import (
 	"github.com/jh125486/pdf2qti/internal/render"
 )
 
-var approveCmd = &cobra.Command{
-	Use:   "approve",
-	Short: "Convert approved quiz markdown draft to QTI",
-	RunE:  runApprove,
-}
+// ApproveCmd converts an approved quiz markdown draft to QTI.
+type ApproveCmd struct{}
 
-func runApprove(cmd *cobra.Command, _ []string) error {
-	cfgPath, err := cmd.Flags().GetString("config")
-	if err != nil {
-		return fmt.Errorf("get config flag: %w", err)
-	}
-	cfg, err := config.Load(cfgPath)
+// Run executes the approve command.
+func (a *ApproveCmd) Run(_ context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(os.Stdout)
+	logger := audit.New(logOutput)
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
 		if err := runApproveSource(cfg, src, logger); err != nil {

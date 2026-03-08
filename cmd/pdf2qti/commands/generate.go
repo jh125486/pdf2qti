@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
-
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/extract"
@@ -15,35 +13,21 @@ import (
 	"github.com/jh125486/pdf2qti/internal/render"
 )
 
-var generateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Extract PDF and generate quiz draft",
-	RunE:  runGenerate,
+// GenerateCmd extracts a PDF and generates a quiz draft.
+type GenerateCmd struct {
+	SkipApprove bool `name:"skip-approve" help:"Skip human review and run approve immediately."`
 }
 
-func init() {
-	generateCmd.Flags().Bool("skip-approve", false, "skip human review and run approve immediately")
-}
-
-func runGenerate(cmd *cobra.Command, _ []string) error {
-	ctx := context.Background()
-	cfgPath, err := cmd.Flags().GetString("config")
-	if err != nil {
-		return fmt.Errorf("get config flag: %w", err)
-	}
-	cfg, err := config.Load(cfgPath)
+// Run executes the generate command.
+func (g *GenerateCmd) Run(ctx context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(os.Stdout)
-	skipApprove, err := cmd.Flags().GetBool("skip-approve")
-	if err != nil {
-		return fmt.Errorf("get skip-approve flag: %w", err)
-	}
-
+	logger := audit.New(logOutput)
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
-		if err := runGenerateSource(ctx, cfg, src, logger, skipApprove); err != nil {
+		if err := runGenerateSource(ctx, cfg, src, logger, g.SkipApprove); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
 	}

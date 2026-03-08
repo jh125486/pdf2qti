@@ -1,11 +1,10 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/spf13/cobra"
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -13,22 +12,16 @@ import (
 	"github.com/jh125486/pdf2qti/internal/validate"
 )
 
-var validateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Validate quiz markdown draft",
-	RunE:  runValidate,
-}
+// ValidateCmd validates a quiz markdown draft.
+type ValidateCmd struct{}
 
-func runValidate(cmd *cobra.Command, _ []string) error {
-	cfgPath, err := cmd.Flags().GetString("config")
-	if err != nil {
-		return fmt.Errorf("get config flag: %w", err)
-	}
-	cfg, err := config.Load(cfgPath)
+// Run executes the validate command.
+func (v *ValidateCmd) Run(_ context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(os.Stdout)
+	logger := audit.New(logOutput)
 	allValid := true
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]

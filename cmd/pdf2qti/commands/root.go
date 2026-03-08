@@ -2,23 +2,30 @@
 package commands
 
 import (
-	"github.com/spf13/cobra"
+	"context"
+	"os"
+
+	"github.com/alecthomas/kong"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "pdf2qti",
-	Short: "Convert PDF sources to Canvas-compatible QTI quizzes",
-	Long:  `pdf2qti is a CLI tool that extracts content from PDFs and generates QTI quiz files for Canvas LMS.`,
+// CLI is the root command structure for pdf2qti.
+type CLI struct {
+	Config   string      `short:"c" default:"quiz_input.json" help:"Path to config file."`
+	Generate GenerateCmd `cmd:"" help:"Extract PDF and generate quiz draft."`
+	Approve  ApproveCmd  `cmd:"" help:"Convert approved quiz markdown draft to QTI."`
+	Validate ValidateCmd `cmd:"" help:"Validate quiz markdown draft."`
 }
 
-// Execute runs the root command.
+// Execute parses and runs the CLI.
 func Execute() error {
-	return rootCmd.Execute()
+	var cli CLI
+	ctx := kong.Parse(&cli,
+		kong.Name("pdf2qti"),
+		kong.Description("Convert PDF sources to Canvas-compatible QTI quizzes."),
+		kong.UsageOnError(),
+	)
+	return ctx.Run(context.Background(), &cli)
 }
 
-func init() {
-	rootCmd.PersistentFlags().StringP("config", "c", "quiz_input.json", "path to config file")
-	rootCmd.AddCommand(generateCmd)
-	rootCmd.AddCommand(approveCmd)
-	rootCmd.AddCommand(validateCmd)
-}
+// logOutput is the writer used for audit loggers; may be replaced in tests.
+var logOutput = os.Stdout
