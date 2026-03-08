@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "defaults": {},
+  "sources": [
+    {
+      "id": "ch01",
+      "name": "Introduction",
+      "chapter": 1,
+      "pdf": "ch01.pdf"
+    }
+  ]
+}
