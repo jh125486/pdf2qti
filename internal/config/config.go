@@ -61,11 +61,9 @@ type Validation struct {
 
 // Workflow holds workflow parameters.
 type Workflow struct {
-	OutDir                     string `json:"outDir"`
-	OpenReview                 bool   `json:"openReview"`
-	ReviewTarget               string `json:"reviewTarget"`
-	RequireApprovalBeforeBuild bool   `json:"requireApprovalBeforeBuild,omitempty"`
-	PackageZip                 bool   `json:"packageZip,omitempty"`
+	OutDir       string `json:"outDir"`
+	OpenReview   bool   `json:"openReview"`
+	ReviewTarget string `json:"reviewTarget"`
 }
 
 // Defaults holds global defaults.
@@ -143,40 +141,97 @@ func (c *Config) EffectiveWorkflow(s *Source) Workflow {
 	if sw.ReviewTarget != "" {
 		w.ReviewTarget = sw.ReviewTarget
 	}
-	if sw.OpenReview != w.OpenReview {
-		w.OpenReview = sw.OpenReview
-	}
-	if sw.PackageZip != w.PackageZip {
-		w.PackageZip = sw.PackageZip
-	}
-	if sw.RequireApprovalBeforeBuild != w.RequireApprovalBeforeBuild {
-		w.RequireApprovalBeforeBuild = sw.RequireApprovalBeforeBuild
+	if sw.OpenReview {
+		w.OpenReview = true
 	}
 	return w
 }
 
-// EffectiveQuiz returns the resolved Quiz for a source.
+// EffectiveQuiz returns the resolved Quiz for a source, merging non-zero source fields over defaults.
 func (c *Config) EffectiveQuiz(s *Source) Quiz {
-	if s.Quiz != nil {
-		return *s.Quiz
+	q := c.Defaults.Quiz
+	if s.Quiz == nil {
+		return q
 	}
-	return c.Defaults.Quiz
+	sq := s.Quiz
+	if sq.TitleTemplate != "" {
+		q.TitleTemplate = sq.TitleTemplate
+	}
+	if sq.DescriptionTemplate != "" {
+		q.DescriptionTemplate = sq.DescriptionTemplate
+	}
+	if sq.Counts.TF != 0 {
+		q.Counts.TF = sq.Counts.TF
+	}
+	if sq.Counts.MA != 0 {
+		q.Counts.MA = sq.Counts.MA
+	}
+	if sq.Counts.MC != 0 {
+		q.Counts.MC = sq.Counts.MC
+	}
+	if sq.MCOptions.Min != 0 {
+		q.MCOptions.Min = sq.MCOptions.Min
+	}
+	if sq.MCOptions.Max != 0 {
+		q.MCOptions.Max = sq.MCOptions.Max
+	}
+	if sq.MAOptions.Min != 0 {
+		q.MAOptions.Min = sq.MAOptions.Min
+	}
+	if sq.MAOptions.Max != 0 {
+		q.MAOptions.Max = sq.MAOptions.Max
+	}
+	return q
 }
 
-// EffectiveGeneration returns the resolved Generation for a source.
+// EffectiveGeneration returns the resolved Generation for a source, merging non-zero source fields over defaults.
 func (c *Config) EffectiveGeneration(s *Source) Generation {
-	if s.Generation != nil {
-		return *s.Generation
+	g := c.Defaults.Generation
+	if s.Generation == nil {
+		return g
 	}
-	return c.Defaults.Generation
+	sg := s.Generation
+	if len(sg.Stages) > 0 {
+		g.Stages = sg.Stages
+	}
+	if sg.Seed != 0 {
+		g.Seed = sg.Seed
+	}
+	if sg.Provider != "" {
+		g.Provider = sg.Provider
+	}
+	if sg.Model != "" {
+		g.Model = sg.Model
+	}
+	if sg.APIKeyEnv != "" {
+		g.APIKeyEnv = sg.APIKeyEnv
+	}
+	if sg.Temperature != 0 {
+		g.Temperature = sg.Temperature
+	}
+	return g
 }
 
-// EffectiveValidation returns the resolved Validation for a source.
+// EffectiveValidation returns the resolved Validation for a source, merging non-zero source fields over defaults.
 func (c *Config) EffectiveValidation(s *Source) Validation {
-	if s.Validation != nil {
-		return *s.Validation
+	v := c.Defaults.Validation
+	if s.Validation == nil {
+		return v
 	}
-	return c.Defaults.Validation
+	sv := s.Validation
+	if sv.MAMaxCorrectDensity != 0 {
+		v.MAMaxCorrectDensity = sv.MAMaxCorrectDensity
+	}
+	if sv.EnforceUniqueOptionsPerQuestion {
+		v.EnforceUniqueOptionsPerQuestion = true
+	}
+	if sv.RequireSequentialNumbering {
+		v.RequireSequentialNumbering = true
+	}
+	if sv.RequireExactlyOneCorrectForTFMC {
+		v.RequireExactlyOneCorrectForTFMC = true
+	}
+	return v
 }
 
 // OutDir returns the effective output directory for a source, falling back to "out".

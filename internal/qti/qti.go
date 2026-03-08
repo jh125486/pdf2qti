@@ -89,7 +89,13 @@ type ResCondition struct {
 
 // ConditionVar holds a condition.
 type ConditionVar struct {
-	VarEqual *VarEqual `xml:"varequal,omitempty"`
+	And      *AndCondition `xml:"and,omitempty"`
+	VarEqual *VarEqual     `xml:"varequal,omitempty"`
+}
+
+// AndCondition holds multiple varequal conditions joined by logical AND.
+type AndCondition struct {
+	VarEquals []VarEqual `xml:"varequal"`
 }
 
 // VarEqual checks for a specific response.
@@ -116,10 +122,27 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 		},
 	}
 	var items []Item
-	for i, q := range append(append(d.TFQuestions, d.MAQuestions...), d.MCQuestions...) {
-		item, err := buildItem(i+1, q)
+	offset := 0
+	for i, q := range d.TFQuestions {
+		item, err := buildItem(offset+i+1, q, false)
 		if err != nil {
-			return nil, fmt.Errorf("build item %d: %w", i+1, err)
+			return nil, fmt.Errorf("build TF item %d: %w", offset+i+1, err)
+		}
+		items = append(items, item)
+	}
+	offset += len(d.TFQuestions)
+	for i, q := range d.MAQuestions {
+		item, err := buildItem(offset+i+1, q, true)
+		if err != nil {
+			return nil, fmt.Errorf("build MA item %d: %w", offset+i+1, err)
+		}
+		items = append(items, item)
+	}
+	offset += len(d.MAQuestions)
+	for i, q := range d.MCQuestions {
+		item, err := buildItem(offset+i+1, q, false)
+		if err != nil {
+			return nil, fmt.Errorf("build MC item %d: %w", offset+i+1, err)
 		}
 		items = append(items, item)
 	}
@@ -127,28 +150,51 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 	return a, nil
 }
 
-func buildItem(idx int, q render.Question) (Item, error) {
+func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 	ident := fmt.Sprintf("q%d", idx)
+	respIdent := fmt.Sprintf("%s_resp", ident)
 	var choices []ResponseLabel
-	var correctIdent string
+	var correctIdents []string
 	for j, o := range q.Options {
 		choiceID := fmt.Sprintf("%s_c%d", ident, j+1)
 		choices = append(choices, ResponseLabel{
 			Ident:    choiceID,
 			Material: Material{MatText: o.Text},
 		})
-		if o.IsCorrect && correctIdent == "" {
-			correctIdent = choiceID
+		if o.IsCorrect {
+			correctIdents = append(correctIdents, choiceID)
 		}
 	}
+	if len(correctIdents) == 0 {
+		return Item{}, fmt.Errorf("question %d has no correct option", idx)
+	}
+
+	cardinality := "Single"
+	if isMA {
+		cardinality = "Multiple"
+	}
+
+	var conditionVar ConditionVar
+	if isMA && len(correctIdents) > 1 {
+		varEquals := make([]VarEqual, len(correctIdents))
+		for k, id := range correctIdents {
+			varEquals[k] = VarEqual{RespIdent: respIdent, Value: id}
+		}
+		conditionVar = ConditionVar{And: &AndCondition{VarEquals: varEquals}}
+	} else {
+		conditionVar = ConditionVar{
+			VarEqual: &VarEqual{RespIdent: respIdent, Value: correctIdents[0]},
+		}
+	}
+
 	item := Item{
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
 			Material: Material{MatText: q.Text},
 			RespDecl: RespDecl{
-				Ident:        fmt.Sprintf("%s_resp", ident),
-				RCardinality: "Single",
+				Ident:        respIdent,
+				RCardinality: cardinality,
 				Render:       RenderChoice{Choices: choices},
 			},
 		},
@@ -163,13 +209,8 @@ func buildItem(idx int, q render.Question) (Item, error) {
 			},
 			ResCondition: []ResCondition{
 				{
-					Continue: "No",
-					ConditionVar: ConditionVar{
-						VarEqual: &VarEqual{
-							RespIdent: fmt.Sprintf("%s_resp", ident),
-							Value:     correctIdent,
-						},
-					},
+					Continue:     "No",
+					ConditionVar: conditionVar,
 					SetVar: SetVar{
 						Action:  "Set",
 						VarName: "SCORE",

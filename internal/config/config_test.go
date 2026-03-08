@@ -273,3 +273,66 @@ func TestOutDir_Precedence(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveQuiz_PartialMerge(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Quiz: config.Quiz{
+				TitleTemplate: "default-title",
+				Counts:        config.Counts{TF: 3, MA: 3, MC: 3},
+			},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Quiz: &config.Quiz{TitleTemplate: "custom-title"}},
+		},
+	}
+	got := c.EffectiveQuiz(&c.Sources[0])
+	if got.TitleTemplate != "custom-title" {
+		t.Errorf("expected custom-title, got %q", got.TitleTemplate)
+	}
+	// Counts not overridden, should keep defaults
+	if got.Counts.TF != 3 {
+		t.Errorf("expected TF count 3 from defaults, got %d", got.Counts.TF)
+	}
+}
+
+func TestEffectiveGeneration_PartialMerge(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Generation: config.Generation{Model: "gpt-4o", Provider: "openai"},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Generation: &config.Generation{Model: "gpt-4o-mini"}},
+		},
+	}
+	got := c.EffectiveGeneration(&c.Sources[0])
+	if got.Model != "gpt-4o-mini" {
+		t.Errorf("expected gpt-4o-mini, got %q", got.Model)
+	}
+	// Provider not overridden, should keep default
+	if got.Provider != "openai" {
+		t.Errorf("expected provider openai from defaults, got %q", got.Provider)
+	}
+}
+
+func TestEffectiveValidation_PartialMerge(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Validation: config.Validation{MAMaxCorrectDensity: 0.5, RequireSequentialNumbering: true},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Validation: &config.Validation{MAMaxCorrectDensity: 0.3}},
+		},
+	}
+	got := c.EffectiveValidation(&c.Sources[0])
+	if got.MAMaxCorrectDensity != 0.3 {
+		t.Errorf("expected MAMaxCorrectDensity 0.3, got %f", got.MAMaxCorrectDensity)
+	}
+	// RequireSequentialNumbering not overridden by source (false), should keep default true
+	if !got.RequireSequentialNumbering {
+		t.Error("expected RequireSequentialNumbering true from defaults")
+	}
+}

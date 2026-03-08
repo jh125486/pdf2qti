@@ -8,7 +8,8 @@ import (
 )
 
 // ExtractText extracts text from a PDF file and returns it as a string.
-// Falls back to a stub if the PDF cannot be opened (for testing without real PDFs).
+// Returns an error if the PDF cannot be read, and falls back to a stub if no text
+// can be extracted (for testing without real PDFs).
 func ExtractText(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

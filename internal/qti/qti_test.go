@@ -109,3 +109,47 @@ func TestBuildAssessment_CorrectAnswerMapping(t *testing.T) {
 		t.Errorf("expected correct ident q1_c2, got %q", cond.ConditionVar.VarEqual.Value)
 	}
 }
+
+func TestBuildAssessment_MAQuestion_MultipleCorrect(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "MA Test",
+		MAQuestions: []render.Question{
+			{Number: 1, Text: "Select all correct answers", Options: []render.Option{
+				{Text: "Correct A", IsCorrect: true},
+				{Text: "Wrong B", IsCorrect: false},
+				{Text: "Correct C", IsCorrect: true},
+			}},
+		},
+	}
+	a, err := qti.BuildAssessment(draft)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	item := a.Assessment.Sections[0].Items[0]
+	if item.ItemBody.RespDecl.RCardinality != "Multiple" {
+		t.Errorf("expected Multiple cardinality for MA, got %q", item.ItemBody.RespDecl.RCardinality)
+	}
+	cond := item.ResForm.ResCondition[0]
+	if cond.ConditionVar.And == nil {
+		t.Fatal("expected And condition for MA with multiple correct answers")
+	}
+	if len(cond.ConditionVar.And.VarEquals) != 2 {
+		t.Errorf("expected 2 VarEquals in And condition, got %d", len(cond.ConditionVar.And.VarEquals))
+	}
+}
+
+func TestBuildAssessment_NoCorrectOption(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "No Correct",
+		MCQuestions: []render.Question{
+			{Number: 1, Text: "Question?", Options: []render.Option{
+				{Text: "A", IsCorrect: false},
+				{Text: "B", IsCorrect: false},
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for question with no correct option")
+	}
+}

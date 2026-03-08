@@ -85,12 +85,19 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 
 	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter}
 	title, err := render.ExecuteTemplate(q.TitleTemplate, titleData)
-	if err != nil {
+	if err != nil || title == "" {
 		title = src.Name
+	}
+	if title == "" {
+		title = src.ID
 	}
 	desc := ""
 	if q.DescriptionTemplate != "" {
-		desc, _ = render.ExecuteTemplate(q.DescriptionTemplate, titleData)
+		if d, err := render.ExecuteTemplate(q.DescriptionTemplate, titleData); err != nil {
+			logger.Info("failed to execute description template; using empty description", "error", err)
+		} else {
+			desc = d
+		}
 	}
 
 	draft := &render.QuizDraft{
