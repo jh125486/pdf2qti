@@ -1,0 +1,17 @@
+<h2>Overview</h2>
+{{.overview}}
+<h2>Objectives</h2>
+<ol>
+{{- range .objectives}}
+    <li>
+        <p>{{.Text}} (CO {{.CO}})</p>
+    </li>
+{{- end}}
+</ol>
+<h2>Weekly To Do List</h2>
+<p><em>Try to complete these tasks in the following order this week:</em></p>
+<ol>
+    <li>Read the assigned chapter(s) and additional readings.</li>
+    <li>Submit the Quiz: {{.quiz_title}}.</li>
+    <li>Submit the Assignment: {{.assignment_title}}.</li>
+</ol>

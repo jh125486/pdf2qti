@@ -11,9 +11,11 @@ import (
 // CLI is the root command structure for pdf2qti.
 type CLI struct {
 	Config   string      `short:"c" default:"quiz_input.json" help:"Path to config file."`
-	Generate GenerateCmd `cmd:"" help:"Extract PDF and generate quiz draft."`
+	Distill  DistillCmd  `cmd:"" help:"Distill PDF into structured context JSON."`
+	Generate GenerateCmd `cmd:"" help:"Generate quiz draft from distilled context."`
 	Approve  ApproveCmd  `cmd:"" help:"Convert approved quiz markdown draft to QTI."`
 	Validate ValidateCmd `cmd:"" help:"Validate quiz markdown draft."`
+	Page     PageCmd     `cmd:"" help:"Render HTML page from distilled context and template."`
 }
 
 // Execute parses and runs the CLI.

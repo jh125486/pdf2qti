@@ -86,11 +86,18 @@ type Source struct {
 	Workflow   *Workflow   `json:"workflow,omitempty"`
 }
 
+// CourseObjective represents a single course-level learning objective.
+type CourseObjective struct {
+	CO   int    `json:"co"`
+	Text string `json:"text"`
+}
+
 // Config is the top-level configuration.
 type Config struct {
-	Version  int      `json:"version"`
-	Defaults Defaults `json:"defaults"`
-	Sources  []Source `json:"sources"`
+	Version          int               `json:"version"`
+	CourseObjectives []CourseObjective `json:"courseObjectives,omitempty"`
+	Defaults         Defaults          `json:"defaults"`
+	Sources          []Source          `json:"sources"`
 }
 
 // Load reads and parses a JSON config file.
