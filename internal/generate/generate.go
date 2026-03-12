@@ -15,7 +15,7 @@ type Generator struct {
 }
 
 // New creates a new Generator.
-func New(cfg config.Generation) *Generator {
+func New(cfg config.Generation) *Generator { //nolint:gocritic
 	return &Generator{cfg: cfg}
 }
 

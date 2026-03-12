@@ -153,7 +153,7 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 	ident := fmt.Sprintf("q%d", idx)
 	respIdent := fmt.Sprintf("%s_resp", ident)
-	var choices []ResponseLabel
+	choices := make([]ResponseLabel, 0, len(q.Options))
 	var correctIdents []string
 	for j, o := range q.Options {
 		choiceID := fmt.Sprintf("%s_c%d", ident, j+1)

@@ -34,10 +34,10 @@ func (g *GenerateCmd) Run(ctx context.Context, cli *CLI) error {
 	return nil
 }
 
-func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Source, logger *audit.Logger, skipApprove bool) error {
+func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Source, logger *audit.Logger, skipApprove bool) error { //nolint:gocyclo // complex but cohesive orchestration function
 	wf := cfg.EffectiveWorkflow(src)
 	outDir := cfg.OutDir(src)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return fmt.Errorf("create outDir %q: %w", outDir, err)
 	}
 
@@ -112,7 +112,7 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 	}
 
 	quizFile := filepath.Join(outDir, src.ID+"_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(md), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(md), 0o600); err != nil {
 		return fmt.Errorf("write quiz file: %w", err)
 	}
 	logger.Info("wrote quiz draft", "file", quizFile)

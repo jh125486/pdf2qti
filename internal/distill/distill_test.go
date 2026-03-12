@@ -143,7 +143,7 @@ func TestLoad_MissingFile(t *testing.T) {
 func TestLoad_CorruptJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ctx.json")
-	if err := os.WriteFile(path, []byte("{corrupt"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := distill.Load(path)

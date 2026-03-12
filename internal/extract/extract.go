@@ -10,7 +10,7 @@ import (
 // ExtractText extracts text from a PDF file and returns it as a string.
 // Returns an error if the PDF cannot be read, and falls back to a stub if no text
 // can be extracted (for testing without real PDFs).
-func ExtractText(path string) (string, error) {
+func ExtractText(path string) (string, error) { //nolint:revive // stutter is acceptable for exported package function
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read PDF %q: %w", path, err)
@@ -34,16 +34,17 @@ func extractRawText(data []byte) string {
 	var cur strings.Builder
 	for i := 0; i < len(content); i++ {
 		ch := content[i]
-		if ch == '(' && !inStr {
+		switch {
+		case ch == '(' && !inStr:
 			inStr = true
 			cur.Reset()
-		} else if ch == ')' && inStr {
+		case ch == ')' && inStr:
 			inStr = false
 			s := cur.String()
 			if len(s) > 3 {
 				parts = append(parts, s)
 			}
-		} else if inStr {
+		case inStr:
 			if ch >= 32 && ch < 127 {
 				cur.WriteByte(ch)
 			}

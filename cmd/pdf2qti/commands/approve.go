@@ -51,7 +51,7 @@ func runApproveSource(cfg *config.Config, src *config.Source, logger *audit.Logg
 		return fmt.Errorf("marshal QTI: %w", err)
 	}
 	qtiFile := filepath.Join(outDir, src.ID+".qti")
-	if err := os.WriteFile(qtiFile, xmlBytes, 0o644); err != nil {
+	if err := os.WriteFile(qtiFile, xmlBytes, 0o600); err != nil { //nolint:gosec // path is constructed from trusted config values
 		return fmt.Errorf("write QTI file: %w", err)
 	}
 	logger.Info("wrote QTI", "file", qtiFile)

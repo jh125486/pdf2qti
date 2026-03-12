@@ -19,7 +19,7 @@ func TestExtractText_MissingFile(t *testing.T) {
 func TestExtractText_EmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.pdf")
-	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+	if err := os.WriteFile(path, []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := extract.ExtractText(path)
@@ -36,7 +36,7 @@ func TestExtractText_WithParenContent(t *testing.T) {
 	path := filepath.Join(dir, "fake.pdf")
 	// Fake PDF data with parenthesized strings (PDF text operator format)
 	content := []byte("BT (Hello World from PDF) Tj ET")
-	if err := os.WriteFile(path, content, 0o644); err != nil {
+	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := extract.ExtractText(path)
