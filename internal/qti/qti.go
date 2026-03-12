@@ -34,8 +34,10 @@ type Item struct {
 
 // ItemBody holds the question text and responses.
 type ItemBody struct {
-	Material Material `xml:"material"`
-	RespDecl RespDecl `xml:"response_lid"`
+	Material  Material   `xml:"material"`
+	RespDecls []RespDecl `xml:"response_lid,omitempty"`
+	RespStr   *RespStr   `xml:"response_str,omitempty"`
+	RespNum   *RespNum   `xml:"response_num,omitempty"`
 }
 
 // Material holds text content.
@@ -47,6 +49,7 @@ type Material struct {
 type RespDecl struct {
 	Ident        string       `xml:"ident,attr"`
 	RCardinality string       `xml:"rcardinality,attr"`
+	Material     *Material    `xml:"material,omitempty"`
 	Render       RenderChoice `xml:"render_choice"`
 }
 
@@ -59,6 +62,28 @@ type RenderChoice struct {
 type ResponseLabel struct {
 	Ident    string   `xml:"ident,attr"`
 	Material Material `xml:"material"`
+}
+
+// RespStr holds a string response (used for short answer and essay).
+type RespStr struct {
+	Ident        string    `xml:"ident,attr"`
+	RCardinality string    `xml:"rcardinality,attr"`
+	Render       RenderFib `xml:"render_fib"`
+}
+
+// RespNum holds a numeric response.
+type RespNum struct {
+	Ident        string    `xml:"ident,attr"`
+	RCardinality string    `xml:"rcardinality,attr"`
+	Render       RenderFib `xml:"render_fib"`
+}
+
+// RenderFib holds a fill-in-the-blank renderer.
+type RenderFib struct {
+	Rows    int    `xml:"rows,attr,omitempty"`
+	Columns int    `xml:"columns,attr,omitempty"`
+	Prompt  string `xml:"prompt,attr,omitempty"`
+	FibType string `xml:"fibtype,attr,omitempty"`
 }
 
 // ResForm holds scoring logic.
@@ -91,6 +116,9 @@ type ResCondition struct {
 type ConditionVar struct {
 	And      *AndCondition `xml:"and,omitempty"`
 	VarEqual *VarEqual     `xml:"varequal,omitempty"`
+	VarGTE   *VarCompare   `xml:"vargte,omitempty"`
+	VarLTE   *VarCompare   `xml:"varlte,omitempty"`
+	Other    *OtherCond    `xml:"other,omitempty"`
 }
 
 // AndCondition holds multiple varequal conditions joined by logical AND.
@@ -101,8 +129,18 @@ type AndCondition struct {
 // VarEqual checks for a specific response.
 type VarEqual struct {
 	RespIdent string `xml:"respident,attr"`
+	Case      string `xml:"case,attr,omitempty"`
 	Value     string `xml:",chardata"`
 }
+
+// VarCompare checks for a numeric comparison (>=  or <=).
+type VarCompare struct {
+	RespIdent string `xml:"respident,attr"`
+	Value     string `xml:",chardata"`
+}
+
+// OtherCond matches any response (used for essay questions).
+type OtherCond struct{}
 
 // SetVar sets a score variable.
 type SetVar struct {
@@ -143,6 +181,35 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 		item, err := buildItem(offset+i+1, q, false)
 		if err != nil {
 			return nil, fmt.Errorf("build MC item %d: %w", offset+i+1, err)
+		}
+		items = append(items, item)
+	}
+	offset += len(d.MCQuestions)
+	for i, q := range d.SAQuestions {
+		item, err := buildSAItem(offset+i+1, q)
+		if err != nil {
+			return nil, fmt.Errorf("build SA item %d: %w", offset+i+1, err)
+		}
+		items = append(items, item)
+	}
+	offset += len(d.SAQuestions)
+	for i, q := range d.ESQuestions {
+		item := buildESItem(offset+i+1, q)
+		items = append(items, item)
+	}
+	offset += len(d.ESQuestions)
+	for i, q := range d.MTQuestions {
+		item, err := buildMTItem(offset+i+1, q)
+		if err != nil {
+			return nil, fmt.Errorf("build MT item %d: %w", offset+i+1, err)
+		}
+		items = append(items, item)
+	}
+	offset += len(d.MTQuestions)
+	for i, q := range d.NRQuestions {
+		item, err := buildNRItem(offset+i+1, q)
+		if err != nil {
+			return nil, fmt.Errorf("build NR item %d: %w", offset+i+1, err)
 		}
 		items = append(items, item)
 	}
@@ -192,10 +259,12 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
 			Material: Material{MatText: q.Text},
-			RespDecl: RespDecl{
-				Ident:        respIdent,
-				RCardinality: cardinality,
-				Render:       RenderChoice{Choices: choices},
+			RespDecls: []RespDecl{
+				{
+					Ident:        respIdent,
+					RCardinality: cardinality,
+					Render:       RenderChoice{Choices: choices},
+				},
 			},
 		},
 		ResForm: ResForm{
@@ -221,6 +290,206 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 		},
 	}
 	return item, nil
+}
+
+// buildSAItem builds a QTI item for a Short Answer question.
+func buildSAItem(idx int, q render.Question) (Item, error) {
+	if len(q.Options) == 0 {
+		return Item{}, fmt.Errorf("short answer question %d has no accepted answers", idx)
+	}
+	ident := fmt.Sprintf("q%d", idx)
+	respIdent := fmt.Sprintf("%s_resp", ident)
+
+	// Build one respcondition per accepted answer (case-insensitive).
+	var conditions []ResCondition
+	for _, o := range q.Options {
+		conditions = append(conditions, ResCondition{
+			Continue: "No",
+			ConditionVar: ConditionVar{
+				VarEqual: &VarEqual{RespIdent: respIdent, Case: "No", Value: o.Text},
+			},
+			SetVar: SetVar{Action: "Set", VarName: "SCORE", Value: "100"},
+		})
+	}
+
+	return Item{
+		Ident: ident,
+		Title: fmt.Sprintf("Question %d", idx),
+		ItemBody: ItemBody{
+			Material: Material{MatText: q.Text},
+			RespStr: &RespStr{
+				Ident:        respIdent,
+				RCardinality: "Single",
+				Render:       RenderFib{Rows: 1, Columns: 20},
+			},
+		},
+		ResForm: ResForm{
+			Outcomes: Outcomes{
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+			},
+			ResCondition: conditions,
+		},
+	}, nil
+}
+
+// buildESItem builds a QTI item for an Essay question.
+func buildESItem(idx int, q render.Question) Item {
+	ident := fmt.Sprintf("q%d", idx)
+	respIdent := fmt.Sprintf("%s_resp", ident)
+	return Item{
+		Ident: ident,
+		Title: fmt.Sprintf("Question %d", idx),
+		ItemBody: ItemBody{
+			Material: Material{MatText: q.Text},
+			RespStr: &RespStr{
+				Ident:        respIdent,
+				RCardinality: "Single",
+				Render:       RenderFib{Rows: 10, Columns: 80, Prompt: "Box"},
+			},
+		},
+		ResForm: ResForm{
+			Outcomes: Outcomes{
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+			},
+			ResCondition: []ResCondition{
+				{
+					Continue:     "No",
+					ConditionVar: ConditionVar{Other: &OtherCond{}},
+					SetVar:       SetVar{Action: "Set", VarName: "SCORE", Value: "0"},
+				},
+			},
+		},
+	}
+}
+
+// buildMTItem builds a QTI item for a Matching question.
+// Each left-side item becomes a response_lid; all right-side items are choices.
+func buildMTItem(idx int, q render.Question) (Item, error) {
+	if len(q.Options) == 0 {
+		return Item{}, fmt.Errorf("matching question %d has no pairs", idx)
+	}
+	ident := fmt.Sprintf("q%d", idx)
+
+	// Collect all right-side answer labels.
+	rightLabels := make([]ResponseLabel, len(q.Options))
+	for j, o := range q.Options {
+		rightLabels[j] = ResponseLabel{
+			Ident:    fmt.Sprintf("%s_match_%d", ident, j+1),
+			Material: Material{MatText: o.MatchText},
+		}
+	}
+
+	// Each left-side item gets its own response_lid with all right-side labels as choices.
+	respDecls := make([]RespDecl, len(q.Options))
+	for j, o := range q.Options {
+		respDecls[j] = RespDecl{
+			Ident:        fmt.Sprintf("%s_resp_%d", ident, j+1),
+			RCardinality: "Single",
+			Material:     &Material{MatText: o.Text},
+			Render:       RenderChoice{Choices: rightLabels},
+		}
+	}
+
+	// Build one respcondition per pair; each adds an equal share of score.
+	scorePerPair := 100 / len(q.Options)
+	conditions := make([]ResCondition, len(q.Options))
+	for j := range q.Options {
+		conditions[j] = ResCondition{
+			Continue: "Yes",
+			ConditionVar: ConditionVar{
+				VarEqual: &VarEqual{
+					RespIdent: fmt.Sprintf("%s_resp_%d", ident, j+1),
+					Value:     fmt.Sprintf("%s_match_%d", ident, j+1),
+				},
+			},
+			SetVar: SetVar{Action: "Add", VarName: "SCORE", Value: fmt.Sprintf("%d", scorePerPair)},
+		}
+	}
+
+	return Item{
+		Ident: ident,
+		Title: fmt.Sprintf("Question %d", idx),
+		ItemBody: ItemBody{
+			Material:  Material{MatText: q.Text},
+			RespDecls: respDecls,
+		},
+		ResForm: ResForm{
+			Outcomes: Outcomes{
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+			},
+			ResCondition: conditions,
+		},
+	}, nil
+}
+
+// buildNRItem builds a QTI item for a Numerical question.
+// The first option with IsCorrect=true is the answer value; the first with IsCorrect=false is the tolerance.
+func buildNRItem(idx int, q render.Question) (Item, error) {
+	if len(q.Options) == 0 {
+		return Item{}, fmt.Errorf("numerical question %d has no answer", idx)
+	}
+	ident := fmt.Sprintf("q%d", idx)
+	respIdent := fmt.Sprintf("%s_resp", ident)
+
+	var answerVal string
+	var toleranceVal string
+	for _, o := range q.Options {
+		if o.IsCorrect && answerVal == "" {
+			answerVal = o.Text
+		} else if !o.IsCorrect && toleranceVal == "" {
+			toleranceVal = o.Text
+		}
+	}
+	if answerVal == "" {
+		return Item{}, fmt.Errorf("numerical question %d has no answer value", idx)
+	}
+
+	var conditionVar ConditionVar
+	if toleranceVal != "" {
+		// Range condition: answer - tolerance <= response <= answer + tolerance
+		var answerFloat, toleranceFloat float64
+		if _, err := fmt.Sscanf(answerVal, "%f", &answerFloat); err != nil {
+			return Item{}, fmt.Errorf("numerical question %d: invalid answer value %q: %w", idx, answerVal, err)
+		}
+		if _, err := fmt.Sscanf(toleranceVal, "%f", &toleranceFloat); err != nil {
+			return Item{}, fmt.Errorf("numerical question %d: invalid tolerance value %q: %w", idx, toleranceVal, err)
+		}
+		lo := fmt.Sprintf("%g", answerFloat-toleranceFloat)
+		hi := fmt.Sprintf("%g", answerFloat+toleranceFloat)
+		conditionVar = ConditionVar{
+			VarGTE: &VarCompare{RespIdent: respIdent, Value: lo},
+			VarLTE: &VarCompare{RespIdent: respIdent, Value: hi},
+		}
+	} else {
+		conditionVar = ConditionVar{
+			VarEqual: &VarEqual{RespIdent: respIdent, Value: answerVal},
+		}
+	}
+
+	return Item{
+		Ident: ident,
+		Title: fmt.Sprintf("Question %d", idx),
+		ItemBody: ItemBody{
+			Material: Material{MatText: q.Text},
+			RespNum: &RespNum{
+				Ident:        respIdent,
+				RCardinality: "Single",
+				Render:       RenderFib{FibType: "Decimal"},
+			},
+		},
+		ResForm: ResForm{
+			Outcomes: Outcomes{
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+			},
+			ResCondition: []ResCondition{
+				{
+					Continue:     "No",
+					ConditionVar: conditionVar,
+					SetVar:       SetVar{Action: "Set", VarName: "SCORE", Value: "100"},
+				},
+			},
+		},
+	}, nil
 }
 
 // Marshal encodes an Assessment to XML bytes.

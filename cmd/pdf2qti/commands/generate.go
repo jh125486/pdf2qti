@@ -68,6 +68,22 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 	if err != nil {
 		return fmt.Errorf("generate MC: %w", err)
 	}
+	saQs, err := gen.GenerateStage(ctx, config.StageSA, text, q.Counts.SA)
+	if err != nil {
+		return fmt.Errorf("generate SA: %w", err)
+	}
+	esQs, err := gen.GenerateStage(ctx, config.StageES, text, q.Counts.ES)
+	if err != nil {
+		return fmt.Errorf("generate ES: %w", err)
+	}
+	mtQs, err := gen.GenerateStage(ctx, config.StageMT, text, q.Counts.MT)
+	if err != nil {
+		return fmt.Errorf("generate MT: %w", err)
+	}
+	nrQs, err := gen.GenerateStage(ctx, config.StageNR, text, q.Counts.NR)
+	if err != nil {
+		return fmt.Errorf("generate NR: %w", err)
+	}
 
 	// Number sequentially
 	offset := 0
@@ -81,6 +97,22 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 	offset += len(maQs)
 	for i := range mcQs {
 		mcQs[i].Number = offset + i + 1
+	}
+	offset += len(mcQs)
+	for i := range saQs {
+		saQs[i].Number = offset + i + 1
+	}
+	offset += len(saQs)
+	for i := range esQs {
+		esQs[i].Number = offset + i + 1
+	}
+	offset += len(esQs)
+	for i := range mtQs {
+		mtQs[i].Number = offset + i + 1
+	}
+	offset += len(mtQs)
+	for i := range nrQs {
+		nrQs[i].Number = offset + i + 1
 	}
 
 	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter}
@@ -106,6 +138,10 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 		TFQuestions: tfQs,
 		MAQuestions: maQs,
 		MCQuestions: mcQs,
+		SAQuestions: saQs,
+		ESQuestions: esQs,
+		MTQuestions: mtQs,
+		NRQuestions: nrQs,
 	}
 	md, err := render.RenderDraft(draft)
 	if err != nil {

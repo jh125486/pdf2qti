@@ -13,13 +13,13 @@ A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LL
 `pdf2qti` automates the creation of quiz content for Canvas LMS from existing PDF materials. It:
 
 - **Extracts** text from PDF documents
-- **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice) via an LLM provider
+- **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice, Short Answer, Essay, Matching, Numerical) via an LLM provider
 - **Renders** a human-reviewable Markdown draft for editing and approval
 - **Converts** approved drafts to QTI 1.2 XML ready for Canvas import
 
 ## Features
 
-- Three question types: **True/False (TF)**, **Multiple Answer (MA)**, **Multiple Choice (MC)**
+- Seven question types: **True/False (TF)**, **Multiple Answer (MA)**, **Multiple Choice (MC)**, **Short Answer (SA)**, **Essay (ES)**, **Matching (MT)**, **Numerical (NR)**
 - Configurable LLM provider, model, temperature, and API key
 - Per-source and global-default configuration via a JSON config file (with JSON Schema)
 - Validation rules (unique options, sequential numbering, correct-answer density, etc.)
@@ -126,7 +126,31 @@ Reads the approved `<outDir>/<id>_quiz.md` and writes a Canvas-compatible QTI 1.
 ## Quiz Draft Format
 
 The Markdown quiz draft uses a simple, human-editable format.  
-Correct answers are marked with `[*]`; incorrect answers with `[ ]`.
+Questions are grouped into typed sections identified by `## <TYPE>` headings.
+
+### Section types
+
+| Section | Question Type    | Description                                                      |
+|---------|------------------|------------------------------------------------------------------|
+| `TF`    | True/False       | Two-option question; exactly one correct answer (`True`/`False`) |
+| `MA`    | Multiple Answer  | Multiple-option question; one or more correct answers            |
+| `MC`    | Multiple Choice  | Multiple-option question; exactly one correct answer             |
+| `SA`    | Short Answer     | Fill-in-the-blank; one or more acceptable text answers           |
+| `ES`    | Essay            | Open-ended text response; manually graded                        |
+| `MT`    | Matching         | Match left-side items to right-side answers                      |
+| `NR`    | Numerical        | Numeric answer with optional tolerance                           |
+
+### Option markers
+
+| Marker       | Used in         | Meaning                                      |
+|--------------|-----------------|----------------------------------------------|
+| `[*] text`   | TF, MA, MC      | Correct answer choice                        |
+| `[ ] text`   | TF, MA, MC      | Incorrect answer choice                      |
+| `[=] text`   | SA, NR          | Accepted answer (SA) or exact value (NR)     |
+| `[~] value`  | NR              | Tolerance around the numeric answer          |
+| `[>] L = R`  | MT              | Matching pair: left side `L`, right side `R` |
+
+### Example
 
 ```markdown
 # Chapter 1 Quiz
@@ -152,6 +176,28 @@ Correct answers are marked with `[*]`; incorrect answers with `[ ]`.
    [*] 4
    [ ] 5
    [ ] 6
+
+## SA
+
+4. The chemical symbol for water is ___.
+   [=] H2O
+
+## ES
+
+5. Describe the water cycle in your own words.
+
+## MT
+
+6. Match each country to its capital.
+   [>] France = Paris
+   [>] Germany = Berlin
+   [>] Spain = Madrid
+
+## NR
+
+7. What is the value of π rounded to two decimal places?
+   [=] 3.14
+   [~] 0.005
 ```
 
 ## Development
