@@ -17,6 +17,14 @@ const (
 	StageMA Stage = "ma"
 	// StageMC is the multiple-choice stage.
 	StageMC Stage = "mc"
+	// StageSA is the short answer (fill-in-the-blank) stage.
+	StageSA Stage = "sa"
+	// StageES is the essay stage.
+	StageES Stage = "es"
+	// StageMT is the matching stage.
+	StageMT Stage = "mt"
+	// StageNR is the numerical response stage.
+	StageNR Stage = "nr"
 )
 
 // OptionRange defines min/max option counts.
@@ -30,6 +38,10 @@ type Counts struct {
 	TF int `json:"tf"`
 	MA int `json:"ma"`
 	MC int `json:"mc"`
+	SA int `json:"sa,omitempty"`
+	ES int `json:"es,omitempty"`
+	MT int `json:"mt,omitempty"`
+	NR int `json:"nr,omitempty"`
 }
 
 // Quiz holds quiz generation parameters.
@@ -175,6 +187,18 @@ func (c *Config) EffectiveQuiz(s *Source) Quiz {
 	}
 	if sq.Counts.MC != 0 {
 		q.Counts.MC = sq.Counts.MC
+	}
+	if sq.Counts.SA != 0 {
+		q.Counts.SA = sq.Counts.SA
+	}
+	if sq.Counts.ES != 0 {
+		q.Counts.ES = sq.Counts.ES
+	}
+	if sq.Counts.MT != 0 {
+		q.Counts.MT = sq.Counts.MT
+	}
+	if sq.Counts.NR != 0 {
+		q.Counts.NR = sq.Counts.NR
 	}
 	if sq.MCOptions.Min != 0 {
 		q.MCOptions.Min = sq.MCOptions.Min

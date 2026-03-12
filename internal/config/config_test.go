@@ -274,6 +274,155 @@ func TestOutDir_Precedence(t *testing.T) {
 	}
 }
 
+func TestLoad_BadJSON(t *testing.T) {
+	_, err := config.Load("testdata/bad_json.json")
+	if err == nil {
+		t.Fatal("expected error for malformed JSON")
+	}
+}
+
+func TestEffectiveWorkflow_ReviewTargetOverride(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Workflow: config.Workflow{ReviewTarget: "default-target"},
+		},
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{ReviewTarget: "source-target"}},
+		},
+	}
+	wf := c.EffectiveWorkflow(&c.Sources[0])
+	if wf.ReviewTarget != "source-target" {
+		t.Errorf("expected source ReviewTarget %q, got %q", "source-target", wf.ReviewTarget)
+	}
+}
+
+func TestEffectiveQuiz_AllFields(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Quiz: config.Quiz{
+				TitleTemplate:       "default-title",
+				DescriptionTemplate: "default-desc",
+				Counts:              config.Counts{TF: 1, MA: 1, MC: 1},
+				MCOptions:           config.OptionRange{Min: 3, Max: 5},
+				MAOptions:           config.OptionRange{Min: 3, Max: 5},
+			},
+		},
+		Sources: []config.Source{
+			{
+				ID:  "s1",
+				PDF: "s1.pdf",
+				Quiz: &config.Quiz{
+					DescriptionTemplate: "src-desc",
+					Counts:              config.Counts{SA: 2, ES: 1, MT: 1, NR: 1},
+					MCOptions:           config.OptionRange{Min: 4, Max: 4},
+					MAOptions:           config.OptionRange{Min: 4, Max: 6},
+				},
+			},
+		},
+	}
+	got := c.EffectiveQuiz(&c.Sources[0])
+	if got.DescriptionTemplate != "src-desc" {
+		t.Errorf("expected DescriptionTemplate %q, got %q", "src-desc", got.DescriptionTemplate)
+	}
+	if got.Counts.SA != 2 {
+		t.Errorf("expected SA count 2, got %d", got.Counts.SA)
+	}
+	if got.Counts.ES != 1 {
+		t.Errorf("expected ES count 1, got %d", got.Counts.ES)
+	}
+	if got.Counts.MT != 1 {
+		t.Errorf("expected MT count 1, got %d", got.Counts.MT)
+	}
+	if got.Counts.NR != 1 {
+		t.Errorf("expected NR count 1, got %d", got.Counts.NR)
+	}
+	if got.MCOptions.Min != 4 || got.MCOptions.Max != 4 {
+		t.Errorf("expected MCOptions {4,4}, got %+v", got.MCOptions)
+	}
+	if got.MAOptions.Min != 4 || got.MAOptions.Max != 6 {
+		t.Errorf("expected MAOptions {4,6}, got %+v", got.MAOptions)
+	}
+}
+
+func TestEffectiveGeneration_AllFields(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Generation: config.Generation{
+				Provider: "openai",
+				Model:    "gpt-4o",
+			},
+		},
+		Sources: []config.Source{
+			{
+				ID:  "s1",
+				PDF: "s1.pdf",
+				Generation: &config.Generation{
+					Stages:      []config.Stage{config.StageTF, config.StageMC},
+					Seed:        99,
+					Provider:    "anthropic",
+					APIKeyEnv:   "MY_KEY",
+					Temperature: 0.9,
+				},
+			},
+		},
+	}
+	got := c.EffectiveGeneration(&c.Sources[0])
+	if len(got.Stages) != 2 || got.Stages[0] != config.StageTF {
+		t.Errorf("expected stages [tf mc], got %v", got.Stages)
+	}
+	if got.Seed != 99 {
+		t.Errorf("expected Seed 99, got %d", got.Seed)
+	}
+	if got.Provider != "anthropic" {
+		t.Errorf("expected Provider anthropic, got %q", got.Provider)
+	}
+	if got.APIKeyEnv != "MY_KEY" {
+		t.Errorf("expected APIKeyEnv MY_KEY, got %q", got.APIKeyEnv)
+	}
+	if got.Temperature != 0.9 {
+		t.Errorf("expected Temperature 0.9, got %f", got.Temperature)
+	}
+}
+
+func TestEffectiveValidation_AllFields(t *testing.T) {
+	c := &config.Config{
+		Version: 1,
+		Defaults: config.Defaults{
+			Validation: config.Validation{
+				MAMaxCorrectDensity: 0.5,
+			},
+		},
+		Sources: []config.Source{
+			{
+				ID:  "s1",
+				PDF: "s1.pdf",
+				Validation: &config.Validation{
+					EnforceUniqueOptionsPerQuestion: true,
+					RequireSequentialNumbering:      true,
+					RequireExactlyOneCorrectForTFMC: true,
+				},
+			},
+		},
+	}
+	got := c.EffectiveValidation(&c.Sources[0])
+	if !got.EnforceUniqueOptionsPerQuestion {
+		t.Error("expected EnforceUniqueOptionsPerQuestion true")
+	}
+	if !got.RequireSequentialNumbering {
+		t.Error("expected RequireSequentialNumbering true")
+	}
+	if !got.RequireExactlyOneCorrectForTFMC {
+		t.Error("expected RequireExactlyOneCorrectForTFMC true")
+	}
+	// MAMaxCorrectDensity not overridden (0 in source)
+	if got.MAMaxCorrectDensity != 0.5 {
+		t.Errorf("expected MAMaxCorrectDensity 0.5, got %f", got.MAMaxCorrectDensity)
+	}
+}
+
 func TestEffectiveQuiz_PartialMerge(t *testing.T) {
 	c := &config.Config{
 		Version: 1,

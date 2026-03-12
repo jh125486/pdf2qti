@@ -15,6 +15,10 @@ type QuizDraft struct {
 	TFQuestions []Question
 	MAQuestions []Question
 	MCQuestions []Question
+	SAQuestions []Question // Short Answer (fill-in-the-blank): options use [=] for acceptable answers
+	ESQuestions []Question // Essay: open-ended, no options, manually graded
+	MTQuestions []Question // Matching: options use [>] with "left = right" pairs
+	NRQuestions []Question // Numerical: options use [=] for the answer value, [~] for tolerance
 }
 
 // Question represents a single quiz question.
@@ -28,6 +32,7 @@ type Question struct {
 type Option struct {
 	Text      string
 	IsCorrect bool
+	MatchText string // for matching questions: the right-hand side of the pair
 }
 
 // RenderDraft renders a QuizDraft to markdown format.
@@ -56,6 +61,30 @@ func RenderDraft(d *QuizDraft) (string, error) {
 			renderQuestion(&buf, q)
 		}
 	}
+	if len(d.SAQuestions) > 0 {
+		fmt.Fprintf(&buf, "## SA\n\n")
+		for _, q := range d.SAQuestions {
+			renderSAQuestion(&buf, q)
+		}
+	}
+	if len(d.ESQuestions) > 0 {
+		fmt.Fprintf(&buf, "## ES\n\n")
+		for _, q := range d.ESQuestions {
+			renderESQuestion(&buf, q)
+		}
+	}
+	if len(d.MTQuestions) > 0 {
+		fmt.Fprintf(&buf, "## MT\n\n")
+		for _, q := range d.MTQuestions {
+			renderMTQuestion(&buf, q)
+		}
+	}
+	if len(d.NRQuestions) > 0 {
+		fmt.Fprintf(&buf, "## NR\n\n")
+		for _, q := range d.NRQuestions {
+			renderNRQuestion(&buf, q)
+		}
+	}
 	return buf.String(), nil
 }
 
@@ -63,9 +92,42 @@ func renderQuestion(buf *bytes.Buffer, q Question) {
 	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
 	for _, o := range q.Options {
 		if o.IsCorrect {
-			fmt.Fprintf(buf, "   [*] %s\n", o.Text)
+			fmt.Fprintf(buf, "[*] %s\n", o.Text)
 		} else {
-			fmt.Fprintf(buf, "   [ ] %s\n", o.Text)
+			fmt.Fprintf(buf, "[ ] %s\n", o.Text)
+		}
+	}
+	fmt.Fprintln(buf)
+}
+
+func renderSAQuestion(buf *bytes.Buffer, q Question) {
+	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
+	for _, o := range q.Options {
+		fmt.Fprintf(buf, "[=] %s\n", o.Text)
+	}
+	fmt.Fprintln(buf)
+}
+
+func renderESQuestion(buf *bytes.Buffer, q Question) {
+	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
+	fmt.Fprintln(buf)
+}
+
+func renderMTQuestion(buf *bytes.Buffer, q Question) {
+	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
+	for _, o := range q.Options {
+		fmt.Fprintf(buf, "[>] %s = %s\n", o.Text, o.MatchText)
+	}
+	fmt.Fprintln(buf)
+}
+
+func renderNRQuestion(buf *bytes.Buffer, q Question) {
+	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
+	for _, o := range q.Options {
+		if o.IsCorrect {
+			fmt.Fprintf(buf, "[=] %s\n", o.Text)
+		} else {
+			fmt.Fprintf(buf, "[~] %s\n", o.Text)
 		}
 	}
 	fmt.Fprintln(buf)
@@ -76,10 +138,13 @@ func renderQuestion(buf *bytes.Buffer, q Question) {
 //
 //	# Title
 //	optional description
-//	## TF / ## MA / ## MC
+//	## TF / ## MA / ## MC / ## SA / ## ES / ## MT / ## NR
 //	N. Question text
-//	   [*] correct
-//	   [ ] wrong
+//	[*] correct          (TF/MA/MC)
+//	[ ] wrong            (TF/MA/MC)
+//	[=] answer           (SA: acceptable answer; NR: numeric value)
+//	[~] tolerance        (NR: tolerance around the numeric answer)
+//	[>] left = right     (MT: matching pair)
 func ParseDraft(md string) (*QuizDraft, error) {
 	d := &QuizDraft{}
 	lines := strings.Split(md, "\n")
@@ -99,6 +164,14 @@ func ParseDraft(md string) (*QuizDraft, error) {
 			d.MAQuestions = append(d.MAQuestions, *currentQ)
 		case "MC":
 			d.MCQuestions = append(d.MCQuestions, *currentQ)
+		case "SA":
+			d.SAQuestions = append(d.SAQuestions, *currentQ)
+		case "ES":
+			d.ESQuestions = append(d.ESQuestions, *currentQ)
+		case "MT":
+			d.MTQuestions = append(d.MTQuestions, *currentQ)
+		case "NR":
+			d.NRQuestions = append(d.NRQuestions, *currentQ)
 		}
 		currentQ = nil
 	}
@@ -163,6 +236,19 @@ func parseOptionLine(s string) (Option, bool) {
 	}
 	if strings.HasPrefix(s, "[ ] ") {
 		return Option{Text: strings.TrimPrefix(s, "[ ] "), IsCorrect: false}, true
+	}
+	if strings.HasPrefix(s, "[=] ") {
+		return Option{Text: strings.TrimPrefix(s, "[=] "), IsCorrect: true}, true
+	}
+	if strings.HasPrefix(s, "[~] ") {
+		return Option{Text: strings.TrimPrefix(s, "[~] "), IsCorrect: false}, true
+	}
+	if strings.HasPrefix(s, "[>] ") {
+		pair := strings.TrimPrefix(s, "[>] ")
+		idx := strings.Index(pair, " = ")
+		if idx >= 0 {
+			return Option{Text: pair[:idx], IsCorrect: true, MatchText: pair[idx+3:]}, true
+		}
 	}
 	return Option{}, false
 }

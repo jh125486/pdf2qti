@@ -25,7 +25,16 @@ func ValidateDraft(d *render.QuizDraft, v config.Validation) *Result {
 
 	// Check sequential numbering
 	if v.RequireSequentialNumbering {
-		allQs := append(append(d.TFQuestions, d.MAQuestions...), d.MCQuestions...)
+		allQs := make([]render.Question, 0,
+			len(d.TFQuestions)+len(d.MAQuestions)+len(d.MCQuestions)+
+				len(d.SAQuestions)+len(d.ESQuestions)+len(d.MTQuestions)+len(d.NRQuestions))
+		allQs = append(allQs, d.TFQuestions...)
+		allQs = append(allQs, d.MAQuestions...)
+		allQs = append(allQs, d.MCQuestions...)
+		allQs = append(allQs, d.SAQuestions...)
+		allQs = append(allQs, d.ESQuestions...)
+		allQs = append(allQs, d.MTQuestions...)
+		allQs = append(allQs, d.NRQuestions...)
 		for i, q := range allQs {
 			if q.Number != i+1 {
 				result.Errors = append(result.Errors, fmt.Sprintf("question %d: expected number %d, got %d", i+1, i+1, q.Number))
