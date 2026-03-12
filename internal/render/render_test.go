@@ -245,6 +245,26 @@ func TestParseDraft_RoundTrip_NewTypes(t *testing.T) {
 	}
 }
 
+func TestParseDraft_NonNumericQuestionLine(t *testing.T) {
+	// A line with ". " but a non-numeric prefix should be silently ignored
+	md := "# Quiz\n\n## MC\n\nab. Not a real question\n"
+	draft, err := render.ParseDraft(md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(draft.MCQuestions) != 0 {
+		t.Errorf("expected 0 MC questions for non-numeric question line, got %d", len(draft.MCQuestions))
+	}
+}
+
+func TestExecuteTemplate_ExecuteError(t *testing.T) {
+	// Calling a non-function value triggers an execute-time error
+	_, err := render.ExecuteTemplate("{{call .}}", 42)
+	if err == nil {
+		t.Fatal("expected error when calling a non-function value in template")
+	}
+}
+
 func TestExecuteTemplate_Valid(t *testing.T) {
 	tests := []struct {
 		name     string

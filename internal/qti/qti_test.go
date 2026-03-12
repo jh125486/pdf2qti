@@ -1,6 +1,7 @@
 package qti_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -290,12 +291,14 @@ func TestBuildAssessment_NRQuestion_ExactMatch(t *testing.T) {
 }
 
 func TestBuildAssessment_NRQuestion_WithTolerance(t *testing.T) {
+	var answer float64 = 3.14
+	var tolerance float64 = 0.005
 	draft := &render.QuizDraft{
 		Title: "NR Test Tolerance",
 		NRQuestions: []render.Question{
 			{Number: 1, Text: "What is π to 2 decimal places?", Options: []render.Option{
-				{Text: "3.14", IsCorrect: true},
-				{Text: "0.005", IsCorrect: false},
+				{Text: fmt.Sprintf("%g", answer), IsCorrect: true},
+				{Text: fmt.Sprintf("%g", tolerance), IsCorrect: false},
 			}},
 		},
 	}
@@ -308,11 +311,13 @@ func TestBuildAssessment_NRQuestion_WithTolerance(t *testing.T) {
 	if cond.ConditionVar.VarGTE == nil || cond.ConditionVar.VarLTE == nil {
 		t.Fatal("expected VarGTE and VarLTE for NR with tolerance")
 	}
-	if cond.ConditionVar.VarGTE.Value != "3.1350000000000002" {
-		t.Errorf("expected lower bound 3.1350000000000002, got %q", cond.ConditionVar.VarGTE.Value)
+	wantLo := fmt.Sprintf("%g", answer-tolerance)
+	wantHi := fmt.Sprintf("%g", answer+tolerance)
+	if cond.ConditionVar.VarGTE.Value != wantLo {
+		t.Errorf("expected lower bound %q, got %q", wantLo, cond.ConditionVar.VarGTE.Value)
 	}
-	if cond.ConditionVar.VarLTE.Value != "3.145" {
-		t.Errorf("expected upper bound 3.145, got %q", cond.ConditionVar.VarLTE.Value)
+	if cond.ConditionVar.VarLTE.Value != wantHi {
+		t.Errorf("expected upper bound %q, got %q", wantHi, cond.ConditionVar.VarLTE.Value)
 	}
 }
 
@@ -380,8 +385,89 @@ func TestMarshal_AllTypes(t *testing.T) {
 	}
 }
 
+func TestBuildAssessment_TFQuestion_NoCorrectOption(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "TF No Correct",
+		TFQuestions: []render.Question{
+			{Number: 1, Text: "True or false?", Options: []render.Option{
+				{Text: "True", IsCorrect: false},
+				{Text: "False", IsCorrect: false},
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for TF question with no correct option")
+	}
+}
+
+func TestBuildAssessment_MAQuestion_NoCorrectOption(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "MA No Correct",
+		MAQuestions: []render.Question{
+			{Number: 1, Text: "Select all correct?", Options: []render.Option{
+				{Text: "A", IsCorrect: false},
+				{Text: "B", IsCorrect: false},
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for MA question with no correct option")
+	}
+}
+
+func TestBuildAssessment_NRQuestion_InvalidAnswerValue(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "NR Invalid Answer",
+		NRQuestions: []render.Question{
+			{Number: 1, Text: "What?", Options: []render.Option{
+				{Text: "not-a-number", IsCorrect: true},
+				{Text: "0.5", IsCorrect: false}, // tolerance present → triggers range path
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for non-numeric NR answer value")
+	}
+}
+
+func TestBuildAssessment_NRQuestion_NoAnswerValue(t *testing.T) {
+	// All options are tolerance-only (IsCorrect=false) → answerVal remains ""
+	draft := &render.QuizDraft{
+		Title: "NR No Answer Value",
+		NRQuestions: []render.Question{
+			{Number: 1, Text: "What?", Options: []render.Option{
+				{Text: "0.5", IsCorrect: false},
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for NR question with no correct answer value")
+	}
+}
+
+func TestBuildAssessment_NRQuestion_InvalidTolerance(t *testing.T) {
+	draft := &render.QuizDraft{
+		Title: "NR Invalid Tolerance",
+		NRQuestions: []render.Question{
+			{Number: 1, Text: "What?", Options: []render.Option{
+				{Text: "42", IsCorrect: true},
+				{Text: "not-a-number", IsCorrect: false}, // bad tolerance
+			}},
+		},
+	}
+	_, err := qti.BuildAssessment(draft)
+	if err == nil {
+		t.Fatal("expected error for non-numeric NR tolerance value")
+	}
+}
+
 func TestBuildAssessment_NoCorrectOption(t *testing.T) {
 	draft := &render.QuizDraft{
+		Title: "No Correct",
 		MCQuestions: []render.Question{
 			{Number: 1, Text: "Question?", Options: []render.Option{
 				{Text: "A", IsCorrect: false},
