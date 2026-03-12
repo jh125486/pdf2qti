@@ -158,29 +158,29 @@ Questions are grouped into typed sections identified by `## <TYPE>` headings.
 ## TF
 
 1. The capital of France is Paris.
-   [*] True
-   [ ] False
+[*] True
+[ ] False
 
 ## MA
 
 2. Which of the following are primary colors?
-   [*] Red
-   [ ] Green
-   [*] Blue
-   [ ] Purple
+[*] Red
+[ ] Green
+[*] Blue
+[ ] Purple
 
 ## MC
 
 3. What is the result of 2 + 2?
-   [ ] 3
-   [*] 4
-   [ ] 5
-   [ ] 6
+[ ] 3
+[*] 4
+[ ] 5
+[ ] 6
 
 ## SA
 
 4. The chemical symbol for water is ___.
-   [=] H2O
+[=] H2O
 
 ## ES
 
@@ -189,15 +189,15 @@ Questions are grouped into typed sections identified by `## <TYPE>` headings.
 ## MT
 
 6. Match each country to its capital.
-   [>] France = Paris
-   [>] Germany = Berlin
-   [>] Spain = Madrid
+[>] France = Paris
+[>] Germany = Berlin
+[>] Spain = Madrid
 
 ## NR
 
 7. What is the value of π rounded to two decimal places?
-   [=] 3.14
-   [~] 0.005
+[=] 3.14
+[~] 0.005
 ```
 
 ## Development

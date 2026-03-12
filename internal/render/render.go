@@ -92,9 +92,9 @@ func renderQuestion(buf *bytes.Buffer, q Question) {
 	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
 	for _, o := range q.Options {
 		if o.IsCorrect {
-			fmt.Fprintf(buf, "   [*] %s\n", o.Text)
+			fmt.Fprintf(buf, "[*] %s\n", o.Text)
 		} else {
-			fmt.Fprintf(buf, "   [ ] %s\n", o.Text)
+			fmt.Fprintf(buf, "[ ] %s\n", o.Text)
 		}
 	}
 	fmt.Fprintln(buf)
@@ -103,7 +103,7 @@ func renderQuestion(buf *bytes.Buffer, q Question) {
 func renderSAQuestion(buf *bytes.Buffer, q Question) {
 	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
 	for _, o := range q.Options {
-		fmt.Fprintf(buf, "   [=] %s\n", o.Text)
+		fmt.Fprintf(buf, "[=] %s\n", o.Text)
 	}
 	fmt.Fprintln(buf)
 }
@@ -116,7 +116,7 @@ func renderESQuestion(buf *bytes.Buffer, q Question) {
 func renderMTQuestion(buf *bytes.Buffer, q Question) {
 	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
 	for _, o := range q.Options {
-		fmt.Fprintf(buf, "   [>] %s = %s\n", o.Text, o.MatchText)
+		fmt.Fprintf(buf, "[>] %s = %s\n", o.Text, o.MatchText)
 	}
 	fmt.Fprintln(buf)
 }
@@ -125,9 +125,9 @@ func renderNRQuestion(buf *bytes.Buffer, q Question) {
 	fmt.Fprintf(buf, "%d. %s\n", q.Number, q.Text)
 	for _, o := range q.Options {
 		if o.IsCorrect {
-			fmt.Fprintf(buf, "   [=] %s\n", o.Text)
+			fmt.Fprintf(buf, "[=] %s\n", o.Text)
 		} else {
-			fmt.Fprintf(buf, "   [~] %s\n", o.Text)
+			fmt.Fprintf(buf, "[~] %s\n", o.Text)
 		}
 	}
 	fmt.Fprintln(buf)
@@ -140,11 +140,11 @@ func renderNRQuestion(buf *bytes.Buffer, q Question) {
 //	optional description
 //	## TF / ## MA / ## MC / ## SA / ## ES / ## MT / ## NR
 //	N. Question text
-//	   [*] correct          (TF/MA/MC)
-//	   [ ] wrong            (TF/MA/MC)
-//	   [=] answer           (SA: acceptable answer; NR: numeric value)
-//	   [~] tolerance        (NR: tolerance around the numeric answer)
-//	   [>] left = right     (MT: matching pair)
+//	[*] correct          (TF/MA/MC)
+//	[ ] wrong            (TF/MA/MC)
+//	[=] answer           (SA: acceptable answer; NR: numeric value)
+//	[~] tolerance        (NR: tolerance around the numeric answer)
+//	[>] left = right     (MT: matching pair)
 func ParseDraft(md string) (*QuizDraft, error) {
 	d := &QuizDraft{}
 	lines := strings.Split(md, "\n")

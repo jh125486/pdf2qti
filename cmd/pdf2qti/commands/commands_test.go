@@ -17,9 +17,9 @@ const validQuizMD = `# Test Quiz
 ## MC
 
 1. What is 2+2?
-   [ ] 3
-   [*] 4
-   [ ] 5
+[ ] 3
+[*] 4
+[ ] 5
 `
 
 // invalidQuizMD has a question with no correct answer → BuildAssessment error.
@@ -28,8 +28,8 @@ const invalidQuizMD = `# Test Quiz
 ## MC
 
 1. What is 2+2?
-   [ ] 3
-   [ ] 4
+[ ] 3
+[ ] 4
 `
 
 // validationFailQuizMD has sequential numbering errors.
@@ -38,7 +38,7 @@ const validationFailQuizMD = `# Test Quiz
 ## MC
 
 2. What is 2+2?
-   [*] 4
+[*] 4
 `
 
 func testConfig(t *testing.T, outDir, pdfPath string) *config.Config {
