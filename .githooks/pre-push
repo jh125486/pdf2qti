@@ -1,3 +1,4 @@
 #!/bin/sh
+# Runs all checks (format, vet, lint, test) before pushing.
 set -e
 make check

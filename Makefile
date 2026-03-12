@@ -5,7 +5,7 @@
 BINARY_NAME          := pdf2qti
 BUILD_DIR            := bin
 CMD                  := ./cmd/pdf2qti
-GOLANGCI_LINT_VERSION := $(shell grep 'github.com/golangci/golangci-lint ' golangci-lint.mod | awk '{print $$2}')
+GOLANGCI_LINT_VERSION := $(shell go list -m -modfile=golangci-lint.mod -f '{{.Version}}' github.com/golangci/golangci-lint/v2)
 
 ## help: Show this help message
 help:
@@ -15,6 +15,7 @@ help:
 ## init: Initialize complete development environment (git hooks)
 init:
 	@echo "Initializing development environment..."
+	@mkdir -p .git/hooks
 	@cp .githooks/pre-push .git/hooks/pre-push
 	@chmod +x .git/hooks/pre-push
 	@echo "Development environment initialized ✓"
@@ -42,12 +43,12 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
-	@go run github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --fix ./...
+	@go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --fix ./...
 
 ## lint-update: Update golangci-lint to latest version
 lint-update:
 	@echo "Updating golangci-lint..."
-	@go get -modfile=golangci-lint.mod github.com/golangci/golangci-lint@latest
+	@go get -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2@latest
 
 vuln-check:
 	@echo "Checking for vulnerabilities..."
