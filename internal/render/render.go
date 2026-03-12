@@ -31,7 +31,7 @@ type Option struct {
 }
 
 // RenderDraft renders a QuizDraft to markdown format.
-func RenderDraft(d *QuizDraft) (string, error) {
+func RenderDraft(d *QuizDraft) (string, error) { //nolint:revive // stutter is acceptable for exported package function
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "# %s\n\n", d.Title)
 	if d.Description != "" {
@@ -80,7 +80,7 @@ func renderQuestion(buf *bytes.Buffer, q Question) {
 //	N. Question text
 //	   [*] correct
 //	   [ ] wrong
-func ParseDraft(md string) (*QuizDraft, error) {
+func ParseDraft(md string) (*QuizDraft, error) { //nolint:gocyclo,revive // complex parser; stutter is acceptable for exported package function
 	d := &QuizDraft{}
 	lines := strings.Split(md, "\n")
 	var section string
