@@ -14,14 +14,14 @@ import (
 
 func sampleContext() *distill.DistilledContext {
 	return &distill.DistilledContext{
-		SourceID:        "ch21",
-		Book:            "TLPI",
-		Chapter:         21,
-		ModuleName:      "Module 04: Signals",
-		Overview:        "<p>In this module, we examine signals.</p>",
-		KeyConcepts:     []string{"SIGINT", "sigaction()", "signal mask"},
+		SourceID:         "ch21",
+		Book:             "TLPI",
+		Chapter:          21,
+		ModuleName:       "Module 04: Signals",
+		Overview:         "<p>In this module, we examine signals.</p>",
+		KeyConcepts:      []string{"SIGINT", "sigaction()", "signal mask"},
 		MaterialOverview: "Chapter 21 covers signal handling in Linux.",
-		TeachingNotes:   "Emphasize async-signal-safety.",
+		TeachingNotes:    "Emphasize async-signal-safety.",
 		Objectives: []distill.Objective{
 			{CO: 1, Text: "Write robust software."},
 			{CO: 2, Text: "Implement multi-process applications."},

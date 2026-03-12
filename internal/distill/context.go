@@ -16,16 +16,16 @@ type Objective struct {
 
 // DistilledContext holds the structured output produced by the distill command.
 type DistilledContext struct {
-	SourceID        string      `json:"source_id"`
-	Book            string      `json:"book"`
-	Chapter         int         `json:"chapter"`
-	ModuleName      string      `json:"module_name"`
-	Text            string      `json:"text"`
-	Overview        string      `json:"overview"`
-	KeyConcepts     []string    `json:"key_concepts"`
-	MaterialOverview string     `json:"material_overview"`
-	TeachingNotes   string      `json:"teaching_notes"`
-	Objectives      []Objective `json:"objectives"`
+	SourceID         string      `json:"source_id"`
+	Book             string      `json:"book"`
+	Chapter          int         `json:"chapter"`
+	ModuleName       string      `json:"module_name"`
+	Text             string      `json:"text"`
+	Overview         string      `json:"overview"`
+	KeyConcepts      []string    `json:"key_concepts"`
+	MaterialOverview string      `json:"material_overview"`
+	TeachingNotes    string      `json:"teaching_notes"`
+	Objectives       []Objective `json:"objectives"`
 }
 
 // Load reads and parses a DistilledContext from a JSON file at path.

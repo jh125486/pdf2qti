@@ -25,12 +25,12 @@ func (s *stubLLM) Complete(_ context.Context, _ string) (string, error) {
 
 func validLLMResponse() string {
 	dc := distill.DistilledContext{
-		ModuleName:      "Signals",
-		Text:            "thick distilled text",
-		Overview:        "<p>We examine signals.</p>",
-		KeyConcepts:     []string{"SIGINT", "sigaction()"},
+		ModuleName:       "Signals",
+		Text:             "thick distilled text",
+		Overview:         "<p>We examine signals.</p>",
+		KeyConcepts:      []string{"SIGINT", "sigaction()"},
 		MaterialOverview: "Chapter covers signals.",
-		TeachingNotes:   "Teach why, not what.",
+		TeachingNotes:    "Teach why, not what.",
 		Objectives: []distill.Objective{
 			{CO: 1, Text: "Write robust software."},
 		},
@@ -98,15 +98,15 @@ func TestLoad_Existing(t *testing.T) {
 	path := filepath.Join(dir, "ctx.json")
 
 	dc := &distill.DistilledContext{
-		SourceID:        "ch21",
-		Book:            "TLPI",
-		Chapter:         21,
-		ModuleName:      "Signals",
-		Text:            "some text",
-		Overview:        "<p>We cover signals.</p>",
-		KeyConcepts:     []string{"SIGINT"},
+		SourceID:         "ch21",
+		Book:             "TLPI",
+		Chapter:          21,
+		ModuleName:       "Signals",
+		Text:             "some text",
+		Overview:         "<p>We cover signals.</p>",
+		KeyConcepts:      []string{"SIGINT"},
 		MaterialOverview: "Intro to signals.",
-		TeachingNotes:   "Focus on why.",
+		TeachingNotes:    "Focus on why.",
 		Objectives: []distill.Objective{
 			{CO: 1, Text: "Write software."},
 		},

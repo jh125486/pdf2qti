@@ -2,9 +2,10 @@
 .DEFAULT_GOAL := help
 
 # Variables
-BINARY_NAME := pdf2qti
-BUILD_DIR   := bin
-CMD         := ./cmd/pdf2qti
+BINARY_NAME          := pdf2qti
+BUILD_DIR            := bin
+CMD                  := ./cmd/pdf2qti
+GOLANGCI_LINT_VERSION := $(shell grep 'github.com/golangci/golangci-lint ' golangci-lint.mod | awk '{print $$2}')
 
 ## help: Show this help message
 help:
@@ -41,7 +42,7 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
-	@go run -modfile=golangci-lint.mod github.com/golangci/golangci-lint/cmd/golangci-lint run --fix ./...
+	@go run github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --fix ./...
 
 ## lint-update: Update golangci-lint to latest version
 lint-update:
