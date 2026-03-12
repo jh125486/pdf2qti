@@ -34,7 +34,7 @@ tidy:
 	@echo "Go modules tidied ✓"
 
 ## static: Run all linting tools
-static: tidy vet lint vuln-check
+static: tidy vet lint vuln-check modernize
 	@echo "All linting completed ✓"
 
 ## lint: Run golangci-lint with auto-fix enabled
@@ -50,6 +50,10 @@ lint-update:
 vuln-check:
 	@echo "Checking for vulnerabilities..."
 	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+modernize:
+	@echo "Running modernize analysis..."
+	@go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest -fix -test ./...
 
 outdated:
 	@echo "Checking for outdated direct dependencies..."
