@@ -14,7 +14,8 @@ help:
 ## init: Initialize complete development environment (git hooks)
 init:
 	@echo "Initializing development environment..."
-	@go install golang.org/x/tools/cmd/goimports@latest
+	@cp .githooks/pre-push .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
 	@echo "Development environment initialized ✓"
 
 deps-update: lint-update
@@ -40,12 +41,12 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
-	@golangci-lint run --fix ./...
+	@go run -modfile=golangci-lint.mod github.com/golangci/golangci-lint/cmd/golangci-lint run --fix ./...
 
 ## lint-update: Update golangci-lint to latest version
 lint-update:
 	@echo "Updating golangci-lint..."
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	@go get -modfile=golangci-lint.mod github.com/golangci/golangci-lint@latest
 
 vuln-check:
 	@echo "Checking for vulnerabilities..."
@@ -63,7 +64,6 @@ outdated:
 fmt:
 	@echo "Formatting code..."
 	@go fmt ./...
-	@go run golang.org/x/tools/cmd/goimports@latest -w .
 
 ## vet: Run go vet
 vet:
