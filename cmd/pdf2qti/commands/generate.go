@@ -8,7 +8,7 @@ import (
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
-	"github.com/jh125486/pdf2qti/internal/extract"
+	"github.com/jh125486/pdf2qti/internal/distill"
 	"github.com/jh125486/pdf2qti/internal/generate"
 	"github.com/jh125486/pdf2qti/internal/render"
 )
@@ -41,17 +41,14 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 		return fmt.Errorf("create outDir %q: %w", outDir, err)
 	}
 
-	logger.Info("extracting PDF", "source", src.ID, "pdf", src.PDF)
-	text, err := extract.ExtractText(src.PDF)
+	ctxFile := filepath.Join(outDir, src.ID+"_context.json")
+	dc, err := distill.Load(ctxFile)
 	if err != nil {
-		return fmt.Errorf("extract PDF: %w", err)
+		return fmt.Errorf("context not found for %q — run `pdf2qti distill %s` first: %w", src.ID, src.ID, err)
 	}
+	logger.Info("loaded context", "file", ctxFile)
 
-	ctxFile := filepath.Join(outDir, src.ID+"_context.md")
-	if err := os.WriteFile(ctxFile, []byte("# "+src.Name+" Context\n\n"+text+"\n"), 0o644); err != nil {
-		return fmt.Errorf("write context file: %w", err)
-	}
-	logger.Info("wrote context", "file", ctxFile)
+	text := dc.Text
 
 	gen := generate.New(cfg.EffectiveGeneration(src))
 	q := cfg.EffectiveQuiz(src)
@@ -83,13 +80,15 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 		mcQs[i].Number = offset + i + 1
 	}
 
-	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter}
+	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter, "module_name": dc.ModuleName}
 	title, err := render.ExecuteTemplate(q.TitleTemplate, titleData)
 	if err != nil || title == "" {
-		title = src.Name
-	}
-	if title == "" {
-		title = src.ID
+		for _, candidate := range []string{dc.ModuleName, src.Name, src.ID} {
+			if candidate != "" {
+				title = candidate
+				break
+			}
+		}
 	}
 	desc := ""
 	if q.DescriptionTemplate != "" {
