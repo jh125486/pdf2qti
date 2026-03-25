@@ -43,7 +43,7 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
-	@go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --fix ./...
+	@go run -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix ./...
 
 ## lint-update: Update golangci-lint to latest version
 lint-update:
