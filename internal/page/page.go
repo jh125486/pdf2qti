@@ -38,15 +38,15 @@ func Render(templatePath string, dc *distill.DistilledContext, vars map[string]s
 // Extra vars override context keys if names collide.
 func buildData(dc *distill.DistilledContext, vars map[string]string) map[string]any {
 	data := map[string]any{
-		"source_id":        dc.SourceID,
-		"book":             dc.Book,
-		"chapter":          dc.Chapter,
-		"module_name":      dc.ModuleName,
-		"overview":         template.HTML(dc.Overview), //nolint:gosec // Overview is intentionally rendered as HTML.
-		"key_concepts":     dc.KeyConcepts,
+		"source_id":         dc.SourceID,
+		"book":              dc.Book,
+		"chapter":           dc.Chapter,
+		"module_name":       dc.ModuleName,
+		"overview":          template.HTML(dc.Overview), //nolint:gosec // Overview is intentionally rendered as HTML.
+		"key_concepts":      dc.KeyConcepts,
 		"material_overview": dc.MaterialOverview,
-		"teaching_notes":   dc.TeachingNotes,
-		"objectives":       dc.Objectives,
+		"teaching_notes":    dc.TeachingNotes,
+		"objectives":        dc.Objectives,
 	}
 	for k, v := range vars {
 		data[k] = v

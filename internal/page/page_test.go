@@ -14,14 +14,14 @@ import (
 
 func sampleContext() *distill.DistilledContext {
 	return &distill.DistilledContext{
-		SourceID:        "ch21",
-		Book:            "TLPI",
-		Chapter:         21,
-		ModuleName:      "Module 04: Signals",
-		Overview:        "<p>In this module, we examine signals.</p>",
-		KeyConcepts:     []string{"SIGINT", "sigaction()", "signal mask"},
+		SourceID:         "ch21",
+		Book:             "TLPI",
+		Chapter:          21,
+		ModuleName:       "Module 04: Signals",
+		Overview:         "<p>In this module, we examine signals.</p>",
+		KeyConcepts:      []string{"SIGINT", "sigaction()", "signal mask"},
 		MaterialOverview: "Chapter 21 covers signal handling in Linux.",
-		TeachingNotes:   "Emphasize async-signal-safety.",
+		TeachingNotes:    "Emphasize async-signal-safety.",
 		Objectives: []distill.Objective{
 			{CO: 1, Text: "Write robust software."},
 			{CO: 2, Text: "Implement multi-process applications."},
@@ -78,7 +78,7 @@ func TestRender_OverviewNotEscaped(t *testing.T) {
 	dc := sampleContext()
 	dc.Overview = "<p>We examine <code>SIGINT</code>.</p>"
 	tmplPath := filepath.Join(t.TempDir(), "tmpl.html")
-	if err := os.WriteFile(tmplPath, []byte(`{{.overview}}`), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(`{{.overview}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -97,7 +97,7 @@ func TestRender_OverviewNotEscaped(t *testing.T) {
 
 func TestRender_BadTemplateSyntax(t *testing.T) {
 	tmplPath := filepath.Join(t.TempDir(), "bad.html")
-	if err := os.WriteFile(tmplPath, []byte(`{{.foo`), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(`{{.foo`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	err := page.Render(tmplPath, sampleContext(), nil, &bytes.Buffer{})
@@ -132,7 +132,7 @@ func TestRender_ToFile(t *testing.T) {
 	if err := page.Render("testdata/materials.html.tmpl", dc, nil, f); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	data, err := os.ReadFile(outPath)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestRender_VarsOverrideContext(t *testing.T) {
 	// Override the module_name via vars
 	vars := map[string]string{"module_name": "Custom Name"}
 	tmplPath := filepath.Join(t.TempDir(), "tmpl.html")
-	if err := os.WriteFile(tmplPath, []byte(`{{.module_name}}`), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(`{{.module_name}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -164,7 +164,7 @@ func TestRender_VarsAreHTMLEscaped(t *testing.T) {
 	dc := sampleContext()
 	vars := map[string]string{"unsafe": "<script>alert(1)</script>"}
 	tmplPath := filepath.Join(t.TempDir(), "tmpl.html")
-	if err := os.WriteFile(tmplPath, []byte(`{{.unsafe}}`), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(`{{.unsafe}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
@@ -182,7 +182,7 @@ func TestRender_NilWriterUsesStdout(t *testing.T) {
 	dc := sampleContext()
 	// Use a template that writes nothing to avoid stdout noise
 	tmplPath := filepath.Join(t.TempDir(), "empty.html")
-	if err := os.WriteFile(tmplPath, []byte(``), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(``), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := page.Render(tmplPath, dc, nil, nil); err != nil {
@@ -196,7 +196,7 @@ func TestBuildData_OverviewIsTemplateHTML(t *testing.T) {
 	vars := map[string]string{}
 	tmplPath := filepath.Join(t.TempDir(), "tmpl.html")
 	// Template that directly renders overview — must NOT be escaped
-	if err := os.WriteFile(tmplPath, []byte(`{{.overview}}`), 0o644); err != nil {
+	if err := os.WriteFile(tmplPath, []byte(`{{.overview}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer

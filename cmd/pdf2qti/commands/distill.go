@@ -67,7 +67,7 @@ func (d *DistillCmd) selectSources(cfg *config.Config) []*config.Source {
 
 func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Source, logger *audit.Logger, llm distill.LLM, force bool) error {
 	outDir := cfg.OutDir(src)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return fmt.Errorf("create outDir %q: %w", outDir, err)
 	}
 

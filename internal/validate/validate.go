@@ -20,7 +20,7 @@ func (r *Result) IsValid() bool {
 }
 
 // ValidateDraft validates a quiz draft against the given validation config.
-func ValidateDraft(d *render.QuizDraft, v config.Validation) *Result {
+func ValidateDraft(d *render.QuizDraft, v config.Validation) *Result { //nolint:revive // stutter is acceptable for exported package function
 	result := &Result{}
 
 	// Check sequential numbering
