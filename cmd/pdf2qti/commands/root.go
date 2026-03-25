@@ -3,6 +3,7 @@ package commands
 
 import (
 	"context"
+	"io"
 	"os"
 
 	"github.com/alecthomas/kong"
@@ -30,4 +31,4 @@ func Execute() error {
 }
 
 // logOutput is the writer used for audit loggers; may be replaced in tests.
-var logOutput = os.Stdout
+var logOutput io.Writer = os.Stdout

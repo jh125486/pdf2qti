@@ -55,6 +55,22 @@ func buildStubQuestion(stage config.Stage, n int) render.Question {
 			{Text: "Option B", IsCorrect: false},
 			{Text: "Option C", IsCorrect: false},
 		}
+	case config.StageSA:
+		q.Options = []render.Option{
+			{Text: "Sample answer", IsCorrect: true},
+		}
+	case config.StageES:
+		// Essay questions have no predefined options.
+	case config.StageMT:
+		q.Options = []render.Option{
+			{Text: "Item A", IsCorrect: true, MatchText: "Match 1"},
+			{Text: "Item B", IsCorrect: true, MatchText: "Match 2"},
+			{Text: "Item C", IsCorrect: true, MatchText: "Match 3"},
+		}
+	case config.StageNR:
+		q.Options = []render.Option{
+			{Text: "42", IsCorrect: true},
+		}
 	}
 	return q
 }
