@@ -2,3 +2,10 @@
 # Runs all checks (format, vet, lint, test) before pushing.
 set -e
 make check
+
+# Ensure that running checks did not modify the working tree.
+if ! git diff --quiet; then
+    echo "Error: make check modified the working tree."
+    echo "Please review and commit the changes before pushing."
+    exit 1
+fi
