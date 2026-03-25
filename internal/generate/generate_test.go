@@ -82,6 +82,87 @@ func TestGenerateStage_Zero(t *testing.T) {
 	}
 }
 
+func TestGenerateStage_SA(t *testing.T) {
+	g := generate.New(config.Generation{})
+	qs, err := g.GenerateStage(context.Background(), config.StageSA, "some text", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(qs) != 2 {
+		t.Errorf("expected 2 SA questions, got %d", len(qs))
+	}
+	for _, q := range qs {
+		if len(q.Options) == 0 {
+			t.Error("SA question should have at least one accepted answer option")
+		}
+		for _, o := range q.Options {
+			if !o.IsCorrect {
+				t.Error("SA answer options should be marked correct (IsCorrect=true)")
+			}
+		}
+	}
+}
+
+func TestGenerateStage_ES(t *testing.T) {
+	g := generate.New(config.Generation{})
+	qs, err := g.GenerateStage(context.Background(), config.StageES, "some text", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(qs) != 2 {
+		t.Errorf("expected 2 ES questions, got %d", len(qs))
+	}
+	for _, q := range qs {
+		// Essay questions have no options
+		if len(q.Options) != 0 {
+			t.Errorf("ES question should have no options, got %d", len(q.Options))
+		}
+	}
+}
+
+func TestGenerateStage_MT(t *testing.T) {
+	g := generate.New(config.Generation{})
+	qs, err := g.GenerateStage(context.Background(), config.StageMT, "some text", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(qs) != 2 {
+		t.Errorf("expected 2 MT questions, got %d", len(qs))
+	}
+	for _, q := range qs {
+		if len(q.Options) == 0 {
+			t.Error("MT question should have matching pairs")
+		}
+		for _, o := range q.Options {
+			if o.MatchText == "" {
+				t.Error("MT option should have non-empty MatchText")
+			}
+		}
+	}
+}
+
+func TestGenerateStage_NR(t *testing.T) {
+	g := generate.New(config.Generation{})
+	qs, err := g.GenerateStage(context.Background(), config.StageNR, "some text", 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(qs) != 2 {
+		t.Errorf("expected 2 NR questions, got %d", len(qs))
+	}
+	for _, q := range qs {
+		hasAnswer := false
+		for _, o := range q.Options {
+			if o.IsCorrect {
+				hasAnswer = true
+			}
+		}
+		if !hasAnswer {
+			t.Error("NR question should have at least one correct answer value")
+		}
+	}
+}
+
 func TestNew(t *testing.T) {
 	cfg := config.Generation{
 		Provider: "openai",
