@@ -291,8 +291,8 @@ func TestBuildAssessment_NRQuestion_ExactMatch(t *testing.T) {
 }
 
 func TestBuildAssessment_NRQuestion_WithTolerance(t *testing.T) {
-	var answer float64 = 3.14
-	var tolerance float64 = 0.005
+	var answer = 3.14
+	var tolerance = 0.005
 	draft := &render.QuizDraft{
 		Title: "NR Test Tolerance",
 		NRQuestions: []render.Question{

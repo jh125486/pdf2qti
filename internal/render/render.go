@@ -43,46 +43,25 @@ func RenderDraft(d *QuizDraft) (string, error) { //nolint:revive // stutter is a
 		fmt.Fprintf(&buf, "%s\n\n", d.Description)
 	}
 
-	if len(d.TFQuestions) > 0 {
-		fmt.Fprintf(&buf, "## TF\n\n")
-		for _, q := range d.TFQuestions {
-			renderQuestion(&buf, q)
-		}
+	type sectionDef struct {
+		name   string
+		qs     []Question
+		render func(*bytes.Buffer, Question)
 	}
-	if len(d.MAQuestions) > 0 {
-		fmt.Fprintf(&buf, "## MA\n\n")
-		for _, q := range d.MAQuestions {
-			renderQuestion(&buf, q)
-		}
-	}
-	if len(d.MCQuestions) > 0 {
-		fmt.Fprintf(&buf, "## MC\n\n")
-		for _, q := range d.MCQuestions {
-			renderQuestion(&buf, q)
-		}
-	}
-	if len(d.SAQuestions) > 0 {
-		fmt.Fprintf(&buf, "## SA\n\n")
-		for _, q := range d.SAQuestions {
-			renderSAQuestion(&buf, q)
-		}
-	}
-	if len(d.ESQuestions) > 0 {
-		fmt.Fprintf(&buf, "## ES\n\n")
-		for _, q := range d.ESQuestions {
-			renderESQuestion(&buf, q)
-		}
-	}
-	if len(d.MTQuestions) > 0 {
-		fmt.Fprintf(&buf, "## MT\n\n")
-		for _, q := range d.MTQuestions {
-			renderMTQuestion(&buf, q)
-		}
-	}
-	if len(d.NRQuestions) > 0 {
-		fmt.Fprintf(&buf, "## NR\n\n")
-		for _, q := range d.NRQuestions {
-			renderNRQuestion(&buf, q)
+	for _, s := range []sectionDef{
+		{"TF", d.TFQuestions, renderQuestion},
+		{"MA", d.MAQuestions, renderQuestion},
+		{"MC", d.MCQuestions, renderQuestion},
+		{"SA", d.SAQuestions, renderSAQuestion},
+		{"ES", d.ESQuestions, renderESQuestion},
+		{"MT", d.MTQuestions, renderMTQuestion},
+		{"NR", d.NRQuestions, renderNRQuestion},
+	} {
+		if len(s.qs) > 0 {
+			fmt.Fprintf(&buf, "## %s\n\n", s.name)
+			for _, q := range s.qs {
+				s.render(&buf, q)
+			}
 		}
 	}
 	return buf.String(), nil
@@ -145,7 +124,7 @@ func renderNRQuestion(buf *bytes.Buffer, q Question) {
 //	[=] answer           (SA: acceptable answer; NR: numeric value)
 //	[~] tolerance        (NR: tolerance around the numeric answer)
 //	[>] left = right     (MT: matching pair)
-func ParseDraft(md string) (*QuizDraft, error) {
+func ParseDraft(md string) (*QuizDraft, error) { //nolint:gocyclo // parsing logic requires multiple branches
 	d := &QuizDraft{}
 	lines := strings.Split(md, "\n")
 	var section string
@@ -231,23 +210,23 @@ func parseQuestionLine(s string) (Question, bool) {
 }
 
 func parseOptionLine(s string) (Option, bool) {
-	if strings.HasPrefix(s, "[*] ") {
-		return Option{Text: strings.TrimPrefix(s, "[*] "), IsCorrect: true}, true
+	if after, ok := strings.CutPrefix(s, "[*] "); ok {
+		return Option{Text: after, IsCorrect: true}, true
 	}
-	if strings.HasPrefix(s, "[ ] ") {
-		return Option{Text: strings.TrimPrefix(s, "[ ] "), IsCorrect: false}, true
+	if after, ok := strings.CutPrefix(s, "[ ] "); ok {
+		return Option{Text: after, IsCorrect: false}, true
 	}
-	if strings.HasPrefix(s, "[=] ") {
-		return Option{Text: strings.TrimPrefix(s, "[=] "), IsCorrect: true}, true
+	if after, ok := strings.CutPrefix(s, "[=] "); ok {
+		return Option{Text: after, IsCorrect: true}, true
 	}
-	if strings.HasPrefix(s, "[~] ") {
-		return Option{Text: strings.TrimPrefix(s, "[~] "), IsCorrect: false}, true
+	if after, ok := strings.CutPrefix(s, "[~] "); ok {
+		return Option{Text: after, IsCorrect: false}, true
 	}
-	if strings.HasPrefix(s, "[>] ") {
-		pair := strings.TrimPrefix(s, "[>] ")
-		idx := strings.Index(pair, " = ")
-		if idx >= 0 {
-			return Option{Text: pair[:idx], IsCorrect: true, MatchText: pair[idx+3:]}, true
+	if after, ok := strings.CutPrefix(s, "[>] "); ok {
+		pair := after
+		before, after, ok := strings.Cut(pair, " = ")
+		if ok {
+			return Option{Text: before, IsCorrect: true, MatchText: after}, true
 		}
 	}
 	return Option{}, false

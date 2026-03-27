@@ -22,16 +22,6 @@ const validQuizMD = `# Test Quiz
 [ ] 5
 `
 
-// invalidQuizMD has a question with no correct answer → BuildAssessment error.
-const invalidQuizMD = `# Test Quiz
-
-## MC
-
-1. What is 2+2?
-[ ] 3
-[ ] 4
-`
-
 // validationFailQuizMD has sequential numbering errors.
 const validationFailQuizMD = `# Test Quiz
 
@@ -65,16 +55,27 @@ func silentLogger() *audit.Logger {
 	return audit.New(io.Discard)
 }
 
+// writeContextFile writes a minimal distilled context JSON for "src01" into dir.
+// This satisfies the distill.Load call inside runGenerateSource.
+func writeContextFile(t *testing.T, dir string) {
+	t.Helper()
+	const minCtx = `{"source_id":"","module_name":"","text":"","overview":"","key_concepts":[],"material_overview":"","teaching_notes":"","objectives":[]}`
+	path := filepath.Join(dir, "src01_context.json")
+	if err := os.WriteFile(path, []byte(minCtx), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ── runApproveSource ──────────────────────────────────────────────────────────
 
 func TestRunApproveSource_Success(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,7 +108,7 @@ func TestRunApproveSource_BuildError(t *testing.T) {
 	// Quiz file with no title → qti.BuildAssessment returns error
 	noTitleMD := "## MC\n\n1. What?\n   [*] A\n"
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(noTitleMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(noTitleMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +126,7 @@ func TestRunApproveSource_BuildError(t *testing.T) {
 func TestRunValidateSource_Success(t *testing.T) {
 	dir := t.TempDir()
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +156,7 @@ func TestRunValidateSource_MissingFile(t *testing.T) {
 func TestRunValidateSource_ValidationFailure(t *testing.T) {
 	dir := t.TempDir()
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validationFailQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validationFailQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,9 +177,10 @@ func TestRunValidateSource_ValidationFailure(t *testing.T) {
 func TestRunGenerateSource_Success(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	src := &cfg.Sources[0]
@@ -196,18 +198,15 @@ func TestRunGenerateSource_Success(t *testing.T) {
 	if _, err := os.Stat(quizFile); err != nil {
 		t.Errorf("expected quiz draft file to be created: %v", err)
 	}
-	ctxFile := filepath.Join(dir, "src01_context.md")
-	if _, err := os.Stat(ctxFile); err != nil {
-		t.Errorf("expected context file to be created: %v", err)
-	}
 }
 
 func TestRunGenerateSource_SkipApprove(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	src := &cfg.Sources[0]
@@ -230,9 +229,10 @@ func TestRunGenerateSource_SkipApprove(t *testing.T) {
 func TestRunGenerateSource_OpenReview(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	// Enable open-review so that branch is exercised
@@ -263,9 +263,10 @@ func TestRunGenerateSource_MissingPDF(t *testing.T) {
 func TestRunGenerateSource_DescriptionTemplate(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	cfg.Defaults.Quiz.DescriptionTemplate = "Chapter {{.chapter}} description"
@@ -283,9 +284,10 @@ func TestRunGenerateSource_DescriptionTemplate(t *testing.T) {
 func TestRunGenerateSource_BadDescriptionTemplate(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	// Bad template will error at execute; generate should log and continue
@@ -305,16 +307,16 @@ func TestRunGenerateSource_BadDescriptionTemplate(t *testing.T) {
 func TestRunGenerateSource_MkdirAllError(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Use a subdirectory as outDir; make dir read-only so MkdirAll fails
 	outDir := filepath.Join(dir, "output")
-	if err := os.Chmod(dir, 0o555); err != nil {
+	if err := os.Chmod(dir, 0o555); err != nil { //nolint:gosec // intentional read-only dir for error testing
 		t.Skip("cannot chmod directory")
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restoring original permissions
 
 	cfg := testConfig(t, outDir, pdfPath)
 	src := &cfg.Sources[0]
@@ -328,15 +330,15 @@ func TestRunGenerateSource_MkdirAllError(t *testing.T) {
 func TestRunGenerateSource_WriteCtxError(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// outDir already exists; make it read-only so WriteFile fails
-	if err := os.Chmod(dir, 0o555); err != nil {
+	if err := os.Chmod(dir, 0o555); err != nil { //nolint:gosec // intentional read-only dir for error testing
 		t.Skip("cannot chmod directory")
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restoring original permissions
 
 	cfg := testConfig(t, dir, pdfPath)
 	src := &cfg.Sources[0]
@@ -350,13 +352,13 @@ func TestRunGenerateSource_WriteCtxError(t *testing.T) {
 func TestRunGenerateSource_WriteQuizError(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a directory at the quiz file path so WriteFile fails with "is a directory"
 	quizPath := filepath.Join(dir, "src01_quiz.md")
-	if err := os.MkdirAll(quizPath, 0o755); err != nil {
+	if err := os.MkdirAll(quizPath, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
@@ -373,19 +375,17 @@ func TestRunGenerateSource_WriteQuizError(t *testing.T) {
 	}
 }
 
-
-
 func TestValidateCmd_Run_ValidationFails(t *testing.T) {
 	dir := t.TempDir()
 	// Write a config file
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"},"validation":{"requireSequentialNumbering":true}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Write a quiz file with validation errors
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validationFailQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validationFailQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,7 +418,7 @@ func TestValidateCmd_Run_SourceError(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// No quiz file → runValidateSource returns error
@@ -439,11 +439,11 @@ func TestValidateCmd_Run_Success(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -464,11 +464,11 @@ func TestApproveCmd_Run_Success(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -505,7 +505,7 @@ func TestApproveCmd_Run_SourceError(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// No quiz file → runApproveSource fails
@@ -527,12 +527,13 @@ func TestApproveCmd_Run_SourceError(t *testing.T) {
 func TestGenerateCmd_Run_Success(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 	cfgFile := filepath.Join(dir, "quiz.json")
 	cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -570,7 +571,7 @@ func TestGenerateCmd_Run_SourceError(t *testing.T) {
 	cfgFile := filepath.Join(dir, "quiz.json")
 	// PDF path that doesn't exist
 	cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + dir + `/nonexistent.pdf"}]}`
-	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -591,9 +592,10 @@ func TestGenerateCmd_Run_SourceError(t *testing.T) {
 func TestRunGenerateSource_TitleFallbackToName(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	// Empty title template → falls back to src.Name
@@ -613,9 +615,10 @@ func TestRunGenerateSource_TitleFallbackToName(t *testing.T) {
 func TestRunGenerateSource_TitleFallbackToID(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
-	if err := os.WriteFile(pdfPath, nil, 0o644); err != nil {
+	if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	writeContextFile(t, dir)
 
 	cfg := testConfig(t, dir, pdfPath)
 	// Empty title template AND empty Name → falls back to src.ID
@@ -637,14 +640,14 @@ func TestRunGenerateSource_TitleFallbackToID(t *testing.T) {
 func TestRunApproveSource_WriteError(t *testing.T) {
 	dir := t.TempDir()
 	quizFile := filepath.Join(dir, "src01_quiz.md")
-	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o644); err != nil {
+	if err := os.WriteFile(quizFile, []byte(validQuizMD), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Make the directory read-only so WriteFile for QTI fails
-	if err := os.Chmod(dir, 0o555); err != nil {
+	if err := os.Chmod(dir, 0o555); err != nil { //nolint:gosec // intentional read-only dir for error testing
 		t.Skip("cannot chmod directory")
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) //nolint:gosec // restoring original permissions
 
 	cfg := testConfig(t, dir, "src01.pdf")
 	src := &cfg.Sources[0]
@@ -654,4 +657,3 @@ func TestRunApproveSource_WriteError(t *testing.T) {
 		t.Fatal("expected error writing QTI to read-only directory")
 	}
 }
-

@@ -1,11 +1,10 @@
-.PHONY: help init deps-update test tidy static lint lint-update vuln-check modernize outdated fmt vet check build clean install
+.PHONY: help init deps-update test tidy check static lint lint-update vuln-check modernize outdated fmt vet check build clean install
 .DEFAULT_GOAL := help
 
 # Variables
 BINARY_NAME          := pdf2qti
 BUILD_DIR            := bin
 CMD                  := ./cmd/pdf2qti
-GOLANGCI_LINT_VERSION := $(shell go list -m -modfile=golangci-lint.mod -f '{{.Version}}' github.com/golangci/golangci-lint/v2)
 
 ## help: Show this help message
 help:
@@ -20,6 +19,8 @@ init:
 	@chmod +x .git/hooks/pre-push
 	@echo "Development environment initialized ✓"
 
+check: static test
+
 deps-update: lint-update
 	@echo "Updating Go modules to latest versions..."
 	@go get -u -t ./...
@@ -29,7 +30,7 @@ deps-update: lint-update
 ## test: Run all tests with coverage
 test:
 	@echo "Running tests..."
-	@go test -v -race -coverprofile=coverage.txt ./...
+	@go test -race -shuffle=on -coverprofile=coverage.txt ./...
 
 tidy:
 	@echo "Tidying Go modules..."
@@ -43,20 +44,20 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
-	@go run -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2/cmd/golangci-lint run --fix ./...
+	@go tool -modfile=golangci-lint.mod golangci-lint run --fix ./...
 
 ## lint-update: Update golangci-lint to latest version
 lint-update:
 	@echo "Updating golangci-lint..."
-	@go get -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2@latest
+	@go get -tool -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
 vuln-check:
 	@echo "Checking for vulnerabilities..."
-	@go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	@go tool govulncheck ./...
 
 modernize:
 	@echo "Running modernize analysis..."
-	@go run golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest -fix -test ./...
+	@go tool modernize -fix -test ./...
 
 outdated:
 	@echo "Checking for outdated direct dependencies..."
