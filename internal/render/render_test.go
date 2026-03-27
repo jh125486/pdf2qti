@@ -164,7 +164,7 @@ func TestRenderDraft_NewTypes(t *testing.T) {
 	}
 }
 
-func TestParseDraft_RoundTrip_NewTypes(t *testing.T) {
+func TestParseDraft_RoundTrip_NewTypes(t *testing.T) { //nolint:gocyclo // comprehensive round-trip test requires many checks
 	original := &render.QuizDraft{
 		Title: "New Types Round Trip",
 		SAQuestions: []render.Question{
@@ -198,11 +198,12 @@ func TestParseDraft_RoundTrip_NewTypes(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	if len(parsed.SAQuestions) != 1 {
+	switch {
+	case len(parsed.SAQuestions) != 1:
 		t.Errorf("SA count: got %d, want 1", len(parsed.SAQuestions))
-	} else if parsed.SAQuestions[0].Text != original.SAQuestions[0].Text {
+	case parsed.SAQuestions[0].Text != original.SAQuestions[0].Text:
 		t.Errorf("SA text: got %q, want %q", parsed.SAQuestions[0].Text, original.SAQuestions[0].Text)
-	} else if len(parsed.SAQuestions[0].Options) != 1 || parsed.SAQuestions[0].Options[0].Text != "Rome" {
+	case len(parsed.SAQuestions[0].Options) != 1 || parsed.SAQuestions[0].Options[0].Text != "Rome":
 		t.Errorf("SA option: got %v", parsed.SAQuestions[0].Options)
 	}
 

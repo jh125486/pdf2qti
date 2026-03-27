@@ -30,7 +30,7 @@ deps-update: lint-update
 ## test: Run all tests with coverage
 test:
 	@echo "Running tests..."
-	@go test -v -race -coverprofile=coverage.txt ./...
+	@go test -race -shuffle=on -coverprofile=coverage.txt ./...
 
 tidy:
 	@echo "Tidying Go modules..."
