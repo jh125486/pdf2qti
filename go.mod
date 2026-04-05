@@ -2,7 +2,7 @@ module github.com/jh125486/pdf2qti
 
 go 1.26
 
-require github.com/alecthomas/kong v1.14.0
+require github.com/alecthomas/kong v1.15.0
 
 require (
 	golang.org/x/mod v0.30.0 // indirect
