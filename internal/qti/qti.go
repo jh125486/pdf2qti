@@ -8,6 +8,13 @@ import (
 	"github.com/jh125486/pdf2qti/internal/render"
 )
 
+const (
+	rCardinalitySingle = "Single"
+	varNameScore       = "SCORE"
+	varTypeDecimal     = "Decimal"
+	actionSet          = "Set"
+)
+
 // Assessment represents a QTI assessment.
 type Assessment struct {
 	XMLName    xml.Name   `xml:"questestinterop"`
@@ -236,7 +243,7 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 		return Item{}, fmt.Errorf("question %d has no correct option", idx)
 	}
 
-	cardinality := "Single"
+	cardinality := rCardinalitySingle
 	if isMA {
 		cardinality = "Multiple"
 	}
@@ -272,8 +279,8 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 				Decvar: Decvar{
 					MaxValue: "100",
 					MinValue: "0",
-					VarName:  "SCORE",
-					VarType:  "Decimal",
+					VarName:  varNameScore,
+					VarType:  varTypeDecimal,
 				},
 			},
 			ResCondition: []ResCondition{
@@ -281,8 +288,8 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 					Continue:     "No",
 					ConditionVar: conditionVar,
 					SetVar: SetVar{
-						Action:  "Set",
-						VarName: "SCORE",
+						Action:  actionSet,
+						VarName: varNameScore,
 						Value:   "100",
 					},
 				},
@@ -308,7 +315,7 @@ func buildSAItem(idx int, q render.Question) (Item, error) {
 			ConditionVar: ConditionVar{
 				VarEqual: &VarEqual{RespIdent: respIdent, Case: "No", Value: o.Text},
 			},
-			SetVar: SetVar{Action: "Set", VarName: "SCORE", Value: "100"},
+			SetVar: SetVar{Action: actionSet, VarName: varNameScore, Value: "100"},
 		})
 	}
 
@@ -319,13 +326,13 @@ func buildSAItem(idx int, q render.Question) (Item, error) {
 			Material: Material{MatText: q.Text},
 			RespStr: &RespStr{
 				Ident:        respIdent,
-				RCardinality: "Single",
+				RCardinality: rCardinalitySingle,
 				Render:       RenderFib{Rows: 1, Columns: 20},
 			},
 		},
 		ResForm: ResForm{
 			Outcomes: Outcomes{
-				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: varNameScore, VarType: varTypeDecimal},
 			},
 			ResCondition: conditions,
 		},
@@ -343,19 +350,19 @@ func buildESItem(idx int, q render.Question) Item {
 			Material: Material{MatText: q.Text},
 			RespStr: &RespStr{
 				Ident:        respIdent,
-				RCardinality: "Single",
+				RCardinality: rCardinalitySingle,
 				Render:       RenderFib{Rows: 10, Columns: 80, Prompt: "Box"},
 			},
 		},
 		ResForm: ResForm{
 			Outcomes: Outcomes{
-				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: varNameScore, VarType: varTypeDecimal},
 			},
 			ResCondition: []ResCondition{
 				{
 					Continue:     "No",
 					ConditionVar: ConditionVar{Other: &OtherCond{}},
-					SetVar:       SetVar{Action: "Set", VarName: "SCORE", Value: "0"},
+					SetVar:       SetVar{Action: actionSet, VarName: varNameScore, Value: "0"},
 				},
 			},
 		},
@@ -384,7 +391,7 @@ func buildMTItem(idx int, q render.Question) (Item, error) {
 	for j, o := range q.Options {
 		respDecls[j] = RespDecl{
 			Ident:        fmt.Sprintf("%s_resp_%d", ident, j+1),
-			RCardinality: "Single",
+			RCardinality: rCardinalitySingle,
 			Material:     &Material{MatText: o.Text},
 			Render:       RenderChoice{Choices: rightLabels},
 		}
@@ -415,7 +422,7 @@ func buildMTItem(idx int, q render.Question) (Item, error) {
 		},
 		ResForm: ResForm{
 			Outcomes: Outcomes{
-				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: varNameScore, VarType: varTypeDecimal},
 			},
 			ResCondition: conditions,
 		},
@@ -473,19 +480,19 @@ func buildNRItem(idx int, q render.Question) (Item, error) {
 			Material: Material{MatText: q.Text},
 			RespNum: &RespNum{
 				Ident:        respIdent,
-				RCardinality: "Single",
-				Render:       RenderFib{FibType: "Decimal"},
+				RCardinality: rCardinalitySingle,
+				Render:       RenderFib{FibType: varTypeDecimal},
 			},
 		},
 		ResForm: ResForm{
 			Outcomes: Outcomes{
-				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: "SCORE", VarType: "Decimal"},
+				Decvar: Decvar{MaxValue: "100", MinValue: "0", VarName: varNameScore, VarType: varTypeDecimal},
 			},
 			ResCondition: []ResCondition{
 				{
 					Continue:     "No",
 					ConditionVar: conditionVar,
-					SetVar:       SetVar{Action: "Set", VarName: "SCORE", Value: "100"},
+					SetVar:       SetVar{Action: actionSet, VarName: varNameScore, Value: "100"},
 				},
 			},
 		},

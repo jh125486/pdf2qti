@@ -14,9 +14,9 @@ import (
 
 // DistillCmd distills a PDF into a structured context JSON file.
 type DistillCmd struct {
-	Force bool     `name:"force" help:"Overwrite existing context file."`
-	All   bool     `name:"all" help:"Distill all sources."`
-	IDs   []string `arg:"" optional:"" help:"Source IDs to distill."`
+	Force bool     `help:"Overwrite existing context file." name:"force"`
+	All   bool     `help:"Distill all sources."             name:"all"`
+	IDs   []string `arg:""                                  help:"Source IDs to distill." optional:""`
 }
 
 // Run executes the distill command.
