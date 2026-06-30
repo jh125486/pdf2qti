@@ -3,6 +3,7 @@ package canvas
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -389,6 +390,58 @@ func TestRequestJSON_DecodeError(t *testing.T) {
 		t.Fatal("expected decode error")
 	}
 	if !strings.Contains(err.Error(), "decode response") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHasNextPage_HandlesQuotedAndUnquotedForms(t *testing.T) {
+	t.Parallel()
+
+	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel="next"`) {
+		t.Fatal("expected hasNextPage to detect quoted rel=next")
+	}
+	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel=next`) {
+		t.Fatal("expected hasNextPage to detect unquoted rel=next")
+	}
+	if hasNextPage(`<https://example.test/api/v1/items?page=1>; rel="prev"`) {
+		t.Fatal("expected hasNextPage false when next relation is absent")
+	}
+}
+
+func TestRequestJSONWithHeaders_BuildRequestError(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{baseURL: "https://example.test", token: "token", httpClient: http.DefaultClient}
+	err := client.requestJSON(context.Background(), "BAD METHOD", "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
+	if err == nil {
+		t.Fatal("expected build request error")
+	}
+	if !strings.Contains(err.Error(), "build request") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type errRoundTripper struct{}
+
+func (e errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network unavailable")
+}
+
+func TestRequestJSONWithHeaders_PerformRequestError(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{
+		baseURL: "https://example.test",
+		token:   "token",
+		httpClient: &http.Client{
+			Transport: errRoundTripper{},
+		},
+	}
+	err := client.requestJSON(context.Background(), http.MethodGet, "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
+	if err == nil {
+		t.Fatal("expected perform request error")
+	}
+	if !strings.Contains(err.Error(), "perform request") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
