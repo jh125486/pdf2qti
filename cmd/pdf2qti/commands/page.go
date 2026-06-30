@@ -11,10 +11,10 @@ import (
 
 // PageCmd renders a Go HTML template against a distilled context JSON file.
 type PageCmd struct {
-	Context  string            `short:"c" required:"" help:"Path to context JSON file."`
-	Output   string            `short:"o" help:"Output file (default: stdout)."`
-	Vars     map[string]string `short:"v" mapsep:";" help:"Extra template vars as key=value pairs."`
-	Template string            `arg:"" help:"Path to Go HTML template."`
+	Context  string            `help:"Path to context JSON file."              required:""`
+	Output   string            `help:"Output file (default: stdout)."          short:"o"`
+	Vars     map[string]string `help:"Extra template vars as key=value pairs." mapsep:";"                       short:"v"`
+	Template string            `arg:""                                         help:"Path to Go HTML template."`
 }
 
 // Run executes the page command.

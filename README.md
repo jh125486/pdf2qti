@@ -101,6 +101,7 @@ pdf2qti generate [--skip-approve]
 ```
 
 For each source in the config, `generate`:
+
 1. Extracts text from the PDF and writes `<outDir>/<id>_context.md`
 2. Calls the configured LLM to produce TF, MA, and MC questions
 3. Writes a Markdown quiz draft to `<outDir>/<id>_quiz.md` for human review
@@ -122,6 +123,39 @@ pdf2qti approve
 ```
 
 Reads the approved `<outDir>/<id>_quiz.md` and writes a Canvas-compatible QTI 1.2 XML file to `<outDir>/<id>.qti`.
+
+### `page` — Render HTML from a distilled context
+
+```bash
+pdf2qti page \
+  --context out/ch01_context.json \
+  --output out/ch01_materials.html \
+  internal/page/testdata/materials.html.tmpl
+```
+
+Notes:
+1. `--context` has no short flag; `-c` is reserved for global `--config`.
+2. Omit `--output` to write rendered HTML to stdout.
+
+### `publish` — Render and publish Canvas module pages
+
+```bash
+pdf2qti publish \
+  --course-id 12345 \
+  --canvas-base-url https://school.instructure.com \
+  --learning-objectives-template internal/page/testdata/learning_objectives.html.tmpl \
+  --materials-template internal/page/testdata/materials.html.tmpl
+```
+
+For each selected source context (`<outDir>/<id>_context.json`), `publish`:
+
+1. Renders Learning Objectives HTML
+2. Renders Materials HTML
+3. Upserts both pages in Canvas
+4. Ensures a Canvas module exists for the context module name
+5. Adds both pages to that module
+
+Set `CANVAS_TOKEN` (or pass `--canvas-token`) before running.
 
 ## Quiz Draft Format
 

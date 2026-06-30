@@ -15,7 +15,7 @@ import (
 
 // GenerateCmd extracts a PDF and generates a quiz draft.
 type GenerateCmd struct {
-	SkipApprove bool `name:"skip-approve" help:"Skip human review and run approve immediately."`
+	SkipApprove bool `help:"Skip human review and run approve immediately." name:"skip-approve"`
 }
 
 // Run executes the generate command.
@@ -112,7 +112,7 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 		nrQs[i].Number = offset + i + 1
 	}
 
-	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter, "module_name": dc.ModuleName}
+	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter, moduleNameTemplateKey: dc.ModuleName}
 	title, err := render.ExecuteTemplate(q.TitleTemplate, titleData)
 	if err != nil || title == "" {
 		for _, candidate := range []string{dc.ModuleName, src.Name, src.ID} {
