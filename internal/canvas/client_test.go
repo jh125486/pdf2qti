@@ -222,6 +222,7 @@ func TestEnsureModulePageItem_NoopWhenExistsOnSecondPage(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
 			getPage1Count++
+			w.Header().Set("Link", "<https://example.test/api/v1/courses/42/modules/7/items?page=2&per_page=100>; rel=\"next\"")
 			items := make([]ModuleItem, 100)
 			for i := range items {
 				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
@@ -249,6 +250,47 @@ func TestEnsureModulePageItem_NoopWhenExistsOnSecondPage(t *testing.T) {
 	}
 	if postCount != 0 {
 		t.Fatalf("expected no POST when item exists on later page, got %d", postCount)
+	}
+}
+
+func TestEnsureModulePageItem_NoExtraFetchWithoutNextLink(t *testing.T) {
+	t.Parallel()
+
+	var getPage1Count int
+	var getPage2Count int
+	var postCount int
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
+			getPage1Count++
+			items := make([]ModuleItem, 100)
+			for i := range items {
+				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
+			}
+			writeJSON(t, w, http.StatusOK, items)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "2":
+			getPage2Count++
+			writeJSON(t, w, http.StatusOK, []ModuleItem{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+			postCount++
+			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	client, _ := NewClient(ts.URL, "token", ts.Client())
+	err := client.EnsureModulePageItem(context.Background(), "42", 7, "target-page", true)
+	if err != nil {
+		t.Fatalf("ensure module item: %v", err)
+	}
+	if getPage1Count != 1 || getPage2Count != 0 {
+		t.Fatalf("expected only page 1 fetch without Link rel=next, got page1=%d page2=%d", getPage1Count, getPage2Count)
+	}
+	if postCount != 1 {
+		t.Fatalf("expected module item create POST, got %d", postCount)
 	}
 }
 
