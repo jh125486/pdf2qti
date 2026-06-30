@@ -17,8 +17,8 @@ import (
 // PublishCmd renders module pages and publishes them to Canvas.
 type PublishCmd struct {
 	CourseID                    string            `help:"Canvas course ID."                                    name:"course-id"                                                required:""`
-	CanvasBaseURL               string            `env:"CANVAS_BASE_URL"                                       help:"Canvas base URL (e.g. https://school.instructure.com)."   name:"canvas-base-url"                    required:""`
-	CanvasToken                 string            `env:"CANVAS_TOKEN"                                          help:"Canvas API token."                                        name:"canvas-token"                       required:""`
+	CanvasBaseURL               string            `env:"CANVAS_BASE_URL"                                       help:"Canvas base URL (e.g. https://school.instructure.com)."   name:"canvas-base-url"`
+	CanvasToken                 string            `env:"CANVAS_TOKEN"                                          help:"Canvas API token."                                        name:"canvas-token"`
 	LearningObjectivesTemplate  string            `help:"Path to learning objectives HTML template."           name:"learning-objectives-template"                             required:""`
 	MaterialsTemplate           string            `help:"Path to materials HTML template."                     name:"materials-template"                                       required:""`
 	LearningObjectivesTitleTmpl string            `default:"{{.module_name}} Learning Objectives"              help:"Template for learning objectives page title."             name:"learning-objectives-title-template"`

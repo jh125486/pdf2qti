@@ -1,4 +1,4 @@
-.PHONY: help init deps-update test tidy check static lint lint-update vuln-check modernize outdated fmt vet check build clean install
+.PHONY: help init deps-update test tidy static lint lint-update vuln-check modernize outdated fmt vet check build clean install
 .DEFAULT_GOAL := help
 
 # Variables
@@ -18,8 +18,6 @@ init:
 	@cp .githooks/pre-push .git/hooks/pre-push
 	@chmod +x .git/hooks/pre-push
 	@echo "Development environment initialized ✓"
-
-check: static test
 
 deps-update: lint-update
 	@echo "Updating Go modules to latest versions..."

@@ -42,6 +42,7 @@ type ModuleItem struct {
 // NewClient constructs a Canvas API client.
 func NewClient(baseURL, token string, httpClient *http.Client) (*Client, error) {
 	baseURL = strings.TrimSpace(baseURL)
+	token = strings.TrimSpace(token)
 	if baseURL == "" {
 		return nil, fmt.Errorf("canvas base URL must not be empty")
 	}
@@ -113,11 +114,8 @@ func (c *Client) EnsureModule(ctx context.Context, courseID, moduleName string, 
 // EnsureModulePageItem adds a page to a module when it is not already present.
 func (c *Client) EnsureModulePageItem(ctx context.Context, courseID string, moduleID int, pageURL string, published bool) error {
 	path := fmt.Sprintf("/api/v1/courses/%s/modules/%d/items", url.PathEscape(courseID), moduleID)
-	q := url.Values{}
-	q.Set("per_page", "100")
-
-	var items []ModuleItem
-	if err := c.requestJSON(ctx, http.MethodGet, path, q, nil, &items, http.StatusOK); err != nil {
+	items, err := c.listModuleItems(ctx, path)
+	if err != nil {
 		return fmt.Errorf("list module items: %w", err)
 	}
 	for _, item := range items {
@@ -134,6 +132,28 @@ func (c *Client) EnsureModulePageItem(ctx context.Context, courseID string, modu
 		return fmt.Errorf("create module item for page %q: %w", pageURL, err)
 	}
 	return nil
+}
+
+func (c *Client) listModuleItems(ctx context.Context, path string) ([]ModuleItem, error) {
+	const perPage = 100
+
+	items := make([]ModuleItem, 0, perPage)
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+
+		var batch []ModuleItem
+		if err := c.requestJSON(ctx, http.MethodGet, path, q, nil, &batch, http.StatusOK); err != nil {
+			return nil, err
+		}
+		items = append(items, batch...)
+		if len(batch) < perPage {
+			break
+		}
+	}
+
+	return items, nil
 }
 
 func (c *Client) findPageByTitle(ctx context.Context, courseID, title string) (*Page, bool, error) {
