@@ -42,6 +42,7 @@ type ModuleItem struct {
 // NewClient constructs a Canvas API client.
 func NewClient(baseURL, token string, httpClient *http.Client) (*Client, error) {
 	baseURL = strings.TrimSpace(baseURL)
+	token = strings.TrimSpace(token)
 	if baseURL == "" {
 		return nil, fmt.Errorf("canvas base URL must not be empty")
 	}
@@ -113,11 +114,8 @@ func (c *Client) EnsureModule(ctx context.Context, courseID, moduleName string, 
 // EnsureModulePageItem adds a page to a module when it is not already present.
 func (c *Client) EnsureModulePageItem(ctx context.Context, courseID string, moduleID int, pageURL string, published bool) error {
 	path := fmt.Sprintf("/api/v1/courses/%s/modules/%d/items", url.PathEscape(courseID), moduleID)
-	q := url.Values{}
-	q.Set("per_page", "100")
-
-	var items []ModuleItem
-	if err := c.requestJSON(ctx, http.MethodGet, path, q, nil, &items, http.StatusOK); err != nil {
+	items, err := c.listModuleItems(ctx, path)
+	if err != nil {
 		return fmt.Errorf("list module items: %w", err)
 	}
 	for _, item := range items {
@@ -134,6 +132,42 @@ func (c *Client) EnsureModulePageItem(ctx context.Context, courseID string, modu
 		return fmt.Errorf("create module item for page %q: %w", pageURL, err)
 	}
 	return nil
+}
+
+func (c *Client) listModuleItems(ctx context.Context, path string) ([]ModuleItem, error) {
+	const perPage = 100
+
+	items := make([]ModuleItem, 0, perPage)
+	for page := 1; ; page++ {
+		q := url.Values{}
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+
+		var batch []ModuleItem
+		headers, err := c.requestJSONWithHeaders(ctx, http.MethodGet, path, q, nil, &batch, http.StatusOK)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, batch...)
+		if !hasNextPage(headers.Get("Link")) {
+			break
+		}
+	}
+
+	return items, nil
+}
+
+func hasNextPage(linkHeader string) bool {
+	for item := range strings.SplitSeq(linkHeader, ",") {
+		parts := strings.Split(item, ";")
+		for _, attr := range parts[1:] {
+			trimmed := strings.TrimSpace(strings.ToLower(attr))
+			if trimmed == `rel="next"` || trimmed == "rel=next" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Client) findPageByTitle(ctx context.Context, courseID, title string) (*Page, bool, error) {
@@ -173,6 +207,11 @@ func (c *Client) findModuleByName(ctx context.Context, courseID, moduleName stri
 }
 
 func (c *Client) requestJSON(ctx context.Context, method, path string, query, form url.Values, out any, expectedStatus ...int) error {
+	_, err := c.requestJSONWithHeaders(ctx, method, path, query, form, out, expectedStatus...)
+	return err
+}
+
+func (c *Client) requestJSONWithHeaders(ctx context.Context, method, path string, query, form url.Values, out any, expectedStatus ...int) (http.Header, error) {
 	requestURL := c.baseURL + path
 	if len(query) > 0 {
 		requestURL += "?" + query.Encode()
@@ -185,7 +224,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, query, fo
 
 	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
@@ -195,22 +234,23 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, query, fo
 
 	resp, err := c.httpClient.Do(req) //nolint:gosec // Canvas base URL is validated in NewClient and explicitly configured by the operator.
 	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
+		return nil, fmt.Errorf("perform request: %w", err)
 	}
 	defer resp.Body.Close()
+	headers := resp.Header.Clone()
 
 	if !hasStatus(expectedStatus, resp.StatusCode) {
 		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("unexpected HTTP status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		return nil, fmt.Errorf("unexpected HTTP status %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 
 	if out == nil {
-		return nil
+		return headers, nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return nil
+	return headers, nil
 }
 
 func hasStatus(expected []int, got int) bool {

@@ -3,6 +3,7 @@ package canvas
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,14 @@ func TestNewClient_Validation(t *testing.T) {
 	}
 	if c.baseURL != "https://example.instructure.com" {
 		t.Fatalf("expected trimmed baseURL, got %q", c.baseURL)
+	}
+
+	c, err = NewClient("https://example.instructure.com/", "  token\n", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.token != "token" {
+		t.Fatalf("expected trimmed token, got %q", c.token)
 	}
 }
 
@@ -203,6 +212,89 @@ func TestEnsureModulePageItem_NoopWhenExists(t *testing.T) {
 	}
 }
 
+func TestEnsureModulePageItem_NoopWhenExistsOnSecondPage(t *testing.T) {
+	t.Parallel()
+
+	var getPage1Count int
+	var getPage2Count int
+	var postCount int
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
+			getPage1Count++
+			w.Header().Set("Link", "<https://example.test/api/v1/courses/42/modules/7/items?page=2&per_page=100>; rel=\"next\"")
+			items := make([]ModuleItem, 100)
+			for i := range items {
+				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
+			}
+			writeJSON(t, w, http.StatusOK, items)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "2":
+			getPage2Count++
+			writeJSON(t, w, http.StatusOK, []ModuleItem{{Type: "Page", PageURL: "materials-page"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+			postCount++
+			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	client, _ := NewClient(ts.URL, "token", ts.Client())
+	err := client.EnsureModulePageItem(context.Background(), "42", 7, "materials-page", true)
+	if err != nil {
+		t.Fatalf("ensure module item: %v", err)
+	}
+	if getPage1Count != 1 || getPage2Count != 1 {
+		t.Fatalf("expected pagination requests for pages 1 and 2, got page1=%d page2=%d", getPage1Count, getPage2Count)
+	}
+	if postCount != 0 {
+		t.Fatalf("expected no POST when item exists on later page, got %d", postCount)
+	}
+}
+
+func TestEnsureModulePageItem_NoExtraFetchWithoutNextLink(t *testing.T) {
+	t.Parallel()
+
+	var getPage1Count int
+	var getPage2Count int
+	var postCount int
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
+			getPage1Count++
+			items := make([]ModuleItem, 100)
+			for i := range items {
+				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
+			}
+			writeJSON(t, w, http.StatusOK, items)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "2":
+			getPage2Count++
+			writeJSON(t, w, http.StatusOK, []ModuleItem{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+			postCount++
+			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer ts.Close()
+
+	client, _ := NewClient(ts.URL, "token", ts.Client())
+	err := client.EnsureModulePageItem(context.Background(), "42", 7, "target-page", true)
+	if err != nil {
+		t.Fatalf("ensure module item: %v", err)
+	}
+	if getPage1Count != 1 || getPage2Count != 0 {
+		t.Fatalf("expected only page 1 fetch without Link rel=next, got page1=%d page2=%d", getPage1Count, getPage2Count)
+	}
+	if postCount != 1 {
+		t.Fatalf("expected module item create POST, got %d", postCount)
+	}
+}
+
 func TestEnsureModulePageItem_CreatesWhenMissing(t *testing.T) {
 	t.Parallel()
 	var createdType string
@@ -298,6 +390,58 @@ func TestRequestJSON_DecodeError(t *testing.T) {
 		t.Fatal("expected decode error")
 	}
 	if !strings.Contains(err.Error(), "decode response") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHasNextPage_HandlesQuotedAndUnquotedForms(t *testing.T) {
+	t.Parallel()
+
+	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel="next"`) {
+		t.Fatal("expected hasNextPage to detect quoted rel=next")
+	}
+	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel=next`) {
+		t.Fatal("expected hasNextPage to detect unquoted rel=next")
+	}
+	if hasNextPage(`<https://example.test/api/v1/items?page=1>; rel="prev"`) {
+		t.Fatal("expected hasNextPage false when next relation is absent")
+	}
+}
+
+func TestRequestJSONWithHeaders_BuildRequestError(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{baseURL: "https://example.test", token: "token", httpClient: http.DefaultClient}
+	err := client.requestJSON(context.Background(), "BAD METHOD", "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
+	if err == nil {
+		t.Fatal("expected build request error")
+	}
+	if !strings.Contains(err.Error(), "build request") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type errRoundTripper struct{}
+
+func (e errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network unavailable")
+}
+
+func TestRequestJSONWithHeaders_PerformRequestError(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{
+		baseURL: "https://example.test",
+		token:   "token",
+		httpClient: &http.Client{
+			Transport: errRoundTripper{},
+		},
+	}
+	err := client.requestJSON(context.Background(), http.MethodGet, "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
+	if err == nil {
+		t.Fatal("expected perform request error")
+	}
+	if !strings.Contains(err.Error(), "perform request") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

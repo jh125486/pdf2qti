@@ -49,6 +49,47 @@ func TestPublishCmdRun_SuccessDryRun(t *testing.T) {
 	}
 }
 
+func TestExecute_PublishDryRunWithoutCanvasCredentials(t *testing.T) {
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "src01.pdf")
+	if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeConfigFile(t, dir, pdfPath)
+	writeDistilledContextFile(t, dir, "src01")
+
+	loTemplate := filepath.Join(dir, "learning_objectives.html.tmpl")
+	materialsTemplate := filepath.Join(dir, "materials.html.tmpl")
+	if err := os.WriteFile(loTemplate, []byte("<h1>{{.module_name}}</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(materialsTemplate, []byte("<p>{{.material_overview}}</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origArgs := os.Args
+	origLog := logOutput
+	logOutput = io.Discard
+	t.Cleanup(func() {
+		os.Args = origArgs
+		logOutput = origLog
+	})
+
+	os.Args = []string{
+		"pdf2qti",
+		"--config", cfgPath,
+		"publish",
+		"--course-id", "42",
+		"--dry-run",
+		"--learning-objectives-template", loTemplate,
+		"--materials-template", materialsTemplate,
+	}
+
+	if err := Execute(); err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+}
+
 func TestPublishCmdRun_NoSelectedSources(t *testing.T) {
 	dir := t.TempDir()
 	pdfPath := filepath.Join(dir, "src01.pdf")
