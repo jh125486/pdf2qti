@@ -112,7 +112,7 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 		nrQs[i].Number = offset + i + 1
 	}
 
-	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter, moduleNameTemplateKey: dc.ModuleName}
+	titleData := map[string]any{"name": src.Name, "chapter": src.Chapter, "module_name": dc.ModuleName}
 	title, err := render.ExecuteTemplate(q.TitleTemplate, titleData)
 	if err != nil || title == "" {
 		for _, candidate := range []string{dc.ModuleName, src.Name, src.ID} {

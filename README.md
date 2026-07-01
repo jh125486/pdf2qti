@@ -134,6 +134,7 @@ pdf2qti page \
 ```
 
 Notes:
+
 1. `--context` has no short flag; `-c` is reserved for global `--config`.
 2. Omit `--output` to write rendered HTML to stdout.
 
@@ -235,6 +236,16 @@ Questions are grouped into typed sections identified by `## <TYPE>` headings.
 ```
 
 ## Development
+
+### Go test conventions
+
+Use these conventions for new or refactored Go tests in this repository:
+
+1. Prefer table-driven tests for multi-case behavior.
+2. Use `t.Parallel()` for top-level tests and subtests where isolation allows.
+3. Keep test files focused on their production file/function ownership (`foo.go` with `foo_test.go`).
+4. Prefer blackbox package tests (`package <name>_test`).
+5. If a whitebox test package is required (for unexported helpers), add a short justification comment at file top.
 
 Use the Makefile to run common development tasks.
 

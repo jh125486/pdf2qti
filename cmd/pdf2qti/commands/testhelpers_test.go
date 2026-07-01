@@ -1,48 +1,41 @@
-package commands
+package commands_test
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/jh125486/pdf2qti/internal/canvas"
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
-type badLLM struct{}
+const validQuizMD = `# Test Quiz
 
-func (b *badLLM) Complete(_ context.Context, _ string) (string, error) {
-	return "{", nil
-}
+## MC
 
-type failingPublisher struct {
-	failAt string
-}
+1. What is 2+2?
+[ ] 3
+[*] 4
+[ ] 5
+`
 
-func (f *failingPublisher) UpsertPage(_ context.Context, _, _, _ string, _ bool) (*canvas.Page, error) {
-	if f.failAt == "upsert" {
-		return nil, errors.New("upsert failed")
+const validationFailQuizMD = `# Test Quiz
+
+## MC
+
+2. What is 2+2?
+[*] 4
+`
+
+func writeContextFile(t *testing.T, dir string) {
+	t.Helper()
+	const minCtx = `{"source_id":"","module_name":"","text":"","overview":"","key_concepts":[],"material_overview":"","teaching_notes":"","objectives":[]}`
+	path := filepath.Join(dir, "src01_context.json")
+	if err := os.WriteFile(path, []byte(minCtx), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return &canvas.Page{PageID: 1, URL: "page-1", Title: "title"}, nil
-}
-
-func (f *failingPublisher) EnsureModule(_ context.Context, _, _ string, _ bool) (*canvas.Module, error) {
-	if f.failAt == "module" {
-		return nil, errors.New("module failed")
-	}
-	return &canvas.Module{ID: 7, Name: "Module"}, nil
-}
-
-func (f *failingPublisher) EnsureModulePageItem(_ context.Context, _ string, _ int, _ string, _ bool) error {
-	if f.failAt == "attach" {
-		return errors.New("attach failed")
-	}
-	return nil
 }
 
 func writeConfigFile(t *testing.T, dir, pdfPath string) string {
@@ -56,8 +49,9 @@ func writeConfigFile(t *testing.T, dir, pdfPath string) string {
 	return cfgPath
 }
 
-func writeDistilledContextFile(t *testing.T, outDir, sourceID string) {
+func writeDistilledContextFile(t *testing.T, outDir string) {
 	t.Helper()
+	const sourceID = "src01"
 	dc := &distill.DistilledContext{
 		SourceID:         sourceID,
 		Book:             "Book",

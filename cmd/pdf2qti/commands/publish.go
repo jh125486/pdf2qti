@@ -155,15 +155,15 @@ func renderTemplate(templatePath string, dc *distill.DistilledContext, vars map[
 
 func publishTemplateData(dc *distill.DistilledContext, src *config.Source, vars map[string]string) map[string]any {
 	data := map[string]any{
-		"source_id":           src.ID,
-		"book":                dc.Book,
-		"chapter":             dc.Chapter,
-		moduleNameTemplateKey: firstNonEmpty(dc.ModuleName, src.Name, src.ID),
-		"overview":            dc.Overview,
-		"key_concepts":        dc.KeyConcepts,
-		"material_overview":   dc.MaterialOverview,
-		"teaching_notes":      dc.TeachingNotes,
-		"objectives":          dc.Objectives,
+		"source_id":         src.ID,
+		"book":              dc.Book,
+		"chapter":           dc.Chapter,
+		"module_name":       firstNonEmpty(dc.ModuleName, src.Name, src.ID),
+		"overview":          dc.Overview,
+		"key_concepts":      dc.KeyConcepts,
+		"material_overview": dc.MaterialOverview,
+		"teaching_notes":    dc.TeachingNotes,
+		"objectives":        dc.Objectives,
 	}
 	for k, v := range vars {
 		data[k] = v

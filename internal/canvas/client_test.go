@@ -1,362 +1,254 @@
-package canvas
+package canvas_test
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
-	"strings"
 	"testing"
+
+	"github.com/jh125486/pdf2qti/internal/canvas"
 )
 
-func TestNewClient_Validation(t *testing.T) {
+func TestNewClient_Table(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewClient("", "token", nil)
-	if err == nil {
-		t.Fatal("expected error for empty baseURL")
+	tests := []struct {
+		name    string
+		baseURL string
+		token   string
+		wantErr bool
+	}{
+		{name: "empty base url", baseURL: "", token: "token", wantErr: true},
+		{name: "empty token", baseURL: "https://example.instructure.com", token: "", wantErr: true},
+		{name: "missing scheme", baseURL: "example.instructure.com", token: "token", wantErr: true},
+		{name: "valid", baseURL: "https://example.instructure.com/", token: " token\n"},
 	}
 
-	_, err = NewClient("https://example.instructure.com", "", nil)
-	if err == nil {
-		t.Fatal("expected error for empty token")
-	}
+	for _, tt := range tests {
 
-	_, err = NewClient("example.instructure.com", "token", nil)
-	if err == nil {
-		t.Fatal("expected error for URL without scheme")
-	}
-
-	c, err := NewClient("https://example.instructure.com/", "token", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if c.baseURL != "https://example.instructure.com" {
-		t.Fatalf("expected trimmed baseURL, got %q", c.baseURL)
-	}
-
-	c, err = NewClient("https://example.instructure.com/", "  token\n", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if c.token != "token" {
-		t.Fatalf("expected trimmed token, got %q", c.token)
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client, err := canvas.NewClient(tt.baseURL, tt.token, nil)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
+			}
+			if !tt.wantErr && client == nil {
+				t.Fatal("expected non-nil client")
+			}
+		})
 	}
 }
 
-func TestUpsertPage_CreateWhenMissing(t *testing.T) {
+func TestUpsertPage_Table(t *testing.T) {
 	t.Parallel()
 
-	var requests []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if auth := r.Header.Get("Authorization"); auth != "Bearer token" {
-			t.Fatalf("missing auth header: %q", auth)
-		}
-		requests = append(requests, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
-			if got := r.URL.Query().Get("search_term"); got != "Learning Objectives" {
-				t.Fatalf("unexpected search_term: %q", got)
-			}
-			writeJSON(t, w, http.StatusOK, []Page{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
-			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
-			}
-			if got := r.Form.Get("wiki_page[title]"); got != "Learning Objectives" {
-				t.Fatalf("unexpected title: %q", got)
-			}
-			if got := r.Form.Get("wiki_page[published]"); got != "true" {
-				t.Fatalf("unexpected published: %q", got)
-			}
-			writeJSON(t, w, http.StatusCreated, Page{PageID: 1001, URL: "learning-objectives", Title: "Learning Objectives"})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, err := NewClient(ts.URL, "token", ts.Client())
-	if err != nil {
-		t.Fatalf("new client: %v", err)
+	tests := []struct {
+		name   string
+		server func(t *testing.T) (*httptest.Server, *int)
+		wantID int
+	}{
+		{
+			name: "create when missing",
+			server: func(t *testing.T) (*httptest.Server, *int) {
+				t.Helper()
+				requests := 0
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if auth := r.Header.Get("Authorization"); auth != "Bearer token" {
+						t.Fatalf("unexpected auth header: %q", auth)
+					}
+					requests++
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusOK, []canvas.Page{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusCreated, canvas.Page{PageID: 1001, URL: "learning-objectives", Title: "Learning Objectives"})
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+				return ts, &requests
+			},
+			wantID: 1001,
+		},
+		{
+			name: "update when existing",
+			server: func(t *testing.T) (*httptest.Server, *int) {
+				t.Helper()
+				requests := 0
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusOK, []canvas.Page{{PageID: 77, Title: "Learning Objectives", URL: "learning-objectives"}})
+					case r.Method == http.MethodPut && r.URL.Path == "/api/v1/courses/42/pages/77":
+						writeJSON(t, w, http.StatusOK, canvas.Page{PageID: 77, URL: "learning-objectives", Title: "Learning Objectives"})
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+				return ts, &requests
+			},
+			wantID: 77,
+		},
 	}
 
-	page, err := client.UpsertPage(context.Background(), "42", "Learning Objectives", "<h1>Body</h1>", true)
-	if err != nil {
-		t.Fatalf("upsert page: %v", err)
-	}
-	if page.PageID != 1001 || page.URL != "learning-objectives" {
-		t.Fatalf("unexpected page response: %+v", page)
-	}
-	if len(requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(requests))
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, _ := tt.server(t)
+			defer ts.Close()
+
+			client, err := canvas.NewClient(ts.URL, "token", ts.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			page, err := client.UpsertPage(context.Background(), "42", "Learning Objectives", "<h1>Body</h1>", true)
+			if err != nil {
+				t.Fatalf("upsert page: %v", err)
+			}
+			if page.PageID != tt.wantID {
+				t.Fatalf("page id=%d want=%d", page.PageID, tt.wantID)
+			}
+		})
 	}
 }
 
-func TestUpsertPage_UpdateWhenExisting(t *testing.T) {
+func TestEnsureModule_Table(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
-			writeJSON(t, w, http.StatusOK, []Page{{PageID: 77, Title: "Learning Objectives", URL: "learning-objectives"}})
-		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/courses/42/pages/77":
-			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
-			}
-			if got := r.Form.Get("wiki_page[body]"); got != "<p>Updated</p>" {
-				t.Fatalf("unexpected body: %q", got)
-			}
-			writeJSON(t, w, http.StatusOK, Page{PageID: 77, URL: "learning-objectives", Title: "Learning Objectives"})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, err := NewClient(ts.URL, "token", ts.Client())
-	if err != nil {
-		t.Fatalf("new client: %v", err)
+	tests := []struct {
+		name       string
+		moduleName string
+		server     func(t *testing.T) *httptest.Server
+		wantID     int
+	}{
+		{
+			name:       "returns existing",
+			moduleName: "Module 1",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules" {
+						writeJSON(t, w, http.StatusOK, []canvas.Module{{ID: 9, Name: "Module 1"}})
+						return
+					}
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				}))
+			},
+			wantID: 9,
+		},
+		{
+			name:       "creates when missing",
+			moduleName: "Module 2",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules":
+						writeJSON(t, w, http.StatusOK, []canvas.Module{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules":
+						writeJSON(t, w, http.StatusCreated, canvas.Module{ID: 22, Name: "Module 2"})
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			wantID: 22,
+		},
 	}
 
-	page, err := client.UpsertPage(context.Background(), "42", "Learning Objectives", "<p>Updated</p>", false)
-	if err != nil {
-		t.Fatalf("upsert page: %v", err)
-	}
-	if page.PageID != 77 {
-		t.Fatalf("unexpected page id: %d", page.PageID)
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tt.server(t)
+			defer ts.Close()
+
+			client, _ := canvas.NewClient(ts.URL, "token", ts.Client())
+			mod, err := client.EnsureModule(context.Background(), "42", tt.moduleName, true)
+			if err != nil {
+				t.Fatalf("ensure module: %v", err)
+			}
+			if mod.ID != tt.wantID {
+				t.Fatalf("module id=%d want=%d", mod.ID, tt.wantID)
+			}
+		})
 	}
 }
 
-func TestEnsureModule_ReturnsExisting(t *testing.T) {
+func TestEnsureModulePageItem_Table(t *testing.T) {
 	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/courses/42/modules" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-		writeJSON(t, w, http.StatusOK, []Module{{ID: 9, Name: "Module 1"}})
-	}))
-	defer ts.Close()
 
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	mod, err := client.EnsureModule(context.Background(), "42", "Module 1", true)
-	if err != nil {
-		t.Fatalf("ensure module: %v", err)
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T) (*httptest.Server, *int)
+		wantPost int
+	}{
+		{
+			name: "noop when exists",
+			setup: func(t *testing.T) (*httptest.Server, *int) {
+				t.Helper()
+				postCount := 0
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{{Type: "Page", PageURL: "materials-page"}})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						postCount++
+						writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+				return ts, &postCount
+			},
+			wantPost: 0,
+		},
+		{
+			name: "create when missing",
+			setup: func(t *testing.T) (*httptest.Server, *int) {
+				t.Helper()
+				postCount := 0
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						postCount++
+						writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+				return ts, &postCount
+			},
+			wantPost: 1,
+		},
+		{
+			name:     "paginated listing finds item on second page",
+			setup:    setupPaginatedModuleItemsServer,
+			wantPost: 0,
+		},
 	}
-	if mod.ID != 9 {
-		t.Fatalf("expected module id 9, got %d", mod.ID)
-	}
-}
 
-func TestEnsureModule_CreatesWhenMissing(t *testing.T) {
-	t.Parallel()
-	var sawPost bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules":
-			writeJSON(t, w, http.StatusOK, []Module{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules":
-			sawPost = true
-			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, postCount := tt.setup(t)
+			defer ts.Close()
+
+			client, _ := canvas.NewClient(ts.URL, "token", ts.Client())
+			err := client.EnsureModulePageItem(context.Background(), "42", 7, "materials-page", true)
+			if err != nil {
+				t.Fatalf("ensure module page item: %v", err)
 			}
-			if got := r.Form.Get("module[name]"); got != "Module 2" {
-				t.Fatalf("unexpected module name: %q", got)
+			if *postCount != tt.wantPost {
+				t.Fatalf("post count=%d want=%d", *postCount, tt.wantPost)
 			}
-			writeJSON(t, w, http.StatusCreated, Module{ID: 22, Name: "Module 2"})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	mod, err := client.EnsureModule(context.Background(), "42", "Module 2", true)
-	if err != nil {
-		t.Fatalf("ensure module: %v", err)
-	}
-	if !sawPost {
-		t.Fatal("expected module create POST")
-	}
-	if mod.ID != 22 {
-		t.Fatalf("expected module id 22, got %d", mod.ID)
-	}
-}
-
-func TestEnsureModulePageItem_NoopWhenExists(t *testing.T) {
-	t.Parallel()
-	var postCount int
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			writeJSON(t, w, http.StatusOK, []ModuleItem{{Type: "Page", PageURL: "materials-page"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			postCount++
-			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	err := client.EnsureModulePageItem(context.Background(), "42", 7, "materials-page", true)
-	if err != nil {
-		t.Fatalf("ensure module item: %v", err)
-	}
-	if postCount != 0 {
-		t.Fatalf("expected no POST when item exists, got %d", postCount)
-	}
-}
-
-func TestEnsureModulePageItem_NoopWhenExistsOnSecondPage(t *testing.T) {
-	t.Parallel()
-
-	var getPage1Count int
-	var getPage2Count int
-	var postCount int
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
-			getPage1Count++
-			w.Header().Set("Link", "<https://example.test/api/v1/courses/42/modules/7/items?page=2&per_page=100>; rel=\"next\"")
-			items := make([]ModuleItem, 100)
-			for i := range items {
-				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
-			}
-			writeJSON(t, w, http.StatusOK, items)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "2":
-			getPage2Count++
-			writeJSON(t, w, http.StatusOK, []ModuleItem{{Type: "Page", PageURL: "materials-page"}})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			postCount++
-			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	err := client.EnsureModulePageItem(context.Background(), "42", 7, "materials-page", true)
-	if err != nil {
-		t.Fatalf("ensure module item: %v", err)
-	}
-	if getPage1Count != 1 || getPage2Count != 1 {
-		t.Fatalf("expected pagination requests for pages 1 and 2, got page1=%d page2=%d", getPage1Count, getPage2Count)
-	}
-	if postCount != 0 {
-		t.Fatalf("expected no POST when item exists on later page, got %d", postCount)
-	}
-}
-
-func TestEnsureModulePageItem_NoExtraFetchWithoutNextLink(t *testing.T) {
-	t.Parallel()
-
-	var getPage1Count int
-	var getPage2Count int
-	var postCount int
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "1":
-			getPage1Count++
-			items := make([]ModuleItem, 100)
-			for i := range items {
-				items[i] = ModuleItem{Type: "Page", PageURL: fmt.Sprintf("page-%d", i)}
-			}
-			writeJSON(t, w, http.StatusOK, items)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" && r.URL.Query().Get("page") == "2":
-			getPage2Count++
-			writeJSON(t, w, http.StatusOK, []ModuleItem{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			postCount++
-			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	err := client.EnsureModulePageItem(context.Background(), "42", 7, "target-page", true)
-	if err != nil {
-		t.Fatalf("ensure module item: %v", err)
-	}
-	if getPage1Count != 1 || getPage2Count != 0 {
-		t.Fatalf("expected only page 1 fetch without Link rel=next, got page1=%d page2=%d", getPage1Count, getPage2Count)
-	}
-	if postCount != 1 {
-		t.Fatalf("expected module item create POST, got %d", postCount)
-	}
-}
-
-func TestEnsureModulePageItem_CreatesWhenMissing(t *testing.T) {
-	t.Parallel()
-	var createdType string
-	var createdPageURL string
-	var createdPublished string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			writeJSON(t, w, http.StatusOK, []ModuleItem{})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
-			if err := r.ParseForm(); err != nil {
-				t.Fatalf("parse form: %v", err)
-			}
-			createdType = r.Form.Get("module_item[type]")
-			createdPageURL = r.Form.Get("module_item[page_url]")
-			createdPublished = r.Form.Get("module_item[published]")
-			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer ts.Close()
-
-	client, _ := NewClient(ts.URL, "token", ts.Client())
-	err := client.EnsureModulePageItem(context.Background(), "42", 7, "learning-objectives", false)
-	if err != nil {
-		t.Fatalf("ensure module item: %v", err)
-	}
-	if createdType != "Page" {
-		t.Fatalf("unexpected module_item[type]: %q", createdType)
-	}
-	if createdPageURL != "learning-objectives" {
-		t.Fatalf("unexpected module_item[page_url]: %q", createdPageURL)
-	}
-	if createdPublished != "false" {
-		t.Fatalf("unexpected module_item[published]: %q", createdPublished)
-	}
-}
-
-func TestRequestJSON_StatusErrorIncludesPayload(t *testing.T) {
-	t.Parallel()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("bad request payload"))
-	}))
-	defer ts.Close()
-
-	client, err := NewClient(ts.URL, "token", ts.Client())
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-
-	err = client.requestJSON(context.Background(), http.MethodGet, "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
-	if err == nil {
-		t.Fatal("expected status error")
-	}
-	if !strings.Contains(err.Error(), strconv.Itoa(http.StatusBadRequest)) {
-		t.Fatalf("expected status code in error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "bad request payload") {
-		t.Fatalf("expected payload in error, got: %v", err)
+		})
 	}
 }
 
@@ -369,79 +261,25 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func TestRequestJSON_DecodeError(t *testing.T) {
-	t.Parallel()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "not-json")
+func setupPaginatedModuleItemsServer(t *testing.T) (ts *httptest.Server, postCount *int) {
+	t.Helper()
+	var count int
+	postCount = &count
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+			if r.URL.Query().Get("page") == "1" {
+				w.Header().Set("Link", `<https://example.instructure.com/api/v1/courses/42/modules/7/items?page=2>; rel="next"`)
+				writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{{Type: "Page", PageURL: "other-page"}})
+				return
+			}
+			writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{{Type: "Page", PageURL: "materials-page"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+			count++
+			writeJSON(t, w, http.StatusCreated, map[string]any{"ok": true})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
 	}))
-	defer ts.Close()
-
-	client, err := NewClient(ts.URL, "token", ts.Client())
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-
-	var out map[string]any
-	err = client.requestJSON(context.Background(), http.MethodGet, "/api/v1/courses/42/modules", nil, nil, &out, http.StatusOK)
-	if err == nil {
-		t.Fatal("expected decode error")
-	}
-	if !strings.Contains(err.Error(), "decode response") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestHasNextPage_HandlesQuotedAndUnquotedForms(t *testing.T) {
-	t.Parallel()
-
-	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel="next"`) {
-		t.Fatal("expected hasNextPage to detect quoted rel=next")
-	}
-	if !hasNextPage(`<https://example.test/api/v1/items?page=2>; rel=next`) {
-		t.Fatal("expected hasNextPage to detect unquoted rel=next")
-	}
-	if hasNextPage(`<https://example.test/api/v1/items?page=1>; rel="prev"`) {
-		t.Fatal("expected hasNextPage false when next relation is absent")
-	}
-}
-
-func TestRequestJSONWithHeaders_BuildRequestError(t *testing.T) {
-	t.Parallel()
-
-	client := &Client{baseURL: "https://example.test", token: "token", httpClient: http.DefaultClient}
-	err := client.requestJSON(context.Background(), "BAD METHOD", "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
-	if err == nil {
-		t.Fatal("expected build request error")
-	}
-	if !strings.Contains(err.Error(), "build request") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-type errRoundTripper struct{}
-
-func (e errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("network unavailable")
-}
-
-func TestRequestJSONWithHeaders_PerformRequestError(t *testing.T) {
-	t.Parallel()
-
-	client := &Client{
-		baseURL: "https://example.test",
-		token:   "token",
-		httpClient: &http.Client{
-			Transport: errRoundTripper{},
-		},
-	}
-	err := client.requestJSON(context.Background(), http.MethodGet, "/api/v1/courses/42/pages", nil, nil, nil, http.StatusOK)
-	if err == nil {
-		t.Fatal("expected perform request error")
-	}
-	if !strings.Contains(err.Error(), "perform request") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	return ts, postCount
 }

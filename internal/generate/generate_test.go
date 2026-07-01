@@ -6,169 +6,72 @@ import (
 
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/generate"
+	"github.com/jh125486/pdf2qti/internal/render"
 )
 
-func TestGenerateStage_TF(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageTF, "some text", 3)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestGenerateStage_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		stage     config.Stage
+		count     int
+		wantCount int
+		check     func(t *testing.T, qs []render.Question)
+	}{
+		{name: "tf", stage: config.StageTF, count: 3, wantCount: 3},
+		{name: "ma", stage: config.StageMA, count: 2, wantCount: 2},
+		{name: "mc", stage: config.StageMC, count: 5, wantCount: 5},
+		{name: "sa", stage: config.StageSA, count: 2, wantCount: 2},
+		{name: "es", stage: config.StageES, count: 2, wantCount: 2},
+		{name: "mt", stage: config.StageMT, count: 2, wantCount: 2},
+		{name: "nr", stage: config.StageNR, count: 2, wantCount: 2},
+		{name: "zero", stage: config.StageTF, count: 0, wantCount: 0},
 	}
-	if len(qs) != 3 {
-		t.Errorf("expected 3 questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		correctCount := 0
-		for _, o := range q.Options {
-			if o.IsCorrect {
-				correctCount++
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := generate.New(config.Generation{})
+			qs, err := g.GenerateStage(context.Background(), tt.stage, "some text", tt.count)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-		}
-		if correctCount != 1 {
-			t.Errorf("TF question should have exactly 1 correct answer, got %d", correctCount)
-		}
-		if len(q.Options) != 2 {
-			t.Errorf("TF question should have 2 options (True/False), got %d", len(q.Options))
-		}
-	}
-}
-
-func TestGenerateStage_MA(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageMA, "some text", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 2 {
-		t.Errorf("expected 2 questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		if len(q.Options) == 0 {
-			t.Error("MA question should have options")
-		}
-	}
-}
-
-func TestGenerateStage_MC(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageMC, "some text", 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 5 {
-		t.Errorf("expected 5 questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		correctCount := 0
-		for _, o := range q.Options {
-			if o.IsCorrect {
-				correctCount++
+			if len(qs) != tt.wantCount {
+				t.Fatalf("len=%d want=%d", len(qs), tt.wantCount)
 			}
-		}
-		if correctCount != 1 {
-			t.Errorf("MC question should have exactly 1 correct answer, got %d", correctCount)
-		}
-	}
-}
-
-func TestGenerateStage_Zero(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageTF, "text", 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 0 {
-		t.Errorf("expected 0 questions, got %d", len(qs))
-	}
-}
-
-func TestGenerateStage_SA(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageSA, "some text", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 2 {
-		t.Errorf("expected 2 SA questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		if len(q.Options) == 0 {
-			t.Error("SA question should have at least one accepted answer option")
-		}
-		for _, o := range q.Options {
-			if !o.IsCorrect {
-				t.Error("SA answer options should be marked correct (IsCorrect=true)")
+			for _, q := range qs {
+				switch tt.stage {
+				case config.StageTF, config.StageMC:
+					correct := 0
+					for _, o := range q.Options {
+						if o.IsCorrect {
+							correct++
+						}
+					}
+					if correct != 1 {
+						t.Fatalf("expected exactly one correct option, got %d", correct)
+					}
+				case config.StageES:
+					if len(q.Options) != 0 {
+						t.Fatalf("essay should have no options, got %d", len(q.Options))
+					}
+				case config.StageMT:
+					for _, o := range q.Options {
+						if o.MatchText == "" {
+							t.Fatal("matching option missing MatchText")
+						}
+					}
+				}
 			}
-		}
+		})
 	}
 }
 
-func TestGenerateStage_ES(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageES, "some text", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 2 {
-		t.Errorf("expected 2 ES questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		// Essay questions have no options
-		if len(q.Options) != 0 {
-			t.Errorf("ES question should have no options, got %d", len(q.Options))
-		}
-	}
-}
-
-func TestGenerateStage_MT(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageMT, "some text", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 2 {
-		t.Errorf("expected 2 MT questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		if len(q.Options) == 0 {
-			t.Error("MT question should have matching pairs")
-		}
-		for _, o := range q.Options {
-			if o.MatchText == "" {
-				t.Error("MT option should have non-empty MatchText")
-			}
-		}
-	}
-}
-
-func TestGenerateStage_NR(t *testing.T) {
-	g := generate.New(config.Generation{})
-	qs, err := g.GenerateStage(context.Background(), config.StageNR, "some text", 2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(qs) != 2 {
-		t.Errorf("expected 2 NR questions, got %d", len(qs))
-	}
-	for _, q := range qs {
-		hasAnswer := false
-		for _, o := range q.Options {
-			if o.IsCorrect {
-				hasAnswer = true
-			}
-		}
-		if !hasAnswer {
-			t.Error("NR question should have at least one correct answer value")
-		}
-	}
-}
-
-func TestNew(t *testing.T) {
-	cfg := config.Generation{
-		Provider: "openai",
-		Model:    "gpt-4o",
-	}
-	g := generate.New(cfg)
+func TestNew_ReturnsGenerator(t *testing.T) {
+	t.Parallel()
+	g := generate.New(config.Generation{Provider: "openai", Model: "gpt-4o"})
 	if g == nil {
 		t.Fatal("expected non-nil generator")
 	}

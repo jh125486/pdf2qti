@@ -17,6 +17,7 @@ type CLI struct {
 	Approve  ApproveCmd  `cmd:""                    help:"Convert approved quiz markdown draft to QTI."`
 	Validate ValidateCmd `cmd:""                    help:"Validate quiz markdown draft."`
 	Page     PageCmd     `cmd:""                    help:"Render HTML page from distilled context and template."`
+	PPTX     PPTXCmd     `cmd:""                    help:"Render PPTX from distilled context and template."`
 	Publish  PublishCmd  `cmd:""                    help:"Render and publish Canvas pages for each module context."`
 }
 
