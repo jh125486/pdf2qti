@@ -17,36 +17,135 @@ func makeDraft(tf, ma, mc []render.Question) *render.QuizDraft {
 	}
 }
 
-func TestValidateDraft_SequentialNumbering(t *testing.T) {
+func TestValidateDraft_Table(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		draft     *render.QuizDraft
+		v         config.Validation
 		wantValid bool
 	}{
 		{
-			name: "valid sequential",
+			name: "valid sequential numbering",
 			draft: makeDraft(
 				[]render.Question{{Number: 1, Text: "Q1", Options: []render.Option{{Text: "True", IsCorrect: true}, {Text: "False"}}}},
 				nil,
 				[]render.Question{{Number: 2, Text: "Q2", Options: []render.Option{{Text: "A", IsCorrect: true}, {Text: "B"}}}},
 			),
+			v:         config.Validation{RequireSequentialNumbering: true},
 			wantValid: true,
 		},
 		{
-			name: "invalid sequential",
+			name: "invalid sequential numbering",
 			draft: makeDraft(
 				[]render.Question{{Number: 5, Text: "Q1", Options: []render.Option{{Text: "True", IsCorrect: true}}}},
-				nil,
+				nil, nil,
+			),
+			v:         config.Validation{RequireSequentialNumbering: true},
+			wantValid: false,
+		},
+		{
+			name: "TF zero correct options",
+			draft: makeDraft(
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "True", IsCorrect: false}, {Text: "False", IsCorrect: false},
+				}}},
+				nil, nil,
+			),
+			v:         config.Validation{RequireExactlyOneCorrectForTFMC: true},
+			wantValid: false,
+		},
+		{
+			name: "TF two correct options",
+			draft: makeDraft(
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "True", IsCorrect: true}, {Text: "False", IsCorrect: true},
+				}}},
+				nil, nil,
+			),
+			v:         config.Validation{RequireExactlyOneCorrectForTFMC: true},
+			wantValid: false,
+		},
+		{
+			name: "TF exactly one correct option",
+			draft: makeDraft(
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "True", IsCorrect: true}, {Text: "False", IsCorrect: false},
+				}}},
+				nil, nil,
+			),
+			v:         config.Validation{RequireExactlyOneCorrectForTFMC: true},
+			wantValid: true,
+		},
+		{
+			name: "MC exactly one correct option",
+			draft: makeDraft(nil, nil,
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "A", IsCorrect: true}, {Text: "B", IsCorrect: false},
+				}}},
+			),
+			v:         config.Validation{RequireExactlyOneCorrectForTFMC: true},
+			wantValid: true,
+		},
+		{
+			name: "MA density exceeded",
+			draft: makeDraft(nil,
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "A", IsCorrect: true}, {Text: "B", IsCorrect: true},
+					{Text: "C", IsCorrect: true}, {Text: "D", IsCorrect: false},
+				}}},
 				nil,
 			),
+			v:         config.Validation{MAMaxCorrectDensity: 0.5},
 			wantValid: false,
+		},
+		{
+			name: "MA density within limit",
+			draft: makeDraft(nil,
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "A", IsCorrect: true}, {Text: "B", IsCorrect: false},
+					{Text: "C", IsCorrect: false}, {Text: "D", IsCorrect: false},
+				}}},
+				nil,
+			),
+			v:         config.Validation{MAMaxCorrectDensity: 0.5},
+			wantValid: true,
+		},
+		{
+			name: "MC duplicate options",
+			draft: makeDraft(nil, nil,
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "A", IsCorrect: true}, {Text: "A", IsCorrect: false},
+				}}},
+			),
+			v:         config.Validation{EnforceUniqueOptionsPerQuestion: true},
+			wantValid: false,
+		},
+		{
+			name: "MA duplicate options",
+			draft: makeDraft(nil,
+				[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
+					{Text: "Same", IsCorrect: true}, {Text: "Same", IsCorrect: false},
+				}}},
+				nil,
+			),
+			v:         config.Validation{EnforceUniqueOptionsPerQuestion: true},
+			wantValid: false,
+		},
+		{
+			name:      "empty draft with no rules",
+			draft:     makeDraft(nil, nil, nil),
+			v:         config.Validation{},
+			wantValid: true,
 		},
 	}
 
-	v := config.Validation{RequireSequentialNumbering: true}
 	for _, tt := range tests {
+
 		t.Run(tt.name, func(t *testing.T) {
-			result := validate.ValidateDraft(tt.draft, v)
+			t.Parallel()
+			result := validate.ValidateDraft(tt.draft, tt.v)
 			if result.IsValid() != tt.wantValid {
 				t.Errorf("IsValid()=%v, want %v; errors: %v", result.IsValid(), tt.wantValid, result.Errors)
 			}
@@ -54,117 +153,27 @@ func TestValidateDraft_SequentialNumbering(t *testing.T) {
 	}
 }
 
-func TestValidateDraft_TFExactlyOneCorrect(t *testing.T) {
-	v := config.Validation{RequireExactlyOneCorrectForTFMC: true}
+func TestIsValid_Table(t *testing.T) {
+	t.Parallel()
 
-	t.Run("zero correct", func(t *testing.T) {
-		draft := makeDraft(
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "True", IsCorrect: false},
-				{Text: "False", IsCorrect: false},
-			}}},
-			nil, nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if result.IsValid() {
-			t.Error("expected invalid")
-		}
-	})
+	tests := []struct {
+		name   string
+		result *validate.Result
+		want   bool
+	}{
+		{name: "no errors", result: &validate.Result{}, want: true},
+		{name: "with warnings only", result: &validate.Result{Warnings: []string{"careful"}}, want: true},
+		{name: "with errors", result: &validate.Result{Errors: []string{"bad"}}, want: false},
+		{name: "with errors and warnings", result: &validate.Result{Errors: []string{"bad"}, Warnings: []string{"careful"}}, want: false},
+	}
 
-	t.Run("two correct", func(t *testing.T) {
-		draft := makeDraft(
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "True", IsCorrect: true},
-				{Text: "False", IsCorrect: true},
-			}}},
-			nil, nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if result.IsValid() {
-			t.Error("expected invalid")
-		}
-	})
+	for _, tt := range tests {
 
-	t.Run("exactly one correct", func(t *testing.T) {
-		draft := makeDraft(
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "True", IsCorrect: true},
-				{Text: "False", IsCorrect: false},
-			}}},
-			nil, nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if !result.IsValid() {
-			t.Errorf("expected valid; errors: %v", result.Errors)
-		}
-	})
-}
-
-func TestValidateDraft_MADensity(t *testing.T) {
-	v := config.Validation{MAMaxCorrectDensity: 0.5}
-
-	t.Run("density exceeded", func(t *testing.T) {
-		// 3 correct out of 4 = 0.75, exceeds 0.5
-		draft := makeDraft(nil,
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "A", IsCorrect: true},
-				{Text: "B", IsCorrect: true},
-				{Text: "C", IsCorrect: true},
-				{Text: "D", IsCorrect: false},
-			}}},
-			nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if result.IsValid() {
-			t.Error("expected invalid due to density")
-		}
-	})
-
-	t.Run("density ok", func(t *testing.T) {
-		// 1 correct out of 4 = 0.25, within 0.5
-		draft := makeDraft(nil,
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "A", IsCorrect: true},
-				{Text: "B", IsCorrect: false},
-				{Text: "C", IsCorrect: false},
-				{Text: "D", IsCorrect: false},
-			}}},
-			nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if !result.IsValid() {
-			t.Errorf("expected valid; errors: %v", result.Errors)
-		}
-	})
-}
-
-func TestValidateDraft_DuplicateOptions(t *testing.T) {
-	v := config.Validation{EnforceUniqueOptionsPerQuestion: true}
-
-	t.Run("duplicate MC options", func(t *testing.T) {
-		draft := makeDraft(nil, nil,
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "A", IsCorrect: true},
-				{Text: "A", IsCorrect: false},
-			}}},
-		)
-		result := validate.ValidateDraft(draft, v)
-		if result.IsValid() {
-			t.Error("expected invalid due to duplicate options")
-		}
-	})
-
-	t.Run("duplicate MA options", func(t *testing.T) {
-		draft := makeDraft(nil,
-			[]render.Question{{Number: 1, Text: "Q?", Options: []render.Option{
-				{Text: "Same", IsCorrect: true},
-				{Text: "Same", IsCorrect: false},
-			}}},
-			nil,
-		)
-		result := validate.ValidateDraft(draft, v)
-		if result.IsValid() {
-			t.Error("expected invalid due to duplicate MA options")
-		}
-	})
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.result.IsValid(); got != tt.want {
+				t.Errorf("IsValid()=%v, want %v", got, tt.want)
+			}
+		})
+	}
 }

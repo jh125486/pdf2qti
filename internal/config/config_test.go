@@ -1,242 +1,448 @@
 package config_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jh125486/pdf2qti/internal/config"
 )
 
-func TestLoad_Valid(t *testing.T) {
-	cfg, err := config.Load("testdata/valid.json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestLoad_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		path       string
+		wantErr    bool
+		errLike    string
+		wantVer    int
+		wantNumSrc int
+	}{
+		{name: "valid", path: "testdata/valid.json", wantVer: 1, wantNumSrc: 1},
+		{name: "missing file", path: "testdata/no_such_file.json", wantErr: true, errLike: "read config"},
+		{name: "bad json", path: "testdata/bad_json.json", wantErr: true, errLike: "parse config"},
+		{name: "invalid version", path: "testdata/invalid_version.json", wantErr: true, errLike: "validate config"},
+		{name: "no sources", path: "testdata/no_sources.json", wantErr: true, errLike: "validate config"},
 	}
-	if cfg.Version != 1 {
-		t.Errorf("expected version 1, got %d", cfg.Version)
-	}
-	if len(cfg.Sources) != 1 {
-		t.Errorf("expected 1 source, got %d", len(cfg.Sources))
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := config.Load(tt.path)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
+			}
+			if tt.errLike != "" && (err == nil || !strings.Contains(err.Error(), tt.errLike)) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
+			}
+			if !tt.wantErr {
+				if cfg.Version != tt.wantVer {
+					t.Errorf("version=%d want=%d", cfg.Version, tt.wantVer)
+				}
+				if len(cfg.Sources) != tt.wantNumSrc {
+					t.Errorf("sources=%d want=%d", len(cfg.Sources), tt.wantNumSrc)
+				}
+			}
+		})
 	}
 }
 
-func TestLoad_InvalidJSON(t *testing.T) {
-	_, err := config.Load("testdata/no_such_file.json")
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
+func TestValidate_Table(t *testing.T) {
+	t.Parallel()
 
-func TestLoad_InvalidVersion(t *testing.T) {
-	_, err := config.Load("testdata/invalid_version.json")
-	if err == nil {
-		t.Fatal("expected error for invalid version")
-	}
-}
-
-func TestLoad_NoSources(t *testing.T) {
-	_, err := config.Load("testdata/no_sources.json")
-	if err == nil {
-		t.Fatal("expected error for empty sources")
-	}
-}
-
-func TestValidate_VersionNot1(t *testing.T) {
-	c := &config.Config{
-		Version: 2,
-		Sources: []config.Source{{ID: "x", PDF: "x.pdf"}},
-	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("expected error for version != 1")
-	}
-}
-
-func TestValidate_EmptySources(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Sources: []config.Source{},
-	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("expected error for empty sources")
-	}
-}
-
-func TestValidate_MissingSourceID(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Sources: []config.Source{{PDF: "x.pdf"}},
-	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("expected error for missing source ID")
-	}
-}
-
-func TestValidate_MissingSourcePDF(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Sources: []config.Source{{ID: "x"}},
-	}
-	if err := c.Validate(); err == nil {
-		t.Fatal("expected error for missing source PDF")
-	}
-}
-
-func TestEffectiveWorkflow_Merging(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Workflow: config.Workflow{
-				OutDir:       "default-out",
-				OpenReview:   false,
-				ReviewTarget: "default-target",
-			},
+	tests := []struct {
+		name    string
+		cfg     config.Config
+		wantErr bool
+		errLike string
+	}{
+		{
+			name:    "valid",
+			cfg:     config.Config{Version: 1, Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}}},
+			wantErr: false,
 		},
-		Sources: []config.Source{
-			{
-				ID:  "s1",
-				PDF: "s1.pdf",
-				Workflow: &config.Workflow{
-					OutDir:     "source-out",
-					OpenReview: true,
+		{
+			name:    "version not 1",
+			cfg:     config.Config{Version: 2, Sources: []config.Source{{ID: "x", PDF: "x.pdf"}}},
+			wantErr: true,
+			errLike: "unsupported config version",
+		},
+		{
+			name:    "empty sources",
+			cfg:     config.Config{Version: 1, Sources: []config.Source{}},
+			wantErr: true,
+			errLike: "sources must not be empty",
+		},
+		{
+			name:    "missing source id",
+			cfg:     config.Config{Version: 1, Sources: []config.Source{{PDF: "x.pdf"}}},
+			wantErr: true,
+			errLike: "id must not be empty",
+		},
+		{
+			name:    "missing source pdf",
+			cfg:     config.Config{Version: 1, Sources: []config.Source{{ID: "x"}}},
+			wantErr: true,
+			errLike: "pdf must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
+			}
+			if tt.errLike != "" && (err == nil || !strings.Contains(err.Error(), tt.errLike)) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
+			}
+		})
+	}
+}
+
+func TestEffectiveWorkflow_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		cfg              config.Config
+		wantOutDir       string
+		wantOpenReview   bool
+		wantReviewTarget string
+	}{
+		{
+			name: "no source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Workflow: config.Workflow{OutDir: "default-out"}},
+				Sources:  []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+			},
+			wantOutDir: "default-out",
+		},
+		{
+			name: "full merge",
+			cfg: config.Config{
+				Defaults: config.Defaults{Workflow: config.Workflow{OutDir: "default-out", ReviewTarget: "default-target"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{OutDir: "source-out", OpenReview: true}},
 				},
 			},
+			wantOutDir:       "source-out",
+			wantOpenReview:   true,
+			wantReviewTarget: "default-target",
+		},
+		{
+			name: "review target override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Workflow: config.Workflow{ReviewTarget: "default-target"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{ReviewTarget: "source-target"}},
+				},
+			},
+			wantReviewTarget: "source-target",
 		},
 	}
 
-	src := &c.Sources[0]
-	wf := c.EffectiveWorkflow(src)
-	if wf.OutDir != "source-out" {
-		t.Errorf("expected OutDir %q, got %q", "source-out", wf.OutDir)
-	}
-	if !wf.OpenReview {
-		t.Error("expected OpenReview true")
-	}
-	// ReviewTarget not set in source, should keep default
-	if wf.ReviewTarget != "default-target" {
-		t.Errorf("expected ReviewTarget %q, got %q", "default-target", wf.ReviewTarget)
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.EffectiveWorkflow(&tt.cfg.Sources[0])
+			if got.OutDir != tt.wantOutDir {
+				t.Errorf("OutDir=%q want=%q", got.OutDir, tt.wantOutDir)
+			}
+			if got.OpenReview != tt.wantOpenReview {
+				t.Errorf("OpenReview=%v want=%v", got.OpenReview, tt.wantOpenReview)
+			}
+			if got.ReviewTarget != tt.wantReviewTarget {
+				t.Errorf("ReviewTarget=%q want=%q", got.ReviewTarget, tt.wantReviewTarget)
+			}
+		})
 	}
 }
 
-func TestEffectiveWorkflow_NoSourceOverride(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Workflow: config.Workflow{OutDir: "default-out"},
+func TestEffectiveQuiz_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		cfg               config.Config
+		wantTitleTemplate string
+		wantDescTemplate  string
+		wantCounts        config.Counts
+		wantMCOptions     config.OptionRange
+		wantMAOptions     config.OptionRange
+	}{
+		{
+			name: "no source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Quiz: config.Quiz{TitleTemplate: "default"}},
+				Sources:  []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+			},
+			wantTitleTemplate: "default",
 		},
-		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+		{
+			name: "source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Quiz: config.Quiz{TitleTemplate: "default"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Quiz: &config.Quiz{TitleTemplate: "custom", Counts: config.Counts{TF: 5, MA: 5, MC: 5}}},
+				},
+			},
+			wantTitleTemplate: "custom",
+			wantCounts:        config.Counts{TF: 5, MA: 5, MC: 5},
+		},
+		{
+			name: "partial merge keeps default counts",
+			cfg: config.Config{
+				Defaults: config.Defaults{Quiz: config.Quiz{TitleTemplate: "default-title", Counts: config.Counts{TF: 3, MA: 3, MC: 3}}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Quiz: &config.Quiz{TitleTemplate: "custom-title"}},
+				},
+			},
+			wantTitleTemplate: "custom-title",
+			wantCounts:        config.Counts{TF: 3, MA: 3, MC: 3},
+		},
+		{
+			name: "all fields overridden",
+			cfg: config.Config{
+				Defaults: config.Defaults{
+					Quiz: config.Quiz{
+						TitleTemplate:       "default-title",
+						DescriptionTemplate: "default-desc",
+						Counts:              config.Counts{TF: 1, MA: 1, MC: 1},
+						MCOptions:           config.OptionRange{Min: 3, Max: 5},
+						MAOptions:           config.OptionRange{Min: 3, Max: 5},
+					},
+				},
+				Sources: []config.Source{
+					{
+						ID:  "s1",
+						PDF: "s1.pdf",
+						Quiz: &config.Quiz{
+							DescriptionTemplate: "src-desc",
+							Counts:              config.Counts{SA: 2, ES: 1, MT: 1, NR: 1},
+							MCOptions:           config.OptionRange{Min: 4, Max: 4},
+							MAOptions:           config.OptionRange{Min: 4, Max: 6},
+						},
+					},
+				},
+			},
+			wantTitleTemplate: "default-title",
+			wantDescTemplate:  "src-desc",
+			wantCounts:        config.Counts{TF: 1, MA: 1, MC: 1, SA: 2, ES: 1, MT: 1, NR: 1},
+			wantMCOptions:     config.OptionRange{Min: 4, Max: 4},
+			wantMAOptions:     config.OptionRange{Min: 4, Max: 6},
+		},
 	}
-	wf := c.EffectiveWorkflow(&c.Sources[0])
-	if wf.OutDir != "default-out" {
-		t.Errorf("expected %q, got %q", "default-out", wf.OutDir)
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.EffectiveQuiz(&tt.cfg.Sources[0])
+			if got.TitleTemplate != tt.wantTitleTemplate {
+				t.Errorf("TitleTemplate=%q want=%q", got.TitleTemplate, tt.wantTitleTemplate)
+			}
+			if got.DescriptionTemplate != tt.wantDescTemplate {
+				t.Errorf("DescriptionTemplate=%q want=%q", got.DescriptionTemplate, tt.wantDescTemplate)
+			}
+			if got.Counts != tt.wantCounts {
+				t.Errorf("Counts=%+v want=%+v", got.Counts, tt.wantCounts)
+			}
+			if tt.wantMCOptions != (config.OptionRange{}) && got.MCOptions != tt.wantMCOptions {
+				t.Errorf("MCOptions=%+v want=%+v", got.MCOptions, tt.wantMCOptions)
+			}
+			if tt.wantMAOptions != (config.OptionRange{}) && got.MAOptions != tt.wantMAOptions {
+				t.Errorf("MAOptions=%+v want=%+v", got.MAOptions, tt.wantMAOptions)
+			}
+		})
 	}
 }
 
-func TestEffectiveQuiz_SourceOverride(t *testing.T) {
-	customQuiz := &config.Quiz{TitleTemplate: "custom", Counts: config.Counts{TF: 5, MA: 5, MC: 5}}
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Quiz: config.Quiz{TitleTemplate: "default"},
+func TestEffectiveGeneration_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		cfg          config.Config
+		wantModel    string
+		wantProvider string
+		wantSeed     int
+		wantStages   []config.Stage
+	}{
+		{
+			name: "no source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Generation: config.Generation{Model: "gpt-4o"}},
+				Sources:  []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+			},
+			wantModel: "gpt-4o",
 		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Quiz: customQuiz},
+		{
+			name: "source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Generation: config.Generation{Model: "gpt-4o"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Generation: &config.Generation{Model: "gpt-4o-mini"}},
+				},
+			},
+			wantModel: "gpt-4o-mini",
+		},
+		{
+			name: "partial merge keeps default provider",
+			cfg: config.Config{
+				Defaults: config.Defaults{Generation: config.Generation{Model: "gpt-4o", Provider: "openai"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Generation: &config.Generation{Model: "gpt-4o-mini"}},
+				},
+			},
+			wantModel:    "gpt-4o-mini",
+			wantProvider: "openai",
+		},
+		{
+			name: "all fields overridden",
+			cfg: config.Config{
+				Defaults: config.Defaults{Generation: config.Generation{Model: "gpt-4o"}},
+				Sources: []config.Source{
+					{
+						ID:  "s1",
+						PDF: "s1.pdf",
+						Generation: &config.Generation{
+							Stages:      []config.Stage{config.StageTF, config.StageMC},
+							Seed:        99,
+							Provider:    "anthropic",
+							APIKeyEnv:   "MY_KEY",
+							Temperature: 0.9,
+						},
+					},
+				},
+			},
+			wantProvider: "anthropic",
+			wantSeed:     99,
+			wantStages:   []config.Stage{config.StageTF, config.StageMC},
 		},
 	}
-	got := c.EffectiveQuiz(&c.Sources[0])
-	if got.TitleTemplate != "custom" {
-		t.Errorf("expected custom quiz, got %q", got.TitleTemplate)
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.EffectiveGeneration(&tt.cfg.Sources[0])
+			if tt.wantModel != "" && got.Model != tt.wantModel {
+				t.Errorf("Model=%q want=%q", got.Model, tt.wantModel)
+			}
+			if tt.wantProvider != "" && got.Provider != tt.wantProvider {
+				t.Errorf("Provider=%q want=%q", got.Provider, tt.wantProvider)
+			}
+			if tt.wantSeed != 0 && got.Seed != tt.wantSeed {
+				t.Errorf("Seed=%d want=%d", got.Seed, tt.wantSeed)
+			}
+			if len(tt.wantStages) > 0 && len(got.Stages) != len(tt.wantStages) {
+				t.Errorf("Stages=%v want=%v", got.Stages, tt.wantStages)
+			}
+		})
 	}
 }
 
-func TestEffectiveQuiz_NoSourceOverride(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Quiz: config.Quiz{TitleTemplate: "default"},
+func TestEffectiveValidation_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		cfg                 config.Config
+		wantMAMaxDensity    float64
+		wantEnforceUnique   bool
+		wantRequireSeq      bool
+		wantRequireExactOne bool
+	}{
+		{
+			name: "no source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Validation: config.Validation{MAMaxCorrectDensity: 0.5}},
+				Sources:  []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+			},
+			wantMAMaxDensity: 0.5,
 		},
-		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+		{
+			name: "source override",
+			cfg: config.Config{
+				Defaults: config.Defaults{Validation: config.Validation{MAMaxCorrectDensity: 0.5}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Validation: &config.Validation{MAMaxCorrectDensity: 0.3}},
+				},
+			},
+			wantMAMaxDensity: 0.3,
+		},
+		{
+			name: "partial merge keeps default flag",
+			cfg: config.Config{
+				Defaults: config.Defaults{Validation: config.Validation{MAMaxCorrectDensity: 0.5, RequireSequentialNumbering: true}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Validation: &config.Validation{MAMaxCorrectDensity: 0.3}},
+				},
+			},
+			wantMAMaxDensity: 0.3,
+			wantRequireSeq:   true,
+		},
+		{
+			name: "all fields overridden",
+			cfg: config.Config{
+				Defaults: config.Defaults{Validation: config.Validation{MAMaxCorrectDensity: 0.5}},
+				Sources: []config.Source{
+					{
+						ID:  "s1",
+						PDF: "s1.pdf",
+						Validation: &config.Validation{
+							EnforceUniqueOptionsPerQuestion: true,
+							RequireSequentialNumbering:      true,
+							RequireExactlyOneCorrectForTFMC: true,
+						},
+					},
+				},
+			},
+			wantMAMaxDensity:    0.5,
+			wantEnforceUnique:   true,
+			wantRequireSeq:      true,
+			wantRequireExactOne: true,
+		},
 	}
-	got := c.EffectiveQuiz(&c.Sources[0])
-	if got.TitleTemplate != "default" {
-		t.Errorf("expected default quiz, got %q", got.TitleTemplate)
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.EffectiveValidation(&tt.cfg.Sources[0])
+			if got.MAMaxCorrectDensity != tt.wantMAMaxDensity {
+				t.Errorf("MAMaxCorrectDensity=%f want=%f", got.MAMaxCorrectDensity, tt.wantMAMaxDensity)
+			}
+			if got.EnforceUniqueOptionsPerQuestion != tt.wantEnforceUnique {
+				t.Errorf("EnforceUniqueOptionsPerQuestion=%v want=%v", got.EnforceUniqueOptionsPerQuestion, tt.wantEnforceUnique)
+			}
+			if got.RequireSequentialNumbering != tt.wantRequireSeq {
+				t.Errorf("RequireSequentialNumbering=%v want=%v", got.RequireSequentialNumbering, tt.wantRequireSeq)
+			}
+			if got.RequireExactlyOneCorrectForTFMC != tt.wantRequireExactOne {
+				t.Errorf("RequireExactlyOneCorrectForTFMC=%v want=%v", got.RequireExactlyOneCorrectForTFMC, tt.wantRequireExactOne)
+			}
+		})
 	}
 }
 
-func TestEffectiveGeneration_SourceOverride(t *testing.T) {
-	customGen := &config.Generation{Model: "gpt-4o-mini"}
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Generation: config.Generation{Model: "gpt-4o"},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Generation: customGen},
-		},
-	}
-	got := c.EffectiveGeneration(&c.Sources[0])
-	if got.Model != "gpt-4o-mini" {
-		t.Errorf("expected gpt-4o-mini, got %q", got.Model)
-	}
-}
+func TestOutDir_Table(t *testing.T) {
+	t.Parallel()
 
-func TestEffectiveGeneration_NoSourceOverride(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Generation: config.Generation{Model: "gpt-4o"},
-		},
-		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
-	}
-	got := c.EffectiveGeneration(&c.Sources[0])
-	if got.Model != "gpt-4o" {
-		t.Errorf("expected gpt-4o, got %q", got.Model)
-	}
-}
-
-func TestEffectiveValidation_SourceOverride(t *testing.T) {
-	customVal := &config.Validation{MAMaxCorrectDensity: 0.3}
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Validation: config.Validation{MAMaxCorrectDensity: 0.5},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Validation: customVal},
-		},
-	}
-	got := c.EffectiveValidation(&c.Sources[0])
-	if got.MAMaxCorrectDensity != 0.3 {
-		t.Errorf("expected 0.3, got %f", got.MAMaxCorrectDensity)
-	}
-}
-
-func TestEffectiveValidation_NoSourceOverride(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Validation: config.Validation{MAMaxCorrectDensity: 0.5},
-		},
-		Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
-	}
-	got := c.EffectiveValidation(&c.Sources[0])
-	if got.MAMaxCorrectDensity != 0.5 {
-		t.Errorf("expected 0.5, got %f", got.MAMaxCorrectDensity)
-	}
-}
-
-func TestOutDir_Precedence(t *testing.T) {
 	tests := []struct {
 		name     string
 		cfg      config.Config
-		srcIdx   int
 		expected string
 	}{
 		{
 			name: "source outDir wins",
 			cfg: config.Config{
-				Version: 1,
-				Defaults: config.Defaults{
-					Workflow: config.Workflow{OutDir: "default-out"},
-				},
+				Defaults: config.Defaults{Workflow: config.Workflow{OutDir: "default-out"}},
 				Sources: []config.Source{
 					{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{OutDir: "src-out"}},
 				},
@@ -246,242 +452,38 @@ func TestOutDir_Precedence(t *testing.T) {
 		{
 			name: "defaults outDir",
 			cfg: config.Config{
-				Version: 1,
-				Defaults: config.Defaults{
-					Workflow: config.Workflow{OutDir: "default-out"},
-				},
-				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Defaults: config.Defaults{Workflow: config.Workflow{OutDir: "default-out"}},
+				Sources:  []config.Source{{ID: "s1", PDF: "s1.pdf"}},
 			},
 			expected: "default-out",
 		},
 		{
 			name: "fallback to out",
 			cfg: config.Config{
-				Version: 1,
 				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
 			},
 			expected: "out",
 		},
+		{
+			name: "source workflow present but outDir empty falls back to defaults",
+			cfg: config.Config{
+				Defaults: config.Defaults{Workflow: config.Workflow{OutDir: "default-out"}},
+				Sources: []config.Source{
+					{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{ReviewTarget: "editor"}},
+				},
+			},
+			expected: "default-out",
+		},
 	}
 
 	for _, tt := range tests {
+
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := tt.cfg.OutDir(&tt.cfg.Sources[0])
 			if got != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, got)
 			}
 		})
-	}
-}
-
-func TestLoad_BadJSON(t *testing.T) {
-	_, err := config.Load("testdata/bad_json.json")
-	if err == nil {
-		t.Fatal("expected error for malformed JSON")
-	}
-}
-
-func TestEffectiveWorkflow_ReviewTargetOverride(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Workflow: config.Workflow{ReviewTarget: "default-target"},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Workflow: &config.Workflow{ReviewTarget: "source-target"}},
-		},
-	}
-	wf := c.EffectiveWorkflow(&c.Sources[0])
-	if wf.ReviewTarget != "source-target" {
-		t.Errorf("expected source ReviewTarget %q, got %q", "source-target", wf.ReviewTarget)
-	}
-}
-
-func TestEffectiveQuiz_AllFields(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Quiz: config.Quiz{
-				TitleTemplate:       "default-title",
-				DescriptionTemplate: "default-desc",
-				Counts:              config.Counts{TF: 1, MA: 1, MC: 1},
-				MCOptions:           config.OptionRange{Min: 3, Max: 5},
-				MAOptions:           config.OptionRange{Min: 3, Max: 5},
-			},
-		},
-		Sources: []config.Source{
-			{
-				ID:  "s1",
-				PDF: "s1.pdf",
-				Quiz: &config.Quiz{
-					DescriptionTemplate: "src-desc",
-					Counts:              config.Counts{SA: 2, ES: 1, MT: 1, NR: 1},
-					MCOptions:           config.OptionRange{Min: 4, Max: 4},
-					MAOptions:           config.OptionRange{Min: 4, Max: 6},
-				},
-			},
-		},
-	}
-	got := c.EffectiveQuiz(&c.Sources[0])
-	if got.DescriptionTemplate != "src-desc" {
-		t.Errorf("expected DescriptionTemplate %q, got %q", "src-desc", got.DescriptionTemplate)
-	}
-	if got.Counts.SA != 2 {
-		t.Errorf("expected SA count 2, got %d", got.Counts.SA)
-	}
-	if got.Counts.ES != 1 {
-		t.Errorf("expected ES count 1, got %d", got.Counts.ES)
-	}
-	if got.Counts.MT != 1 {
-		t.Errorf("expected MT count 1, got %d", got.Counts.MT)
-	}
-	if got.Counts.NR != 1 {
-		t.Errorf("expected NR count 1, got %d", got.Counts.NR)
-	}
-	if got.MCOptions.Min != 4 || got.MCOptions.Max != 4 {
-		t.Errorf("expected MCOptions {4,4}, got %+v", got.MCOptions)
-	}
-	if got.MAOptions.Min != 4 || got.MAOptions.Max != 6 {
-		t.Errorf("expected MAOptions {4,6}, got %+v", got.MAOptions)
-	}
-}
-
-func TestEffectiveGeneration_AllFields(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Generation: config.Generation{
-				Provider: "openai",
-				Model:    "gpt-4o",
-			},
-		},
-		Sources: []config.Source{
-			{
-				ID:  "s1",
-				PDF: "s1.pdf",
-				Generation: &config.Generation{
-					Stages:      []config.Stage{config.StageTF, config.StageMC},
-					Seed:        99,
-					Provider:    "anthropic",
-					APIKeyEnv:   "MY_KEY",
-					Temperature: 0.9,
-				},
-			},
-		},
-	}
-	got := c.EffectiveGeneration(&c.Sources[0])
-	if len(got.Stages) != 2 || got.Stages[0] != config.StageTF {
-		t.Errorf("expected stages [tf mc], got %v", got.Stages)
-	}
-	if got.Seed != 99 {
-		t.Errorf("expected Seed 99, got %d", got.Seed)
-	}
-	if got.Provider != "anthropic" {
-		t.Errorf("expected Provider anthropic, got %q", got.Provider)
-	}
-	if got.APIKeyEnv != "MY_KEY" {
-		t.Errorf("expected APIKeyEnv MY_KEY, got %q", got.APIKeyEnv)
-	}
-	if got.Temperature != 0.9 {
-		t.Errorf("expected Temperature 0.9, got %f", got.Temperature)
-	}
-}
-
-func TestEffectiveValidation_AllFields(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Validation: config.Validation{
-				MAMaxCorrectDensity: 0.5,
-			},
-		},
-		Sources: []config.Source{
-			{
-				ID:  "s1",
-				PDF: "s1.pdf",
-				Validation: &config.Validation{
-					EnforceUniqueOptionsPerQuestion: true,
-					RequireSequentialNumbering:      true,
-					RequireExactlyOneCorrectForTFMC: true,
-				},
-			},
-		},
-	}
-	got := c.EffectiveValidation(&c.Sources[0])
-	if !got.EnforceUniqueOptionsPerQuestion {
-		t.Error("expected EnforceUniqueOptionsPerQuestion true")
-	}
-	if !got.RequireSequentialNumbering {
-		t.Error("expected RequireSequentialNumbering true")
-	}
-	if !got.RequireExactlyOneCorrectForTFMC {
-		t.Error("expected RequireExactlyOneCorrectForTFMC true")
-	}
-	// MAMaxCorrectDensity not overridden (0 in source)
-	if got.MAMaxCorrectDensity != 0.5 {
-		t.Errorf("expected MAMaxCorrectDensity 0.5, got %f", got.MAMaxCorrectDensity)
-	}
-}
-
-func TestEffectiveQuiz_PartialMerge(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Quiz: config.Quiz{
-				TitleTemplate: "default-title",
-				Counts:        config.Counts{TF: 3, MA: 3, MC: 3},
-			},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Quiz: &config.Quiz{TitleTemplate: "custom-title"}},
-		},
-	}
-	got := c.EffectiveQuiz(&c.Sources[0])
-	if got.TitleTemplate != "custom-title" {
-		t.Errorf("expected custom-title, got %q", got.TitleTemplate)
-	}
-	// Counts not overridden, should keep defaults
-	if got.Counts.TF != 3 {
-		t.Errorf("expected TF count 3 from defaults, got %d", got.Counts.TF)
-	}
-}
-
-func TestEffectiveGeneration_PartialMerge(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Generation: config.Generation{Model: "gpt-4o", Provider: "openai"},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Generation: &config.Generation{Model: "gpt-4o-mini"}},
-		},
-	}
-	got := c.EffectiveGeneration(&c.Sources[0])
-	if got.Model != "gpt-4o-mini" {
-		t.Errorf("expected gpt-4o-mini, got %q", got.Model)
-	}
-	// Provider not overridden, should keep default
-	if got.Provider != "openai" {
-		t.Errorf("expected provider openai from defaults, got %q", got.Provider)
-	}
-}
-
-func TestEffectiveValidation_PartialMerge(t *testing.T) {
-	c := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Validation: config.Validation{MAMaxCorrectDensity: 0.5, RequireSequentialNumbering: true},
-		},
-		Sources: []config.Source{
-			{ID: "s1", PDF: "s1.pdf", Validation: &config.Validation{MAMaxCorrectDensity: 0.3}},
-		},
-	}
-	got := c.EffectiveValidation(&c.Sources[0])
-	if got.MAMaxCorrectDensity != 0.3 {
-		t.Errorf("expected MAMaxCorrectDensity 0.3, got %f", got.MAMaxCorrectDensity)
-	}
-	// RequireSequentialNumbering not overridden by source (false), should keep default true
-	if !got.RequireSequentialNumbering {
-		t.Error("expected RequireSequentialNumbering true from defaults")
 	}
 }

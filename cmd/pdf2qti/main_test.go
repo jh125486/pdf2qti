@@ -1,4 +1,4 @@
-package main
+package main_test
 
 import (
 	"os/exec"
@@ -6,28 +6,31 @@ import (
 	"testing"
 )
 
-func TestCLIHelpFromMainEntrypoint(t *testing.T) {
+func TestMainEntrypoint_Table(t *testing.T) {
 	t.Parallel()
 
-	cmd := exec.Command("go", "run", ".", "--help")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("expected help command to succeed: %v\noutput:\n%s", err, string(out))
+	tests := []struct {
+		name          string
+		args          []string
+		wantErr       bool
+		wantSubstring string
+	}{
+		{name: "help", args: []string{"run", ".", "--help"}, wantSubstring: "Usage"},
+		{name: "missing config", args: []string{"run", ".", "-c", "/tmp/does-not-exist.json", "validate"}, wantErr: true, wantSubstring: "load config"},
 	}
-	if !strings.Contains(string(out), "Usage") {
-		t.Fatalf("expected usage output, got:\n%s", string(out))
-	}
-}
 
-func TestCLIMissingConfigReturnsErrorFromMainEntrypoint(t *testing.T) {
-	t.Parallel()
+	for _, tt := range tests {
 
-	cmd := exec.Command("go", "run", ".", "-c", "/tmp/does-not-exist.json", "validate")
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected validate to fail with missing config\noutput:\n%s", string(out))
-	}
-	if !strings.Contains(string(out), "load config") {
-		t.Fatalf("expected load config error output, got:\n%s", string(out))
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command("go", tt.args...) //nolint:gosec // Test-only invocation with static arguments.
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v\noutput:\n%s", err, tt.wantErr, string(out))
+			}
+			if !strings.Contains(string(out), tt.wantSubstring) {
+				t.Fatalf("expected output to contain %q, got:\n%s", tt.wantSubstring, string(out))
+			}
+		})
 	}
 }

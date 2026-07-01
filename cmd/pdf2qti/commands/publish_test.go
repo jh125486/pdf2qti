@@ -1,150 +1,239 @@
-package commands
+package commands_test
 
 import (
 	"context"
-	"fmt"
-	"io"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/jh125486/pdf2qti/internal/canvas"
-	"github.com/jh125486/pdf2qti/internal/config"
-	"github.com/jh125486/pdf2qti/internal/distill"
+	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-type upsertCall struct {
-	title string
-	body  string
-}
+func TestPublishCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
-type moduleItemCall struct {
-	moduleID int
-	pageURL  string
-}
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI)
+		wantErr bool
+	}{
+		{
+			name: "success dry run",
+			prepare: func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFile(t, dir)
 
-type fakeCanvasPublisher struct {
-	upserts       []upsertCall
-	ensuredModule []string
-	moduleItems   []moduleItemCall
-}
+				loTemplate := filepath.Join(dir, "learning_objectives.html.tmpl")
+				materialsTemplate := filepath.Join(dir, "materials.html.tmpl")
+				if err := os.WriteFile(loTemplate, []byte("<h1>{{.module_name}}</h1>"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(materialsTemplate, []byte("<p>{{.material_overview}}</p>"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 
-func (f *fakeCanvasPublisher) UpsertPage(_ context.Context, _, title, body string, _ bool) (*canvas.Page, error) {
-	f.upserts = append(f.upserts, upsertCall{title: title, body: body})
-	return &canvas.Page{PageID: len(f.upserts), URL: fmt.Sprintf("page-%d", len(f.upserts)), Title: title}, nil
-}
+				cmd := &commands.PublishCmd{
+					CourseID:                    "42",
+					DryRun:                      true,
+					LearningObjectivesTemplate:  loTemplate,
+					MaterialsTemplate:           materialsTemplate,
+					LearningObjectivesTitleTmpl: "{{.module_name}} Learning Objectives",
+					MaterialsTitleTmpl:          "{{.module_name}} Materials",
+				}
+				return cmd, &commands.CLI{Config: cfgPath}
+			},
+		},
+		{
+			name: "no selected sources",
+			prepare: func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				return &commands.PublishCmd{IDs: []string{"nope"}, DryRun: true}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "render learning objectives template error",
+			prepare: func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFile(t, dir)
+				return &commands.PublishCmd{
+					CourseID:                   "42",
+					DryRun:                     true,
+					LearningObjectivesTemplate: filepath.Join(dir, "missing.html.tmpl"),
+					MaterialsTemplate:          filepath.Join(dir, "missing.html.tmpl"),
+				}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "module name falls back to source id",
+			prepare: func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := filepath.Join(dir, "quiz.json")
+				cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
+				if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				dc := map[string]any{"source_id": "src01"}
+				b, err := json.Marshal(dc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "src01_context.json"), b, 0o600); err != nil {
+					t.Fatal(err)
+				}
 
-func (f *fakeCanvasPublisher) EnsureModule(_ context.Context, _, moduleName string, _ bool) (*canvas.Module, error) {
-	f.ensuredModule = append(f.ensuredModule, moduleName)
-	return &canvas.Module{ID: 17, Name: moduleName}, nil
-}
-
-func (f *fakeCanvasPublisher) EnsureModulePageItem(_ context.Context, _ string, moduleID int, pageURL string, _ bool) error {
-	f.moduleItems = append(f.moduleItems, moduleItemCall{moduleID: moduleID, pageURL: pageURL})
-	return nil
-}
-
-func writePublishContext(t *testing.T, outDir string) {
-	t.Helper()
-	dc := &distill.DistilledContext{
-		SourceID:         "src01",
-		Book:             "Systems Programming",
-		Chapter:          3,
-		ModuleName:       "Module 3",
-		Overview:         "<p>Overview HTML</p>",
-		KeyConcepts:      []string{"fork", "exec"},
-		MaterialOverview: "Read chapter and slides",
-		Objectives: []distill.Objective{
-			{CO: 1, Text: "Explain process creation"},
+				loTemplate := filepath.Join(dir, "learning_objectives.html.tmpl")
+				materialsTemplate := filepath.Join(dir, "materials.html.tmpl")
+				if err := os.WriteFile(loTemplate, []byte("<h1>{{.module_name}}</h1>"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(materialsTemplate, []byte("<p>{{.material_overview}}</p>"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return &commands.PublishCmd{
+					CourseID:                    "42",
+					DryRun:                      true,
+					LearningObjectivesTemplate:  loTemplate,
+					MaterialsTemplate:           materialsTemplate,
+					LearningObjectivesTitleTmpl: "{{.module_name}} Learning Objectives",
+					MaterialsTitleTmpl:          "{{.module_name}} Materials",
+					Vars:                        map[string]string{"custom": "value"},
+				}, &commands.CLI{Config: cfgPath}
+			},
+		},
+		{
+			name: "client creation error",
+			prepare: func(t *testing.T, dir string) (*commands.PublishCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				return &commands.PublishCmd{DryRun: false, CanvasBaseURL: "", CanvasToken: "token"}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "load config error",
+			prepare: func(_ *testing.T, _ string) (*commands.PublishCmd, *commands.CLI) {
+				return &commands.PublishCmd{DryRun: true}, &commands.CLI{Config: "nonexistent_config.json"}
+			},
+			wantErr: true,
 		},
 	}
-	if err := distill.Save(filepath.Join(outDir, "src01_context.json"), dc); err != nil {
-		t.Fatal(err)
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			cmd, cli := tt.prepare(t, dir)
+			err := cmd.Run(context.Background(), cli)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
-func writeTemplateFile(t *testing.T, dir, name, content string) string {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestRunPublishSource_PublishesTwoPagesAndModuleItems(t *testing.T) {
+func TestExecute_PublishDryRunWithoutCanvasCredentials(t *testing.T) {
 	dir := t.TempDir()
-	writePublishContext(t, dir)
-	loTemplate := writeTemplateFile(t, dir, "learning_objectives.html.tmpl", "<h2>{{.module_name}}</h2>{{.overview}}")
-	materialsTemplate := writeTemplateFile(t, dir, "materials.html.tmpl", "<p>{{.material_overview}}</p>")
-
-	cfg := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Workflow: config.Workflow{OutDir: dir},
-		},
-		Sources: []config.Source{{ID: "src01", Name: "Source One"}},
+	pdfPath := filepath.Join(dir, "src01.pdf")
+	if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	src := &cfg.Sources[0]
-	cmd := &PublishCmd{
+	cfgPath := writeConfigFile(t, dir, pdfPath)
+	writeDistilledContextFile(t, dir)
+
+	loTemplate := filepath.Join(dir, "learning_objectives.html.tmpl")
+	materialsTemplate := filepath.Join(dir, "materials.html.tmpl")
+	if err := os.WriteFile(loTemplate, []byte("<h1>{{.module_name}}</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(materialsTemplate, []byte("<p>{{.material_overview}}</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origArgs := os.Args
+	t.Cleanup(func() { os.Args = origArgs })
+	os.Args = []string{
+		"pdf2qti",
+		"--config", cfgPath,
+		"publish",
+		"--course-id", "42",
+		"--dry-run",
+		"--learning-objectives-template", loTemplate,
+		"--materials-template", materialsTemplate,
+	}
+
+	if err := commands.Execute(); err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+}
+
+func TestPublishCmdRun_SuccessNonDryRun(t *testing.T) {
+	dir := t.TempDir()
+	pdfPath := filepath.Join(dir, "src01.pdf")
+	if err := os.WriteFile(pdfPath, []byte("(pdf text)"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeConfigFile(t, dir, pdfPath)
+	writeDistilledContextFile(t, dir)
+
+	loTemplate := filepath.Join(dir, "learning_objectives.html.tmpl")
+	materialsTemplate := filepath.Join(dir, "materials.html.tmpl")
+	if err := os.WriteFile(loTemplate, []byte("<h1>{{.module_name}}</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(materialsTemplate, []byte("<p>{{.material_overview}}</p>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var pagePostCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleCanvasMockSuccessRequest(t, w, r, &pagePostCount) {
+			return
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	cmd := &commands.PublishCmd{
 		CourseID:                    "42",
+		CanvasBaseURL:               server.URL,
+		CanvasToken:                 "token",
+		DryRun:                      false,
 		LearningObjectivesTemplate:  loTemplate,
 		MaterialsTemplate:           materialsTemplate,
 		LearningObjectivesTitleTmpl: "{{.module_name}} Learning Objectives",
 		MaterialsTitleTmpl:          "{{.module_name}} Materials",
 		Published:                   true,
 	}
-	pub := &fakeCanvasPublisher{}
-
-	if err := runPublishSource(context.Background(), cfg, src, silentLogger(), cmd, pub, false); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(pub.upserts) != 2 {
-		t.Fatalf("expected 2 upsert calls, got %d", len(pub.upserts))
-	}
-	if pub.upserts[0].title != "Module 3 Learning Objectives" {
-		t.Fatalf("unexpected learning objectives title: %q", pub.upserts[0].title)
-	}
-	if pub.upserts[1].title != "Module 3 Materials" {
-		t.Fatalf("unexpected materials title: %q", pub.upserts[1].title)
-	}
-	if len(pub.ensuredModule) != 1 || pub.ensuredModule[0] != "Module 3" {
-		t.Fatalf("expected module ensure call for Module 3, got %v", pub.ensuredModule)
-	}
-	if len(pub.moduleItems) != 2 {
-		t.Fatalf("expected 2 module item calls, got %d", len(pub.moduleItems))
-	}
-}
-
-func TestRunPublishSource_DryRunSkipsCanvasCalls(t *testing.T) {
-	dir := t.TempDir()
-	writePublishContext(t, dir)
-	loTemplate := writeTemplateFile(t, dir, "learning_objectives.html.tmpl", "<h2>{{.module_name}}</h2>")
-	materialsTemplate := writeTemplateFile(t, dir, "materials.html.tmpl", "<p>{{.material_overview}}</p>")
-
-	cfg := &config.Config{
-		Version: 1,
-		Defaults: config.Defaults{
-			Workflow: config.Workflow{OutDir: dir},
-		},
-		Sources: []config.Source{{ID: "src01", Name: "Source One"}},
-	}
-	src := &cfg.Sources[0]
-	cmd := &PublishCmd{
-		CourseID:                    "42",
-		LearningObjectivesTemplate:  loTemplate,
-		MaterialsTemplate:           materialsTemplate,
-		LearningObjectivesTitleTmpl: "{{.module_name}} Learning Objectives",
-		MaterialsTitleTmpl:          "{{.module_name}} Materials",
-		Published:                   true,
-	}
-
-	orig := logOutput
-	logOutput = io.Discard
-	t.Cleanup(func() { logOutput = orig })
-
-	if err := runPublishSource(context.Background(), cfg, src, silentLogger(), cmd, nil, true); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := cmd.Run(context.Background(), &commands.CLI{Config: cfgPath}); err != nil {
+		t.Fatalf("unexpected non-dry-run error: %v", err)
 	}
 }
