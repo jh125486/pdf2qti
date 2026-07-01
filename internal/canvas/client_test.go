@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jh125486/pdf2qti/internal/canvas"
@@ -49,46 +50,13 @@ func TestUpsertPage_Table(t *testing.T) {
 		wantID int
 	}{
 		{
-			name: "create when missing",
-			server: func(t *testing.T) (*httptest.Server, *int) {
-				t.Helper()
-				requests := 0
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if auth := r.Header.Get("Authorization"); auth != "Bearer token" {
-						t.Fatalf("unexpected auth header: %q", auth)
-					}
-					requests++
-					switch {
-					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
-						writeJSON(t, w, http.StatusOK, []canvas.Page{})
-					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
-						writeJSON(t, w, http.StatusCreated, canvas.Page{PageID: 1001, URL: "learning-objectives", Title: "Learning Objectives"})
-					default:
-						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-					}
-				}))
-				return ts, &requests
-			},
+			name:   "create when missing",
+			server: setupCreatePageServer,
 			wantID: 1001,
 		},
 		{
-			name: "update when existing",
-			server: func(t *testing.T) (*httptest.Server, *int) {
-				t.Helper()
-				requests := 0
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					requests++
-					switch {
-					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
-						writeJSON(t, w, http.StatusOK, []canvas.Page{{PageID: 77, Title: "Learning Objectives", URL: "learning-objectives"}})
-					case r.Method == http.MethodPut && r.URL.Path == "/api/v1/courses/42/pages/77":
-						writeJSON(t, w, http.StatusOK, canvas.Page{PageID: 77, URL: "learning-objectives", Title: "Learning Objectives"})
-					default:
-						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
-					}
-				}))
-				return ts, &requests
-			},
+			name:   "update when existing",
+			server: setupUpdatePageServer,
 			wantID: 77,
 		},
 	}
@@ -110,6 +78,135 @@ func TestUpsertPage_Table(t *testing.T) {
 			}
 			if page.PageID != tt.wantID {
 				t.Fatalf("page id=%d want=%d", page.PageID, tt.wantID)
+			}
+		})
+	}
+}
+
+func setupCreatePageServer(t *testing.T) (ts *httptest.Server, requestCount *int) {
+	t.Helper()
+	requests := 0
+	requestCount = &requests
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer token" {
+			t.Fatalf("unexpected auth header: %q", auth)
+		}
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+			if got := r.URL.Query().Get("search_term"); got != "Learning Objectives" {
+				t.Fatalf("expected search_term=%q, got %q", "Learning Objectives", got)
+			}
+			writeJSON(t, w, http.StatusOK, []canvas.Page{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
+			assertWikiPageForm(t, r, "Learning Objectives", "<h1>Body</h1>")
+			if got := r.Form.Get("wiki_page[published]"); got != "true" {
+				t.Fatalf("expected published=true, got %q", got)
+			}
+			writeJSON(t, w, http.StatusCreated, canvas.Page{PageID: 1001, URL: "learning-objectives", Title: "Learning Objectives"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	return ts, requestCount
+}
+
+func setupUpdatePageServer(t *testing.T) (ts *httptest.Server, requestCount *int) {
+	t.Helper()
+	requests := 0
+	requestCount = &requests
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+			writeJSON(t, w, http.StatusOK, []canvas.Page{{PageID: 77, Title: "Learning Objectives", URL: "learning-objectives"}})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/courses/42/pages/77":
+			assertWikiPageForm(t, r, "Learning Objectives", "<h1>Body</h1>")
+			writeJSON(t, w, http.StatusOK, canvas.Page{PageID: 77, URL: "learning-objectives", Title: "Learning Objectives"})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	return ts, requestCount
+}
+
+// assertWikiPageForm parses the request form and asserts the wiki_page title/body fields.
+func assertWikiPageForm(t *testing.T, r *http.Request, wantTitle, wantBody string) {
+	t.Helper()
+	if err := r.ParseForm(); err != nil {
+		t.Fatalf("parse form: %v", err)
+	}
+	if got := r.Form.Get("wiki_page[title]"); got != wantTitle {
+		t.Fatalf("expected title=%q, got %q", wantTitle, got)
+	}
+	if got := r.Form.Get("wiki_page[body]"); got != wantBody {
+		t.Fatalf("expected body=%q, got %q", wantBody, got)
+	}
+}
+
+func TestUpsertPage_RequestErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  func(t *testing.T) *httptest.Server
+		errLike string
+	}{
+		{
+			name: "unexpected status includes payload",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusOK, []canvas.Page{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"errors":"not allowed"}`))
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			errLike: "not allowed",
+		},
+		{
+			name: "response decode error",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusOK, []canvas.Page{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/pages":
+						w.WriteHeader(http.StatusCreated)
+						_, _ = w.Write([]byte(`not-json`))
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			errLike: "decode",
+		},
+	}
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tt.server(t)
+			defer ts.Close()
+
+			client, err := canvas.NewClient(ts.URL, "token", ts.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			_, err = client.UpsertPage(context.Background(), "42", "Learning Objectives", "<h1>Body</h1>", true)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.errLike) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
 			}
 		})
 	}
@@ -231,6 +328,11 @@ func TestEnsureModulePageItem_Table(t *testing.T) {
 			setup:    setupPaginatedModuleItemsServer,
 			wantPost: 0,
 		},
+		{
+			name:     "paginated listing follows unquoted rel=next Link header",
+			setup:    setupPaginatedModuleItemsServerWithLinkRel,
+			wantPost: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -263,13 +365,23 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, v any) {
 
 func setupPaginatedModuleItemsServer(t *testing.T) (ts *httptest.Server, postCount *int) {
 	t.Helper()
+	return newPaginatedModuleItemsServer(t, `rel="next"`)
+}
+
+func setupPaginatedModuleItemsServerWithLinkRel(t *testing.T) (ts *httptest.Server, postCount *int) {
+	t.Helper()
+	return newPaginatedModuleItemsServer(t, `rel=next`)
+}
+
+func newPaginatedModuleItemsServer(t *testing.T, linkRel string) (ts *httptest.Server, postCount *int) {
+	t.Helper()
 	var count int
 	postCount = &count
 	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
 			if r.URL.Query().Get("page") == "1" {
-				w.Header().Set("Link", `<https://example.instructure.com/api/v1/courses/42/modules/7/items?page=2>; rel="next"`)
+				w.Header().Set("Link", `<https://example.instructure.com/api/v1/courses/42/modules/7/items?page=2>; `+linkRel)
 				writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{{Type: "Page", PageURL: "other-page"}})
 				return
 			}

@@ -178,9 +178,7 @@ func TestExecute_PublishDryRunWithoutCanvasCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origArgs := os.Args
-	t.Cleanup(func() { os.Args = origArgs })
-	os.Args = []string{
+	withArgs(t, []string{
 		"pdf2qti",
 		"--config", cfgPath,
 		"publish",
@@ -188,7 +186,7 @@ func TestExecute_PublishDryRunWithoutCanvasCredentials(t *testing.T) {
 		"--dry-run",
 		"--learning-objectives-template", loTemplate,
 		"--materials-template", materialsTemplate,
-	}
+	})
 
 	if err := commands.Execute(); err != nil {
 		t.Fatalf("unexpected execute error: %v", err)

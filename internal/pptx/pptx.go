@@ -39,7 +39,12 @@ func Render(templatePath string, dc *distill.DistilledContext, vars map[string]s
 	defer outFile.Close()
 
 	writer := zip.NewWriter(outFile)
-	defer writer.Close()
+	closeWriter := true
+	defer func() {
+		if closeWriter {
+			_ = writer.Close()
+		}
+	}()
 
 	data := buildData(dc, vars)
 
@@ -49,6 +54,7 @@ func Render(templatePath string, dc *distill.DistilledContext, vars map[string]s
 		}
 	}
 
+	closeWriter = false
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("finalize output pptx: %w", err)
 	}

@@ -43,8 +43,9 @@ func TestBuildAssessment_Table(t *testing.T) {
 		draft   *render.QuizDraft
 		wantErr bool
 		errLike string
+		verify  func(t *testing.T, a *qti.Assessment)
 	}{
-		{name: "success", draft: sampleDraft()},
+		{name: "success", draft: sampleDraft(), verify: verifySampleAssessment},
 		{name: "missing title", draft: &render.QuizDraft{}, wantErr: true, errLike: "must have a title"},
 		{name: "bad tf no correct option", draft: &render.QuizDraft{Title: "Bad", TFQuestions: []render.Question{{Number: 1, Text: "Q", Options: []render.Option{{Text: "A", IsCorrect: false}}}}}, wantErr: true, errLike: "has no correct option"},
 		{
@@ -54,6 +55,16 @@ func TestBuildAssessment_Table(t *testing.T) {
 					{Text: "A", IsCorrect: true}, {Text: "B", IsCorrect: true}, {Text: "C", IsCorrect: false},
 				}},
 			}},
+			verify: func(t *testing.T, a *qti.Assessment) {
+				t.Helper()
+				cv := a.Assessment.Sections[0].Items[0].ResForm.ResCondition[0].ConditionVar
+				if cv.And == nil || len(cv.And.VarEquals) != 2 {
+					t.Fatalf("expected AndCondition with 2 varequals, got %+v", cv)
+				}
+				if cv.And.VarEquals[0].Value != "q1_c1" || cv.And.VarEquals[1].Value != "q1_c2" {
+					t.Errorf("expected idents q1_c1,q1_c2, got %s,%s", cv.And.VarEquals[0].Value, cv.And.VarEquals[1].Value)
+				}
+			},
 		},
 		{
 			name:    "SA no options",
@@ -115,7 +126,55 @@ func TestBuildAssessment_Table(t *testing.T) {
 					t.Fatal("expected at least one section")
 				}
 			}
+			if tt.verify != nil {
+				tt.verify(t, assessment)
+			}
 		})
+	}
+}
+
+// verifySampleAssessment asserts on QTI semantics that are easy to silently regress:
+// choice ident mapping (qN_cM), SA case-insensitive matching, NR tolerance producing
+// VarGTE/VarLTE bounds, and MT scoring/actions per pair.
+func verifySampleAssessment(t *testing.T, a *qti.Assessment) {
+	t.Helper()
+	items := a.Assessment.Sections[0].Items
+	if len(items) != 7 {
+		t.Fatalf("expected 7 items, got %d", len(items))
+	}
+
+	// TF (q1): correct answer is the 2nd option ("False") -> q1_c2.
+	tf := items[0]
+	if got := tf.ResForm.ResCondition[0].ConditionVar.VarEqual; got == nil || got.Value != "q1_c2" {
+		t.Errorf("TF: expected correct ident q1_c2, got %+v", got)
+	}
+
+	// MC (q3): correct answer is the 1st option ("SIGINT") -> q3_c1.
+	mc := items[2]
+	if got := mc.ResForm.ResCondition[0].ConditionVar.VarEqual; got == nil || got.Value != "q3_c1" {
+		t.Errorf("MC: expected correct ident q3_c1, got %+v", got)
+	}
+
+	// SA (q4): matching must be case-insensitive.
+	sa := items[3]
+	if got := sa.ResForm.ResCondition[0].ConditionVar.VarEqual; got == nil || got.Case != "No" {
+		t.Errorf("SA: expected case-insensitive VarEqual (case=No), got %+v", got)
+	}
+
+	// MT (q6): single pair should score the full 100 points via an Add action.
+	mt := items[5]
+	if len(mt.ResForm.ResCondition) != 1 || mt.ResForm.ResCondition[0].SetVar.Action != "Add" || mt.ResForm.ResCondition[0].SetVar.Value != "100" {
+		t.Errorf("MT: expected single Add-100 scoring condition, got %+v", mt.ResForm.ResCondition)
+	}
+
+	// NR (q7): answer=32, tolerance=1 -> bounds [31, 33] via VarGTE/VarLTE.
+	nr := items[6]
+	cv := nr.ResForm.ResCondition[0].ConditionVar
+	if cv.VarGTE == nil || cv.VarLTE == nil {
+		t.Fatalf("NR: expected VarGTE/VarLTE bounds, got %+v", cv)
+	}
+	if cv.VarGTE.Value != "31" || cv.VarLTE.Value != "33" {
+		t.Errorf("NR: expected bounds [31,33], got [%s,%s]", cv.VarGTE.Value, cv.VarLTE.Value)
 	}
 }
 
@@ -135,7 +194,12 @@ func TestMarshal_Table(t *testing.T) {
 				t.Helper()
 				return qti.BuildAssessment(sampleDraft())
 			},
-			wantToken: []string{"<?xml", "Signals Quiz", "questestinterop"},
+			wantToken: []string{
+				"<?xml", "Signals Quiz", "questestinterop",
+				"response_lid", "response_str", "response_num",
+				"varequal", "vargte", "varlte",
+				`respident="q1_resp"`, `case="No"`,
+			},
 		},
 		{name: "zero assessment", buildAssmt: func(_ *testing.T) (*qti.Assessment, error) { return &qti.Assessment{}, nil }, wantToken: []string{"<?xml"}},
 	}

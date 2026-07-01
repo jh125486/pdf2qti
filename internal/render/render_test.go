@@ -277,7 +277,10 @@ func checkClassicRoundTrip(t *testing.T, d *render.QuizDraft) {
 
 func checkNewTypesRoundTrip(t *testing.T, d *render.QuizDraft) {
 	t.Helper()
-	if len(d.SAQuestions) != 1 || d.SAQuestions[0].Options[0].Text != "Rome" {
+	if len(d.SAQuestions) != 1 || len(d.SAQuestions[0].Options) == 0 {
+		t.Fatalf("SA: got %+v", d.SAQuestions)
+	}
+	if d.SAQuestions[0].Options[0].Text != "Rome" {
 		t.Errorf("SA: got %+v", d.SAQuestions)
 	}
 	if len(d.ESQuestions) != 1 {
