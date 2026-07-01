@@ -1,4 +1,4 @@
-.PHONY: help init deps-update test tidy static lint lint-update vuln-check modernize outdated fmt vet check build clean install
+.PHONY: help init update-deps update-tools test tidy check static lint update-lint vuln-check modernize outdated fmt vet build clean install
 .DEFAULT_GOAL := help
 
 # Variables
@@ -19,7 +19,7 @@ init:
 	@chmod +x .git/hooks/pre-push
 	@echo "Development environment initialized ✓"
 
-deps-update: lint-update
+update-deps:
 	@echo "Updating Go modules to latest versions..."
 	@go get -u -t ./...
 	@go mod tidy
@@ -28,7 +28,7 @@ deps-update: lint-update
 ## test: Run all tests with coverage
 test:
 	@echo "Running tests..."
-	@go test -race -shuffle=on -coverprofile=coverage.txt ./...
+	@go tool -modfile=tools.mod gotestsum -- -race -shuffle=on -coverprofile=coverage.txt ./...
 
 tidy:
 	@echo "Tidying Go modules..."
@@ -42,20 +42,31 @@ static: tidy vet lint vuln-check modernize
 ## lint: Run golangci-lint with auto-fix enabled
 lint:
 	@echo "Running golangci-lint..."
+	@go tool -modfile=golangci-lint.mod golangci-lint version
 	@go tool -modfile=golangci-lint.mod golangci-lint run --fix ./...
 
-## lint-update: Update golangci-lint to latest version
-lint-update:
+## update-lint: Update golangci-lint to latest version
+update-lint:
 	@echo "Updating golangci-lint..."
 	@go get -tool -modfile=golangci-lint.mod github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
+## update-tools: Update tools.mod managed tools
+update-tools:
+	@echo "Updating tools.mod managed tools..."
+	@go get -tool -modfile=tools.mod gotest.tools/gotestsum@latest
+	@go get -tool -modfile=tools.mod golang.org/x/vuln/cmd/govulncheck@latest
+	@go get -tool -modfile=tools.mod golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest
+	@go mod edit -modfile=tools.mod -droprequire github.com/alecthomas/kong || true
+
 vuln-check:
 	@echo "Checking for vulnerabilities..."
-	@go tool govulncheck ./...
+	@go tool -modfile=tools.mod govulncheck -version
+	@go tool -modfile=tools.mod govulncheck ./...
 
 modernize:
 	@echo "Running modernize analysis..."
-	@go tool modernize -fix -test ./...
+	@go tool -modfile=tools.mod modernize -V=full
+	@go tool -modfile=tools.mod modernize -fix -test ./...
 
 outdated:
 	@echo "Checking for outdated direct dependencies..."
