@@ -13,7 +13,7 @@ type PPTXCmd struct {
 	Context  string            `help:"Path to context JSON file."              required:""`
 	Output   string            `help:"Output PPTX file path."                  required:""                        short:"o"`
 	Vars     map[string]string `help:"Extra template vars as key=value pairs." mapsep:";"                         short:"v"`
-	Template string            `arg:""                                         help:"Path to PPTX template file."`
+	Template string            `arg:""                                         help:"Path to PPTX template file." required:""`
 }
 
 // Run executes the pptx command.

@@ -6,10 +6,33 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
+
+// execTestMu serializes tests that mutate the process-global os.Args to call
+// commands.Execute. None of these tests call t.Parallel(), so Go's test
+// scheduler already runs them to completion before any parallel subtests
+// resume; this mutex is a defensive belt-and-suspenders guard so that a
+// future accidental t.Parallel() on one of these tests can't introduce a
+// data race on os.Args.
+var execTestMu sync.Mutex
+
+// withArgs sets os.Args for the duration of the calling test, serialized
+// against other os.Args-mutating tests, and restores the original value
+// (and releases the lock) via t.Cleanup.
+func withArgs(t *testing.T, args []string) {
+	t.Helper()
+	execTestMu.Lock()
+	origArgs := os.Args
+	os.Args = args
+	t.Cleanup(func() {
+		os.Args = origArgs
+		execTestMu.Unlock()
+	})
+}
 
 const validQuizMD = `# Test Quiz
 

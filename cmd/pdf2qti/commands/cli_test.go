@@ -55,9 +55,7 @@ func TestExecute_Table(t *testing.T) {
 			dir := t.TempDir()
 			args := tt.prepare(t, dir)
 
-			origArgs := os.Args
-			os.Args = args
-			t.Cleanup(func() { os.Args = origArgs })
+			withArgs(t, args)
 
 			err := commands.Execute()
 			if (err != nil) != tt.wantErr {

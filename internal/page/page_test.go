@@ -56,6 +56,18 @@ func TestRender_Table(t *testing.T) {
 			wantErr: true,
 			errLike: "read template",
 		},
+		{
+			name:       "overview is rendered as unescaped HTML",
+			template:   "{{.overview}}",
+			vars:       map[string]string{},
+			wantTokens: []string{"<p>Overview</p>"},
+		},
+		{
+			name:       "extra vars are HTML-escaped",
+			template:   "{{.xss}}",
+			vars:       map[string]string{"xss": "<script>alert(1)</script>"},
+			wantTokens: []string{"&lt;script&gt;alert(1)&lt;/script&gt;"},
+		},
 	}
 
 	for _, tt := range tests {

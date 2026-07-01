@@ -80,16 +80,14 @@ func TestExecute_PPTXCommandSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	origArgs := os.Args
-	t.Cleanup(func() { os.Args = origArgs })
-	os.Args = []string{
+	withArgs(t, []string{
 		"pdf2qti",
 		"--config", filepath.Join(dir, "unused.json"),
 		"pptx",
 		"--context", filepath.Join(dir, "src01_context.json"),
 		"--output", outPath,
 		templatePath,
-	}
+	})
 
 	if err := commands.Execute(); err != nil {
 		t.Fatalf("unexpected execute error: %v", err)
