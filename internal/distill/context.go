@@ -14,6 +14,12 @@ type Objective struct {
 	Text string `json:"text"`
 }
 
+// Slide is a single content slide's title and body, one per major section.
+type Slide struct {
+	Title   string `json:"title"`
+	Content string `json:"content"` // newline-separated bullet lines
+}
+
 // DistilledContext holds the structured output produced by the distill command.
 type DistilledContext struct {
 	SourceID         string      `json:"source_id"`
@@ -26,6 +32,8 @@ type DistilledContext struct {
 	MaterialOverview string      `json:"material_overview"`
 	TeachingNotes    string      `json:"teaching_notes"`
 	Objectives       []Objective `json:"objectives"`
+	Agenda           []string    `json:"agenda"` // 3-8 top-level topics, one per major section
+	Slides           []Slide     `json:"slides"` // one per Content slide to generate
 }
 
 // Load reads and parses a DistilledContext from a JSON file at path.

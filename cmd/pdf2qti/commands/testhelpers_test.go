@@ -83,6 +83,12 @@ func writeDistilledContextFile(t *testing.T, outDir string) {
 		Overview:         "<p>Overview</p>",
 		MaterialOverview: "Read this",
 		KeyConcepts:      []string{"pipes"},
+		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
+		Slides: []distill.Slide{
+			{Title: "Topic A", Content: "Point 1\nPoint 2"},
+			{Title: "Topic B", Content: "Point 1"},
+			{Title: "Topic C", Content: "Point 1\nPoint 2"},
+		},
 	}
 	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
 		t.Fatal(err)

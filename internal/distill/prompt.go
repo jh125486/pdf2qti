@@ -22,6 +22,11 @@ Given the chapter text below, produce a JSON object with these exact fields:
 - material_overview: 1-2 plain-text sentences describing what the chapter covers and why
 - teaching_notes: slide-writing guidance (see requirements below)
 - objectives: array of {co, text} for each course objective that this chapter satisfies
+- agenda: array of 3-8 short strings, one per major section/topic of the chapter (NOT one per
+  learning objective — group related objectives under the section they belong to)
+- slides: array of {title, content}, one per major section (same grouping as agenda, same
+  order), where content is newline-separated bullet lines covering that section's key points,
+  suitable for a single PowerPoint content slide
 
 ## text requirements
 Write enough that a professor who has never read the chapter could write both 20 quiz questions

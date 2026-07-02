@@ -12,6 +12,8 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
+const realPPTXTemplate = "../../../internal/pptx/testdata/template.pptx"
+
 func TestPPTXCmdRun_Table(t *testing.T) {
 	t.Parallel()
 
@@ -27,21 +29,25 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 				t.Helper()
 				contextPath := filepath.Join(dir, "src01_context.json")
 				writeDistilledContextFile(t, dir)
-				templatePath := filepath.Join(dir, "template.pptx")
 				outPath := filepath.Join(dir, "out.pptx")
-				if err := writePPTXTemplate(templatePath, `<a:t>{{.module_name}}</a:t>`); err != nil {
-					t.Fatal(err)
-				}
-				return commands.PPTXCmd{Context: contextPath, Template: templatePath, Output: outPath}
+				return commands.PPTXCmd{Context: contextPath, Template: realPPTXTemplate, Output: outPath}
 			},
 			verify: func(t *testing.T, dir string) {
 				t.Helper()
-				slideText, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
+				agendaSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide2.xml")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(slideText), "Module 1") {
-					t.Fatalf("expected rendered module name, got: %q", string(slideText))
+				for _, bullet := range []string{"Topic A", "Topic B", "Topic C"} {
+					if !strings.Contains(string(agendaSlide), bullet) {
+						t.Fatalf("expected agenda slide to contain %q, got: %q", bullet, string(agendaSlide))
+					}
+				}
+
+				for _, slidePart := range []string{"ppt/slides/slide3.xml", "ppt/slides/slide4.xml", "ppt/slides/slide5.xml"} {
+					if _, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), slidePart); err != nil {
+						t.Fatalf("expected generated content slide %q: %v", slidePart, err)
+					}
 				}
 			},
 		},
@@ -74,11 +80,7 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 func TestExecute_PPTXCommandSuccess(t *testing.T) {
 	dir := t.TempDir()
 	writeDistilledContextFile(t, dir)
-	templatePath := filepath.Join(dir, "template.pptx")
 	outPath := filepath.Join(dir, "out.pptx")
-	if err := writePPTXTemplate(templatePath, `<a:t>{{.module_name}}</a:t>`); err != nil {
-		t.Fatal(err)
-	}
 
 	withArgs(t, []string{
 		"pdf2qti",
@@ -86,36 +88,12 @@ func TestExecute_PPTXCommandSuccess(t *testing.T) {
 		"pptx",
 		"--context", filepath.Join(dir, "src01_context.json"),
 		"--output", outPath,
-		templatePath,
+		realPPTXTemplate,
 	})
 
 	if err := commands.Execute(); err != nil {
 		t.Fatalf("unexpected execute error: %v", err)
 	}
-}
-
-func writePPTXTemplate(path, slideXML string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	zw := zip.NewWriter(f)
-	entries := map[string]string{
-		"[Content_Types].xml":   `<?xml version="1.0"?><Types></Types>`,
-		"ppt/slides/slide1.xml": slideXML,
-	}
-	for name, body := range entries {
-		w, err := zw.Create(name)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write([]byte(body)); err != nil {
-			return err
-		}
-	}
-	return zw.Close()
 }
 
 func readPPTXEntry(path, entry string) ([]byte, error) {
