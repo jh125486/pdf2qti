@@ -10,6 +10,10 @@
       "enum": [1],
       "description": "Config schema version (must be 1)"
     },
+    "courseName": {
+      "type": "string",
+      "description": "Course-wide display name, used to fill the subtitle placeholder on generated PPTX title slides"
+    },
     "defaults": {
       "$ref": "#/definitions/defaults"
     },

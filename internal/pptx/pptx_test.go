@@ -29,20 +29,26 @@ func sampleContext() *distill.DistilledContext {
 }
 
 // baseTemplateEntries returns a minimal but structurally valid pptx: 3 named slide layouts
-// (Title/Agenda/Content) and one demo slide each for Agenda and Content, wired up via _rels,
-// presentation.xml, and presentation.xml.rels.
+// (Title/Agenda/Content) and one demo slide each for Title/Agenda/Content, wired up via _rels,
+// presentation.xml, and presentation.xml.rels. The title slide is deliberately named slide0.xml
+// (not slide3.xml) so it doesn't shift the slide-numbering tests below, which assume content
+// duplication starts at slide3/slide4 as it did before the title slide existed.
 func baseTemplateEntries() map[string][]byte {
 	return map[string][]byte{
 		"[Content_Types].xml": []byte(`<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>`),
 		"ppt/presentation.xml": []byte(`<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
-			`<p:sldIdLst><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst></p:presentation>`),
+			`<p:sldIdLst><p:sldId id="255" r:id="rId1"/><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/></p:sldIdLst></p:presentation>`),
 		"ppt/_rels/presentation.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide0.xml"/>` +
 			`<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>` +
 			`<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>`),
 		"ppt/slideLayouts/slideLayout1.xml": []byte(`<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Title"/></p:sldLayout>`),
 		"ppt/slideLayouts/slideLayout2.xml": []byte(`<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Agenda"/></p:sldLayout>`),
 		"ppt/slideLayouts/slideLayout3.xml": []byte(`<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Content"/></p:sldLayout>`),
-		"ppt/slides/slide1.xml":             []byte(demoSlideXML("Agenda")),
+		"ppt/slides/slide0.xml":             []byte(demoSlideXML("Module Title")),
+		"ppt/slides/_rels/slide0.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>`),
+		"ppt/slides/slide1.xml": []byte(demoSlideXML("Agenda")),
 		"ppt/slides/_rels/slide1.xml.rels": []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 			`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout2.xml"/></Relationships>`),
 		"ppt/slides/slide2.xml": []byte(demoSlideXML("Slide Title")),
@@ -71,7 +77,7 @@ func TestRender_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := pptx.Render(templatePath, sampleContext(), map[string]string{"module_name": "Module 3"}, outputPath)
+	err := pptx.Render(templatePath, sampleContext(), "Test University", map[string]string{"module_name": "Module 3"}, outputPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,6 +88,7 @@ func TestRender_Success(t *testing.T) {
 	}
 
 	mustContainAll(t, "custom part", string(outEntries["customXml/item1.xml"]), "Module 3 - Systems Programming")
+	mustContainAll(t, "title slide", string(outEntries["ppt/slides/slide0.xml"]), "<a:t>Module 3</a:t>", "<a:t>Test University</a:t>")
 	mustContainAll(t, "agenda slide", string(outEntries["ppt/slides/slide1.xml"]), "<a:t>Topic A</a:t>", "<a:t>Topic B</a:t>", "<a:t>Topic C</a:t>")
 	// First content slide reuses the prototype part, id=2; slide3/4 are the duplicates.
 	mustContainAll(t, "first content slide", string(outEntries["ppt/slides/slide2.xml"]), "<a:t>Topic A</a:t>", "<a:t>Point 1</a:t>", "<a:t>Point 2</a:t>")
@@ -90,13 +97,13 @@ func TestRender_Success(t *testing.T) {
 	mustContainAll(t, "content types", string(outEntries["[Content_Types].xml"]), "/ppt/slides/slide3.xml", "/ppt/slides/slide4.xml")
 
 	pres := string(outEntries["ppt/presentation.xml"])
-	if got := strings.Count(pres, "<p:sldId "); got != 4 {
-		t.Fatalf("expected 4 sldId entries, got %d: %q", got, pres)
+	if got := strings.Count(pres, "<p:sldId "); got != 5 {
+		t.Fatalf("expected 5 sldId entries (title+agenda+3 content), got %d: %q", got, pres)
 	}
 
 	presRels := string(outEntries["ppt/_rels/presentation.xml.rels"])
-	if got := strings.Count(presRels, `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"`); got != 4 {
-		t.Fatalf("expected 4 slide relationships, got %d: %q", got, presRels)
+	if got := strings.Count(presRels, `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"`); got != 5 {
+		t.Fatalf("expected 5 slide relationships, got %d: %q", got, presRels)
 	}
 }
 
@@ -122,7 +129,7 @@ func TestRender_BinaryEntryPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pptx.Render(templatePath, sampleContext(), nil, outputPath); err != nil {
+	if err := pptx.Render(templatePath, sampleContext(), "", nil, outputPath); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -227,7 +234,7 @@ func TestRender_Table(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err := pptx.Render(templatePath, tt.dc(), map[string]string{"module_name": "Module 3"}, outputPath)
+			err := pptx.Render(templatePath, tt.dc(), "", map[string]string{"module_name": "Module 3"}, outputPath)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -241,7 +248,7 @@ func TestRender_Table(t *testing.T) {
 func TestRender_MissingTemplate(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	err := pptx.Render(filepath.Join(dir, "missing.pptx"), sampleContext(), nil, filepath.Join(dir, "out.pptx"))
+	err := pptx.Render(filepath.Join(dir, "missing.pptx"), sampleContext(), "", nil, filepath.Join(dir, "out.pptx"))
 	if err == nil || !strings.Contains(err.Error(), "read pptx template") {
 		t.Fatalf("expected read pptx template error, got %v", err)
 	}
@@ -257,7 +264,7 @@ func TestRender_RealTemplate(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "out.pptx")
 
-	if err := pptx.Render("testdata/template.pptx", dc, nil, outputPath); err != nil {
+	if err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 

@@ -114,7 +114,10 @@ type Module struct {
 
 // Config is the top-level configuration.
 type Config struct {
-	Version          int               `json:"version"`
+	Version int `json:"version"`
+	// CourseName is the course-wide display name (e.g. "CSCE 2120: Foundations of Computing"),
+	// used to fill the subtitle placeholder on generated PPTX title slides.
+	CourseName       string            `json:"courseName,omitempty"`
 	CourseObjectives []CourseObjective `json:"courseObjectives,omitempty"`
 	Defaults         Defaults          `json:"defaults"`
 	Sources          []Source          `json:"sources"`

@@ -40,10 +40,10 @@ var (
 )
 
 // Render reads a PPTX template file, validates it has Title/Agenda/Content slide layouts, fills
-// in the agenda bullets and duplicates the Content slide once per dc.Slides entry, executes Go
-// text templates in the remaining XML/RELS parts against distilled context data and vars, and
-// writes the result to outputPath.
-func Render(templatePath string, dc *distill.DistilledContext, vars map[string]string, outputPath string) error {
+// in the title slide (dc.ModuleName and courseName), the agenda bullets, and duplicates the
+// Content slide once per dc.Slides entry, executes Go text templates in the remaining XML/RELS
+// parts against distilled context data and vars, and writes the result to outputPath.
+func Render(templatePath string, dc *distill.DistilledContext, courseName string, vars map[string]string, outputPath string) error {
 	inData, err := os.ReadFile(templatePath)
 	if err != nil {
 		return fmt.Errorf("read pptx template %q: %w", templatePath, err)
@@ -59,7 +59,7 @@ func Render(templatePath string, dc *distill.DistilledContext, vars map[string]s
 		return err
 	}
 
-	if err := applyDeck(parts, &order, dc); err != nil {
+	if err := applyDeck(parts, &order, dc, courseName); err != nil {
 		return err
 	}
 
@@ -155,9 +155,10 @@ func isTemplatedPart(name string) bool {
 	return strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".rels")
 }
 
-// applyDeck validates the template's slide layouts and mutates parts/order in place to inject
-// agenda bullets into the Agenda slide and duplicate the Content slide once per dc.Slides entry.
-func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext) error {
+// applyDeck validates the template's slide layouts and mutates parts/order in place to fill the
+// title slide, inject agenda bullets into the Agenda slide, and duplicate the Content slide once
+// per dc.Slides entry.
+func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext, courseName string) error {
 	layoutNames, err := layoutNamesByPart(parts)
 	if err != nil {
 		return err
@@ -168,6 +169,10 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 
 	slidesByLayout := slidesByLayoutName(parts, *order, layoutNames)
 
+	titleSlide, ok := slidesByLayout[layoutTitle]
+	if !ok {
+		return fmt.Errorf("template has no slide using the %q layout", layoutTitle)
+	}
 	agendaSlide, ok := slidesByLayout[layoutAgenda]
 	if !ok {
 		return fmt.Errorf("template has no slide using the %q layout", layoutAgenda)
@@ -177,11 +182,34 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 		return fmt.Errorf("template has no slide using the %q layout", layoutContent)
 	}
 
+	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName); err != nil {
+		return err
+	}
+
 	if err := fillAgenda(parts, agendaSlide, dc.Agenda); err != nil {
 		return err
 	}
 
 	return duplicateContentSlides(parts, order, contentSlide, dc.Slides)
+}
+
+// fillTitleSlide sets the Title-layout slide's title placeholder to title and, if courseName is
+// non-empty, its body (subtitle) placeholder to courseName. courseName is left as whatever the
+// template's own placeholder text is when empty, rather than erroring, since not every caller
+// has a course name to supply.
+func fillTitleSlide(parts map[string][]byte, slidePart, title, courseName string) error {
+	updated, err := setPlaceholderBullets(parts[slidePart], "title", []string{title})
+	if err != nil {
+		return fmt.Errorf("fill title slide %q: %w", slidePart, err)
+	}
+	if courseName != "" {
+		updated, err = setPlaceholderBullets(updated, "body", []string{courseName})
+		if err != nil {
+			return fmt.Errorf("fill title slide %q: %w", slidePart, err)
+		}
+	}
+	parts[slidePart] = updated
+	return nil
 }
 
 // layoutNamesByPart returns a map of slide layout part name -> its <p:cSld name="..."> value.

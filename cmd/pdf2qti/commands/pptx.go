@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
 	"github.com/jh125486/pdf2qti/internal/pptx"
 )
@@ -19,7 +20,12 @@ type PPTXCmd struct {
 }
 
 // Run executes the pptx command.
-func (p *PPTXCmd) Run(_ context.Context, _ *CLI) error {
+func (p *PPTXCmd) Run(_ context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
 	md, err := os.ReadFile(p.Slides)
 	if err != nil {
 		return fmt.Errorf("read slides %q: %w", p.Slides, err)
@@ -30,8 +36,13 @@ func (p *PPTXCmd) Run(_ context.Context, _ *CLI) error {
 		return fmt.Errorf("parse slides %q: %w", p.Slides, err)
 	}
 
+	courseName := cfg.CourseName
+	if v, ok := p.Vars["course_name"]; ok {
+		courseName = v
+	}
+
 	dc := &distill.DistilledContext{ModuleName: title, Agenda: agenda, Slides: slides}
-	if err := pptx.Render(p.Template, dc, p.Vars, p.Output); err != nil {
+	if err := pptx.Render(p.Template, dc, courseName, p.Vars, p.Output); err != nil {
 		return fmt.Errorf("render pptx: %w", err)
 	}
 	return nil

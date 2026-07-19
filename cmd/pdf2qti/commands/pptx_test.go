@@ -3,6 +3,7 @@ package commands_test
 import (
 	"archive/zip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,18 @@ import (
 )
 
 const realPPTXTemplate = "../../../internal/pptx/testdata/template.pptx"
+
+// writePPTXConfigFile writes a minimal valid config with the given courseName and returns its
+// path. PPTXCmd loads config for CourseName alone, so the config doesn't need real sources.
+func writePPTXConfigFile(t *testing.T, dir, courseName string) string {
+	t.Helper()
+	cfgPath := filepath.Join(dir, "quiz.json")
+	cfgJSON := fmt.Sprintf(`{"version":1,"courseName":%q,"sources":[{"id":"src01","pdf":"unused.pdf"}]}`, courseName)
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
 
 func TestPPTXCmdRun_Table(t *testing.T) {
 	t.Parallel()
@@ -33,6 +46,16 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			},
 			verify: func(t *testing.T, dir string) {
 				t.Helper()
+				titleSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"Module 1", "Test University"} {
+					if !strings.Contains(string(titleSlide), want) {
+						t.Fatalf("expected title slide to contain %q, got: %q", want, string(titleSlide))
+					}
+				}
+
 				agendaSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide2.xml")
 				if err != nil {
 					t.Fatal(err)
@@ -76,8 +99,9 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
+			cfgPath := writePPTXConfigFile(t, dir, "Test University")
 			cmd := tt.prepare(t, dir)
-			err := cmd.Run(context.Background(), &commands.CLI{})
+			err := cmd.Run(context.Background(), &commands.CLI{Config: cfgPath})
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -88,14 +112,24 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 	}
 }
 
+func TestPPTXCmdRun_BadConfig(t *testing.T) {
+	t.Parallel()
+	err := (&commands.PPTXCmd{Slides: "/no/slides.md", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}).
+		Run(context.Background(), &commands.CLI{Config: "/no/such/quiz.json"})
+	if err == nil {
+		t.Fatal("expected error for missing config")
+	}
+}
+
 func TestExecute_PPTXCommandSuccess(t *testing.T) {
 	dir := t.TempDir()
+	cfgPath := writePPTXConfigFile(t, dir, "Test University")
 	slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
 	outPath := filepath.Join(dir, "out.pptx")
 
 	withArgs(t, []string{
 		"pdf2qti",
-		"--config", filepath.Join(dir, "unused.json"),
+		"--config", cfgPath,
 		"pptx",
 		"--slides", slidesPath,
 		"--output", outPath,
