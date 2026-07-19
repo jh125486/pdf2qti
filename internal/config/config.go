@@ -104,12 +104,21 @@ type CourseObjective struct {
 	Text string `json:"text"`
 }
 
+// Module groups one or more Sources (chapters) into a single unit for module-level
+// documents (e.g. a combined Markdown doc and slide deck spanning all member chapters).
+type Module struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	SourceIDs []string `json:"sourceIds"`
+}
+
 // Config is the top-level configuration.
 type Config struct {
 	Version          int               `json:"version"`
 	CourseObjectives []CourseObjective `json:"courseObjectives,omitempty"`
 	Defaults         Defaults          `json:"defaults"`
 	Sources          []Source          `json:"sources"`
+	Modules          []Module          `json:"modules,omitempty"`
 }
 
 // Load reads and parses a JSON config file.
@@ -136,6 +145,7 @@ func (c *Config) Validate() error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("sources must not be empty")
 	}
+	sourceIDs := make(map[string]bool, len(c.Sources))
 	for i, s := range c.Sources {
 		if s.ID == "" {
 			return fmt.Errorf("sources[%d].id must not be empty", i)
@@ -143,8 +153,57 @@ func (c *Config) Validate() error {
 		if s.PDF == "" {
 			return fmt.Errorf("sources[%d].pdf must not be empty", i)
 		}
+		sourceIDs[s.ID] = true
+	}
+	moduleIDs := make(map[string]bool, len(c.Modules))
+	for i, m := range c.Modules {
+		if m.ID == "" {
+			return fmt.Errorf("modules[%d].id must not be empty", i)
+		}
+		if moduleIDs[m.ID] {
+			return fmt.Errorf("modules[%d].id %q is duplicated", i, m.ID)
+		}
+		moduleIDs[m.ID] = true
+		if m.Name == "" {
+			return fmt.Errorf("modules[%d].name must not be empty", i)
+		}
+		if len(m.SourceIDs) == 0 {
+			return fmt.Errorf("modules[%d].sourceIds must not be empty", i)
+		}
+		for _, id := range m.SourceIDs {
+			if !sourceIDs[id] {
+				return fmt.Errorf("modules[%d].sourceIds references unknown source %q", i, id)
+			}
+		}
 	}
 	return nil
+}
+
+// ModuleByID returns the Module with the given ID, or an error if none matches.
+func (c *Config) ModuleByID(id string) (*Module, error) {
+	for i := range c.Modules {
+		if c.Modules[i].ID == id {
+			return &c.Modules[i], nil
+		}
+	}
+	return nil, fmt.Errorf("module %q not found", id)
+}
+
+// SourcesForModule returns the Sources referenced by m.SourceIDs, in order.
+func (c *Config) SourcesForModule(m *Module) ([]*Source, error) {
+	bySourceID := make(map[string]*Source, len(c.Sources))
+	for i := range c.Sources {
+		bySourceID[c.Sources[i].ID] = &c.Sources[i]
+	}
+	srcs := make([]*Source, 0, len(m.SourceIDs))
+	for _, id := range m.SourceIDs {
+		s, ok := bySourceID[id]
+		if !ok {
+			return nil, fmt.Errorf("module %q references unknown source %q", m.ID, id)
+		}
+		srcs = append(srcs, s)
+	}
+	return srcs, nil
 }
 
 // EffectiveWorkflow returns the resolved Workflow for a source, merging source overrides over defaults.

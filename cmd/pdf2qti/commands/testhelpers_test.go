@@ -74,7 +74,11 @@ func writeConfigFile(t *testing.T, dir, pdfPath string) string {
 
 func writeDistilledContextFile(t *testing.T, outDir string) {
 	t.Helper()
-	const sourceID = "src01"
+	writeDistilledContextFileWithID(t, outDir, "src01")
+}
+
+func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
+	t.Helper()
 	dc := &distill.DistilledContext{
 		SourceID:         sourceID,
 		Book:             "Book",
@@ -83,6 +87,7 @@ func writeDistilledContextFile(t *testing.T, outDir string) {
 		Overview:         "<p>Overview</p>",
 		MaterialOverview: "Read this",
 		KeyConcepts:      []string{"pipes"},
+		Sections:         []distill.Section{{Title: "Intro", Summary: "summary"}},
 		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
 		Slides: []distill.Slide{
 			{Title: "Topic A", Content: "Point 1\nPoint 2"},
@@ -93,6 +98,68 @@ func writeDistilledContextFile(t *testing.T, outDir string) {
 	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/<sourceID>_slides.md
+// whose agenda/slides match writeDistilledContextFileWithID's Agenda/Slides fields, and returns
+// its path.
+func writeSlidesMarkdownFile(t *testing.T, dir, sourceID string) string {
+	t.Helper()
+	const md = `# Module 1
+
+---
+
+<!-- meta: 1 agenda -->
+# Agenda
+
+- Topic A
+- Topic B
+- Topic C
+
+---
+
+<!-- meta: 2 src01 -->
+# Topic A
+
+- Point 1
+- Point 2
+
+---
+
+<!-- meta: 3 src01 -->
+# Topic B
+
+- Point 1
+
+---
+
+<!-- meta: 4 src01 -->
+# Topic C
+
+- Point 1
+- Point 2
+`
+	path := filepath.Join(dir, sourceID+"_slides.md")
+	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// writeModuleConfigFile writes a two-source config grouped into one module "mod1" and returns
+// the config path.
+func writeModuleConfigFile(t *testing.T, dir, pdfPath string) string {
+	t.Helper()
+	cfgPath := filepath.Join(dir, "quiz.json")
+	cfgJSON := fmt.Sprintf(`{"version":1,"defaults":{"workflow":{"outDir":%q}},"sources":[`+
+		`{"id":"src01","name":"Chapter 1","chapter":1,"pdf":%q},`+
+		`{"id":"src02","name":"Chapter 2","chapter":2,"pdf":%q}],`+
+		`"modules":[{"id":"mod1","name":"Module 1","sourceIds":["src01","src02"]}]}`,
+		dir, pdfPath, pdfPath)
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
 }
 
 func handleCanvasMockSuccessRequest(t *testing.T, w http.ResponseWriter, r *http.Request, pagePostCount *int) bool {

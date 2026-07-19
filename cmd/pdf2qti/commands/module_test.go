@@ -1,0 +1,127 @@
+package commands_test
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
+)
+
+func TestModuleCmdRun_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		prepare   func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI)
+		wantErr   bool
+		checkFile bool
+	}{
+		{
+			name: "success",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				writeDistilledContextFileWithID(t, dir, "src02")
+				return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			checkFile: true,
+		},
+		{
+			name: "unknown module id",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				return commands.ModuleCmd{ID: "nope", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing chapter context",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "already exists without force",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				writeDistilledContextFileWithID(t, dir, "src02")
+				if err := os.WriteFile(filepath.Join(dir, "mod1_module.md"), []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "force overwrites existing module doc",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				writeDistilledContextFileWithID(t, dir, "src02")
+				if err := os.WriteFile(filepath.Join(dir, "mod1_module.md"), []byte("existing"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.ModuleCmd{ID: "mod1", Force: true, MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			checkFile: true,
+		},
+		{
+			name: "load config error",
+			prepare: func(_ *testing.T, _ string) (commands.ModuleCmd, *commands.CLI) {
+				return commands.ModuleCmd{ID: "mod1"}, &commands.CLI{Config: "nonexistent_config.json"}
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			cmd, cli := tt.prepare(t, dir)
+			err := cmd.Run(context.Background(), cli)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
+			}
+			if tt.checkFile {
+				if _, statErr := os.Stat(filepath.Join(dir, "mod1_module.md")); statErr != nil {
+					t.Fatalf("expected module markdown output: %v", statErr)
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, "mod1_module.json")); statErr != nil {
+					t.Fatalf("expected module json output: %v", statErr)
+				}
+			}
+		})
+	}
+}

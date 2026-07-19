@@ -86,6 +86,68 @@ func TestValidate_Table(t *testing.T) {
 			wantErr: true,
 			errLike: "pdf must not be empty",
 		},
+		{
+			name: "valid module",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}, {ID: "s2", PDF: "s2.pdf"}},
+				Modules: []config.Module{{ID: "m1", Name: "Module 1", SourceIDs: []string{"s1", "s2"}}},
+			},
+			wantErr: false,
+		},
+		{
+			name: "module missing id",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Modules: []config.Module{{Name: "Module 1", SourceIDs: []string{"s1"}}},
+			},
+			wantErr: true,
+			errLike: "modules[0].id must not be empty",
+		},
+		{
+			name: "module duplicate id",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Modules: []config.Module{
+					{ID: "m1", Name: "Module 1", SourceIDs: []string{"s1"}},
+					{ID: "m1", Name: "Module 1 Dup", SourceIDs: []string{"s1"}},
+				},
+			},
+			wantErr: true,
+			errLike: "is duplicated",
+		},
+		{
+			name: "module missing name",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Modules: []config.Module{{ID: "m1", SourceIDs: []string{"s1"}}},
+			},
+			wantErr: true,
+			errLike: "name must not be empty",
+		},
+		{
+			name: "module empty sourceIds",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Modules: []config.Module{{ID: "m1", Name: "Module 1"}},
+			},
+			wantErr: true,
+			errLike: "sourceIds must not be empty",
+		},
+		{
+			name: "module unknown source ref",
+			cfg: config.Config{
+				Version: 1,
+				Sources: []config.Source{{ID: "s1", PDF: "s1.pdf"}},
+				Modules: []config.Module{{ID: "m1", Name: "Module 1", SourceIDs: []string{"nope"}}},
+			},
+			wantErr: true,
+			errLike: "references unknown source",
+		},
 	}
 
 	for _, tt := range tests {
@@ -428,6 +490,46 @@ func TestEffectiveValidation_Table(t *testing.T) {
 				t.Errorf("RequireExactlyOneCorrectForTFMC=%v want=%v", got.RequireExactlyOneCorrectForTFMC, tt.wantRequireExactOne)
 			}
 		})
+	}
+}
+
+func TestModuleByIDAndSourcesForModule(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Version: 1,
+		Sources: []config.Source{
+			{ID: "s1", PDF: "s1.pdf"},
+			{ID: "s2", PDF: "s2.pdf"},
+		},
+		Modules: []config.Module{
+			{ID: "m1", Name: "Module 1", SourceIDs: []string{"s2", "s1"}},
+		},
+	}
+
+	mod, err := cfg.ModuleByID("m1")
+	if err != nil {
+		t.Fatalf("ModuleByID: %v", err)
+	}
+	if mod.Name != "Module 1" {
+		t.Errorf("Name=%q want=%q", mod.Name, "Module 1")
+	}
+
+	if _, err := cfg.ModuleByID("nope"); err == nil {
+		t.Fatal("expected error for unknown module id")
+	}
+
+	srcs, err := cfg.SourcesForModule(mod)
+	if err != nil {
+		t.Fatalf("SourcesForModule: %v", err)
+	}
+	if len(srcs) != 2 || srcs[0].ID != "s2" || srcs[1].ID != "s1" {
+		t.Fatalf("unexpected sources order: %+v", srcs)
+	}
+
+	badMod := &config.Module{ID: "bad", SourceIDs: []string{"nope"}}
+	if _, err := cfg.SourcesForModule(badMod); err == nil {
+		t.Fatal("expected error for unknown source id")
 	}
 }
 

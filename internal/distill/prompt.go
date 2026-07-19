@@ -22,15 +22,17 @@ Given the chapter text below, produce a JSON object with these exact fields:
 - material_overview: 1-2 plain-text sentences describing what the chapter covers and why
 - teaching_notes: slide-writing guidance (see requirements below)
 - objectives: array of {co, text} for each course objective that this chapter satisfies
-- agenda: array of 3-8 short strings, one per major section/topic of the chapter (NOT one per
-  learning objective — group related objectives under the section they belong to)
-- slides: array of {title, content}, one per major section (same grouping as agenda, same
-  order), where content is newline-separated bullet lines covering that section's key points,
-  suitable for a single PowerPoint content slide
+- vocabulary: array of {term, definition} for every important term a student must know
+- theorems: array of {name, statement} for named theorems, laws, or formulas this chapter
+  relies on; use an empty array if the chapter has no such material (most chapters won't)
+- sections: array of {title, summary} for each major subsection of the chapter, in order,
+  where summary is 2-4 sentences dense enough to stand alone without the source text
 
 ## text requirements
 Write enough that a professor who has never read the chapter could write both 20 quiz questions
-AND a 20-slide PowerPoint deck from this field alone. Include all of:
+AND a 20-slide PowerPoint deck from this field alone. Target length: at least 1200 words
+(roughly 7000+ characters) of prose — when in doubt, include more detail rather than less; do
+not compress source material you were given just to be concise. Include all of:
 - Every testable fact: API names, constants, flags, error codes, return values
 - Code patterns with rationale (why the pattern exists, not just what it is)
 - "Why it works this way" historical or design context

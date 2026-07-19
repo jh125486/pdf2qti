@@ -27,10 +27,9 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			name: "success",
 			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
 				t.Helper()
-				contextPath := filepath.Join(dir, "src01_context.json")
-				writeDistilledContextFile(t, dir)
+				slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
 				outPath := filepath.Join(dir, "out.pptx")
-				return commands.PPTXCmd{Context: contextPath, Template: realPPTXTemplate, Output: outPath}
+				return commands.PPTXCmd{Slides: slidesPath, Template: realPPTXTemplate, Output: outPath}
 			},
 			verify: func(t *testing.T, dir string) {
 				t.Helper()
@@ -52,9 +51,21 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			},
 		},
 		{
-			name: "load context error",
+			name: "read slides error",
 			prepare: func(_ *testing.T, _ string) commands.PPTXCmd {
-				return commands.PPTXCmd{Context: "/no/context.json", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}
+				return commands.PPTXCmd{Slides: "/no/slides.md", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unparseable slides markdown",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := filepath.Join(dir, "bad_slides.md")
+				if err := os.WriteFile(slidesPath, []byte("no meta markers here"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.PPTXCmd{Slides: slidesPath, Template: realPPTXTemplate, Output: filepath.Join(dir, "out.pptx")}
 			},
 			wantErr: true,
 		},
@@ -79,14 +90,14 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 
 func TestExecute_PPTXCommandSuccess(t *testing.T) {
 	dir := t.TempDir()
-	writeDistilledContextFile(t, dir)
+	slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
 	outPath := filepath.Join(dir, "out.pptx")
 
 	withArgs(t, []string{
 		"pdf2qti",
 		"--config", filepath.Join(dir, "unused.json"),
 		"pptx",
-		"--context", filepath.Join(dir, "src01_context.json"),
+		"--slides", slidesPath,
 		"--output", outPath,
 		realPPTXTemplate,
 	})
