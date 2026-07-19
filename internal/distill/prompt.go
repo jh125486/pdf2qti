@@ -48,6 +48,17 @@ Slide-writing guidance distinct from the content itself. How to *teach* this cha
 - What to emphasize as "why" vs. "what"
 - Concepts this cohort of students consistently misunderstands
 
+## Exclude
+The chapter text below is raw text extracted from an interactive zyBooks PDF and contains
+embedded interactive elements that are NOT real textbook content — skip them entirely, do not
+summarize or reference them: "Participation Activity" widgets (fill-in-the-blank/self-check
+exercises, frequently numbered like "1.2.3"), "Animation content"/"Animation captions" blocks,
+"Static figure" captions, and "Check"/"Show answer" UI prompts. A numbered "Worked Example" or
+"WE#" with a fully worked-out solution is real content and must be kept — the distinction is that
+Worked Examples are complete and self-contained on the page, while Participation Activities
+reference interactive state (sliders, draggable widgets, blanks to fill in) that doesn't exist in
+this static text and reads as incomplete or confusing out of context.
+
 ## Chapter Text
 {{.ChapterText}}`))
 

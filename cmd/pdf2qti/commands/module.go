@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -79,41 +76,16 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 }
 
 // stubModuleLLM is a placeholder LLM for the module command. Unlike stubDistillLLM (which only
-// ever answers one prompt shape), BuildModuleDoc issues two different prompts against the same
-// LLM — a JSON-merge prompt and the proto-deck markdown prompt — so this stub distinguishes them
-// by content. In a real implementation this would be replaced by an actual LLM client.
+// ever answers one prompt shape), BuildModuleDoc issues several different prompts against the
+// same LLM — a JSON-merge prompt plus GenerateProtoDeck's outline/expand/summary prompts (see
+// stubProtoDeckShape in llm.go) — so this stub distinguishes them by content.
 type stubModuleLLM struct {
 	chapterTags []string
 }
 
 func (s *stubModuleLLM) Complete(_ context.Context, prompt string) (string, error) {
-	if strings.Contains(prompt, "prototype PowerPoint outline") {
-		return stubProtoDeckMarkdown(prompt, s.chapterTags), nil
+	if resp, ok := stubProtoDeckShape(prompt, s.chapterTags); ok {
+		return resp, nil
 	}
 	return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil
-}
-
-var reTargetSlideRange = regexp.MustCompile(`TARGET_SLIDE_RANGE: min=(\d+) max=(\d+)`)
-
-// stubProtoDeckMarkdown builds a minimal but valid proto-deck markdown (sequential meta markers,
-// slide count within the range requested in prompt) for stubProtoDeckMarkdown's caller.
-func stubProtoDeckMarkdown(prompt string, chapterTags []string) string {
-	n := 8
-	if m := reTargetSlideRange.FindStringSubmatch(prompt); len(m) == 3 {
-		if v, err := strconv.Atoi(m[1]); err == nil && v > 0 {
-			n = v
-		}
-	}
-	if n < 2 {
-		n = 2
-	}
-
-	var b strings.Builder
-	b.WriteString("# Module Deck\n\n---\n\n<!-- meta: 1 agenda -->\n# Agenda\n\n- placeholder\n\n---\n\n")
-	for i := 2; i < n; i++ {
-		tag := chapterTags[(i-2)%len(chapterTags)]
-		fmt.Fprintf(&b, "<!-- meta: %d %s -->\n# Slide %d\n\n- placeholder\n\n---\n\n", i, tag, i)
-	}
-	fmt.Fprintf(&b, "<!-- meta: %d summary -->\n# Summary\n\n- placeholder\n", n)
-	return b.String()
 }

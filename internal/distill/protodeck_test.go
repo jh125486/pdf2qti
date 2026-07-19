@@ -3,6 +3,8 @@ package distill_test
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -19,6 +21,81 @@ func validDeck(n int) string {
 	return b.String()
 }
 
+var (
+	reTargetContentRange = regexp.MustCompile(`TARGET_CONTENT_RANGE: min=(\d+) max=(\d+)`)
+	rePlannedSlideLine   = regexp.MustCompile(`(?m)^\d+\. \[`)
+	reChapterHeading     = regexp.MustCompile(`(?m)^### (\S+):`)
+)
+
+// protoDeckStubLLM answers GenerateProtoDeck's three prompt shapes (outline, batch expansion,
+// summary) — distinguished by content, like stubModuleLLM in cmd/pdf2qti/commands/module.go does
+// — plus BuildModuleDoc's JSON-merge prompt, so tests can exercise the full two-pass pipeline
+// without a real LLM. outlineCount, if non-zero, overrides how many outline entries are
+// returned, to test under/over-shoot handling; zero means "use the prompt's own requested min".
+type protoDeckStubLLM struct {
+	err          error
+	outlineCount int
+	calls        []string // records which shape each call was, in order
+}
+
+func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string) (string, error) {
+	if s.err != nil {
+		return "", s.err
+	}
+	switch {
+	case strings.Contains(prompt, "planning a prototype PowerPoint outline"):
+		s.calls = append(s.calls, "outline")
+		return s.stubOutline(prompt), nil
+	case strings.Contains(prompt, "writing the bullet content for"):
+		s.calls = append(s.calls, "expand")
+		return stubExpandBatch(prompt), nil
+	case strings.Contains(prompt, "exactly one summary bullet per agenda item"):
+		s.calls = append(s.calls, "summary")
+		return stubSummary(prompt), nil
+	default:
+		s.calls = append(s.calls, "merge")
+		return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil
+	}
+}
+
+func (s *protoDeckStubLLM) stubOutline(prompt string) string {
+	n := 1
+	if m := reTargetContentRange.FindStringSubmatch(prompt); len(m) == 3 {
+		if v, err := strconv.Atoi(m[1]); err == nil {
+			n = v
+		}
+	}
+	if s.outlineCount > 0 {
+		n = s.outlineCount
+	}
+	entries := make([]string, n)
+	for i := range entries {
+		entries[i] = fmt.Sprintf(`{"tag":"ch1","title":"Slide %d","focus":"f"}`, i+1)
+	}
+	return fmt.Sprintf(`{"deck_title":"Deck","agenda":["a","b","c"],"outline":[%s]}`, strings.Join(entries, ","))
+}
+
+func stubExpandBatch(prompt string) string {
+	n := len(rePlannedSlideLine.FindAllString(prompt, -1))
+	slides := make([]string, n)
+	for i := range slides {
+		slides[i] = `{"bullets":["a"]}`
+	}
+	return fmt.Sprintf(`{"slides":[%s]}`, strings.Join(slides, ","))
+}
+
+func stubSummary(prompt string) string {
+	n := len(reChapterHeading.FindAllString(prompt, -1))
+	if n == 0 {
+		n = 1
+	}
+	bullets := make([]string, n)
+	for i := range bullets {
+		bullets[i] = `"a"`
+	}
+	return fmt.Sprintf(`{"bullets":[%s]}`, strings.Join(bullets, ","))
+}
+
 func TestGenerateProtoDeck_Table(t *testing.T) {
 	t.Parallel()
 
@@ -26,23 +103,26 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		llm       *stubLLM
+		llm       *protoDeckStubLLM
 		chapters  []distill.ProtoChapterInput
 		minSlides int
 		maxSlides int
 		wantErr   bool
 		errLike   string
 	}{
-		{name: "happy path", llm: &stubLLM{response: validDeck(5)}, chapters: chapters, minSlides: 3, maxSlides: 8},
-		{name: "no chapters", llm: &stubLLM{response: validDeck(5)}, chapters: nil, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "no chapters"},
-		{name: "invalid slide range", llm: &stubLLM{response: validDeck(5)}, chapters: chapters, minSlides: 8, maxSlides: 3, wantErr: true, errLike: "invalid slide range"},
-		{name: "llm error", llm: &stubLLM{err: fmt.Errorf("boom")}, chapters: chapters, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "llm complete"},
-		{name: "too few slides", llm: &stubLLM{response: validDeck(2)}, chapters: chapters, minSlides: 5, maxSlides: 8, wantErr: true, errLike: "expected between"},
+		{name: "happy path", llm: &protoDeckStubLLM{}, chapters: chapters, minSlides: 3, maxSlides: 8},
+		{name: "no chapters", llm: &protoDeckStubLLM{}, chapters: nil, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "no chapters"},
+		{name: "invalid slide range", llm: &protoDeckStubLLM{}, chapters: chapters, minSlides: 8, maxSlides: 3, wantErr: true, errLike: "invalid slide range"},
+		{name: "llm error", llm: &protoDeckStubLLM{err: fmt.Errorf("boom")}, chapters: chapters, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "llm complete"},
 		{
-			name:     "non-sequential meta markers",
-			llm:      &stubLLM{response: "<!-- meta: 1 agenda -->\n# Agenda\n\n---\n\n<!-- meta: 3 summary -->\n# Summary\n"},
-			chapters: chapters, minSlides: 1, maxSlides: 5,
-			wantErr: true, errLike: "sequential",
+			name: "outline undershoots minimum", llm: &protoDeckStubLLM{outlineCount: 1}, chapters: chapters,
+			minSlides: 5, maxSlides: 8, wantErr: true, errLike: "need at least",
+		},
+		{
+			// minContent=6 (maxSlides 8 - 2); outline returns 20, must be truncated to fit, not
+			// error out.
+			name: "outline overshoots maximum gets truncated", llm: &protoDeckStubLLM{outlineCount: 20}, chapters: chapters,
+			minSlides: 3, maxSlides: 8,
 		},
 	}
 
@@ -61,6 +141,32 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 				t.Fatal("expected non-empty deck")
 			}
 		})
+	}
+}
+
+func TestGenerateProtoDeck_CallsOutlineThenExpandThenSummary(t *testing.T) {
+	t.Parallel()
+
+	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: "t"}}
+	llm := &protoDeckStubLLM{outlineCount: 8}
+	_, err := distill.GenerateProtoDeck(context.Background(), llm, chapters, 3, 12)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(llm.calls) < 3 {
+		t.Fatalf("expected at least 3 calls (outline, >=1 expand batch, summary), got %v", llm.calls)
+	}
+	if llm.calls[0] != "outline" {
+		t.Fatalf("expected first call to be outline, got %v", llm.calls)
+	}
+	if llm.calls[len(llm.calls)-1] != "summary" {
+		t.Fatalf("expected last call to be summary, got %v", llm.calls)
+	}
+	for _, c := range llm.calls[1 : len(llm.calls)-1] {
+		if c != "expand" {
+			t.Fatalf("expected all calls between outline and summary to be expand, got %v", llm.calls)
+		}
 	}
 }
 

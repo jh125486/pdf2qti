@@ -576,13 +576,53 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]
 	return out, nil
 }
 
-// reBold matches "**bold**" markdown spans — the only markdown emphasis GenerateProtoDeck's
-// prompt asks for (Summary slide bullets), and the only one runsXML renders specially.
+// reMathSpan matches "\(...\)" inline math and "\[...\]" display math spans, preferring a
+// "**"-wrapped form first (see runsXML) so those markers are consumed as part of the match
+// rather than left as orphaned literal asterisks in the surrounding text.
+var reMathSpan = regexp.MustCompile(`\*\*\\\((.+?)\\\)\*\*|\*\*\\\[(.+?)\\\]\*\*|\\\((.+?)\\\)|\\\[(.+?)\\\]`)
+
+// reBold matches "**bold**" markdown spans.
 var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
 
-// runsXML renders text as one or more <a:r> runs, splitting on "**bold**" spans so they render
-// as actual bold text instead of showing up as literal asterisks.
+// runsXML renders text as one or more <a:r>/math runs. Math spans are extracted first, in their
+// own pass, before bold-splitting runs on whatever plain text is left — LLM output routinely
+// wraps a formula in bold, e.g. "**\(\mathbb{R}^n\)**", and matching "**bold**" first would
+// swallow the whole span as a literal-text bold run, never reaching mathRunXML at all. reMathSpan
+// consumes a tight "**"-wrapper as part of the math match so those markers don't end up as
+// orphaned literal asterisks in the surrounding plain text — bold styling on a boldfaced formula
+// is dropped either way, an acceptable tradeoff for turning it into a real rendered equation
+// instead of raw LaTeX source text.
 func runsXML(text string) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range reMathSpan.FindAllStringSubmatchIndex(text, -1) {
+		if loc[0] > last {
+			b.WriteString(boldRunsXML(text[last:loc[0]]))
+		}
+		switch {
+		case loc[2] != -1: // **\(inline math\)**
+			b.WriteString(mathRunXML(text[loc[2]:loc[3]], [2]string{`\(`, `\)`}))
+		case loc[4] != -1: // **\[display math\]**
+			b.WriteString(mathRunXML(text[loc[4]:loc[5]], [2]string{`\[`, `\]`}))
+		case loc[6] != -1: // \(inline math\)
+			b.WriteString(mathRunXML(text[loc[6]:loc[7]], [2]string{`\(`, `\)`}))
+		case loc[8] != -1: // \[display math\]
+			b.WriteString(mathRunXML(text[loc[8]:loc[9]], [2]string{`\[`, `\]`}))
+		}
+		last = loc[1]
+	}
+	if last < len(text) {
+		b.WriteString(boldRunsXML(text[last:]))
+	}
+	if b.Len() == 0 {
+		b.WriteString(runXML(text, false))
+	}
+	return b.String()
+}
+
+// boldRunsXML renders text (assumed free of math spans) as one or more <a:r> runs, splitting on
+// "**bold**" spans so they render as actual bold text instead of literal asterisks.
+func boldRunsXML(text string) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range reBold.FindAllStringSubmatchIndex(text, -1) {
@@ -592,7 +632,7 @@ func runsXML(text string) string {
 		b.WriteString(runXML(text[loc[2]:loc[3]], true))
 		last = loc[1]
 	}
-	if last < len(text) || b.Len() == 0 {
+	if last < len(text) {
 		b.WriteString(runXML(text[last:], false))
 	}
 	return b.String()

@@ -1,14 +1,12 @@
 package distill
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
-	"text/template"
 )
 
 // ProtoChapterInput is one chapter's distilled material used as source for a multi-chapter
@@ -31,6 +29,14 @@ var reProtoMeta = regexp.MustCompile(`(?m)^<!-- meta:\s*(\d+)\s+(\S+)\s*-->\s*$`
 // agenda slide, one or more content slides per chapter, and a closing summary slide). The
 // returned markdown is validated for the meta-marker slide count and numbering before it's
 // returned to the caller.
+//
+// Generation is two-pass rather than one-shot: a single call asked to both plan AND write the
+// full content of a 30+ slide deck reliably undershoots the requested count — the same failure
+// mode DistilledContext.Text hit before its fix (models don't self-regulate a large numeric
+// target well while also generating prose, no matter how the instruction is worded). Instead,
+// generateOutline asks for a flat list of slide topics (a bounded enumeration task models hit
+// close to target on), and expandOutline writes each topic's bullets in small batches, grounded
+// in the chapter's condensed text.
 func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInput, minSlides, maxSlides int) (string, error) {
 	if len(chapters) == 0 {
 		return "", errors.New("no chapters to build a proto deck from")
@@ -39,20 +45,31 @@ func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInpu
 		return "", fmt.Errorf("invalid slide range %d-%d", minSlides, maxSlides)
 	}
 
-	prompt, err := buildProtoDeckPrompt(chapters, minSlides, maxSlides)
-	if err != nil {
-		return "", fmt.Errorf("build proto deck prompt: %w", err)
+	// minSlides/maxSlides count agenda + content + summary; the outline's budget is just the
+	// content slides, excluding those two fixed slides.
+	minContent := minSlides - 2
+	if minContent < 1 {
+		minContent = 1
+	}
+	maxContent := maxSlides - 2
+	if maxContent < minContent {
+		maxContent = minContent
 	}
 
-	raw, err := llm.Complete(ctx, prompt)
+	outline, err := generateOutline(ctx, llm, chapters, minContent, maxContent)
 	if err != nil {
-		return "", fmt.Errorf("llm complete: %w", err)
+		return "", fmt.Errorf("generate outline: %w", err)
 	}
 
-	if err := validateProtoDeck(raw, minSlides, maxSlides); err != nil {
+	deck, err := expandOutline(ctx, llm, chapters, outline)
+	if err != nil {
+		return "", fmt.Errorf("expand outline: %w", err)
+	}
+
+	if err := validateProtoDeck(deck, minSlides, maxSlides); err != nil {
 		return "", fmt.Errorf("invalid proto deck: %w", err)
 	}
-	return raw, nil
+	return deck, nil
 }
 
 // validateProtoDeck checks that deck has a slide count within [minSlides, maxSlides] and that
@@ -70,76 +87,6 @@ func validateProtoDeck(deck string, minSlides, maxSlides int) error {
 		}
 	}
 	return nil
-}
-
-// protoDeckPromptTmpl is the LLM prompt template for multi-chapter proto-slide deck generation.
-var protoDeckPromptTmpl = template.Must(template.New("protodeck").Parse(`You are building a prototype PowerPoint outline in Markdown, spanning multiple textbook chapters.
-
-## Chapters
-{{range .Chapters}}### {{.Tag}}: {{.ModuleName}}
-Overview: {{.Overview}}
-Key concepts: {{range .KeyConcepts}}{{.}}, {{end}}
-Teaching notes: {{.TeachingNotes}}
-
-{{end}}
-## Task
-Produce ONE markdown proto-slide deck covering all chapters above, structured exactly like this:
-
-    # <overall deck title>
-
-    ---
-
-    <!-- meta: 1 agenda -->
-    # Agenda
-
-    - <3-8 bullets, one per major cross-chapter theme>
-
-    ---
-
-    <!-- meta: 2 {{(index .Chapters 0).Tag}} -->
-    # <slide title>
-
-    - <5-8 bullets covering this chapter's key points>
-
-    ---
-
-    ... one slide per notable subsection of each chapter, in chapter order, tagged with that
-    chapter's tag from the list above ...
-
-    <!-- meta: N summary -->
-    # Summary
-
-    - <one bolded takeaway bullet per chapter>
-
-## Rules
-- Every slide except the very first (untagged) title slide is preceded by a
-  "<!-- meta: N tag -->" comment, where N is a 1-based sequential slide number with no gaps and
-  tag is "agenda", "summary", or one of the chapter tags above.
-- Slides are separated by a line containing only "---".
-- The deck must have between {{.MinSlides}} and {{.MaxSlides}} numbered slides total (agenda +
-  content + summary combined). Allocate more content slides to chapters with more material.
-
-TARGET_SLIDE_RANGE: min={{.MinSlides}} max={{.MaxSlides}}
-`))
-
-// protoDeckPromptData is the data passed to protoDeckPromptTmpl.
-type protoDeckPromptData struct {
-	Chapters  []ProtoChapterInput
-	MinSlides int
-	MaxSlides int
-}
-
-// buildProtoDeckPrompt renders the LLM prompt for multi-chapter proto-slide deck generation.
-func buildProtoDeckPrompt(chapters []ProtoChapterInput, minSlides, maxSlides int) (string, error) {
-	var buf bytes.Buffer
-	if err := protoDeckPromptTmpl.Execute(&buf, protoDeckPromptData{
-		Chapters:  chapters,
-		MinSlides: minSlides,
-		MaxSlides: maxSlides,
-	}); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
 }
 
 // reProtoSeparator matches a "---" slide-separator line, the format GenerateProtoDeck emits and

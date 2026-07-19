@@ -104,11 +104,13 @@ func (s *SlidesCmd) selectSources(cfg *config.Config) []*config.Source {
 	return ptrs
 }
 
-// stubSlidesLLM is a placeholder LLM for the slides command, used only when no real provider
-// key is configured (see selectLLM). SlidesCmd only ever issues the proto-deck prompt (unlike
-// ModuleCmd, which also issues a JSON-merge prompt), so it always returns a stub deck.
+// stubSlidesLLM is a placeholder LLM for the slides command, used only when no real provider key
+// is configured (see selectLLM). SlidesCmd only ever issues GenerateProtoDeck's three prompt
+// shapes (see stubProtoDeckShape in llm.go), unlike ModuleCmd, which also issues a JSON-merge
+// prompt.
 type stubSlidesLLM struct{ chapterTags []string }
 
 func (s *stubSlidesLLM) Complete(_ context.Context, prompt string) (string, error) {
-	return stubProtoDeckMarkdown(prompt, s.chapterTags), nil
+	resp, _ := stubProtoDeckShape(prompt, s.chapterTags)
+	return resp, nil
 }

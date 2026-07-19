@@ -11,22 +11,26 @@ import (
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
-// splitLLM answers two different prompt shapes from one Complete method, mirroring how
-// BuildModuleDoc issues both a JSON-merge prompt and the proto-deck markdown prompt.
+// splitLLM answers BuildModuleDoc's JSON-merge prompt directly, and delegates its three
+// proto-deck prompt shapes (outline, batch expansion, summary) to protoDeckStubLLM.
 type splitLLM struct {
-	deckMarker   string
 	mergeResp    string
 	mergeErr     error
-	deckResp     string
-	deckErr      error
+	deckErr      error // if set, every proto-deck-shaped call fails with this
+	deck         protoDeckStubLLM
 	sawDeckCall  bool
 	sawMergeCall bool
 }
 
-func (s *splitLLM) Complete(_ context.Context, prompt string) (string, error) {
-	if strings.Contains(prompt, s.deckMarker) {
+func (s *splitLLM) Complete(ctx context.Context, prompt string) (string, error) {
+	if strings.Contains(prompt, "planning a prototype PowerPoint outline") ||
+		strings.Contains(prompt, "writing the bullet content for") ||
+		strings.Contains(prompt, "exactly one summary bullet per agenda item") {
 		s.sawDeckCall = true
-		return s.deckResp, s.deckErr
+		if s.deckErr != nil {
+			return "", s.deckErr
+		}
+		return s.deck.Complete(ctx, prompt)
 	}
 	s.sawMergeCall = true
 	return s.mergeResp, s.mergeErr
@@ -61,7 +65,7 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 	}{
 		{
 			name: "happy path",
-			llm:  &splitLLM{deckMarker: "prototype PowerPoint outline", mergeResp: validMergeResp, deckResp: validDeck(4)},
+			llm:  &splitLLM{mergeResp: validMergeResp},
 			check: func(t *testing.T, doc *distill.ModuleDoc) {
 				t.Helper()
 				if doc.Overview != "combined overview" {
@@ -83,19 +87,19 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 		},
 		{
 			name:    "merge llm error",
-			llm:     &splitLLM{deckMarker: "prototype PowerPoint outline", mergeErr: errors.New("boom")},
+			llm:     &splitLLM{mergeErr: errors.New("boom")},
 			wantErr: true,
 			errLike: "llm complete",
 		},
 		{
 			name:    "merge invalid json",
-			llm:     &splitLLM{deckMarker: "prototype PowerPoint outline", mergeResp: "not json"},
+			llm:     &splitLLM{mergeResp: "not json"},
 			wantErr: true,
 			errLike: "parse llm response",
 		},
 		{
 			name:    "deck generation error",
-			llm:     &splitLLM{deckMarker: "prototype PowerPoint outline", mergeResp: validMergeResp, deckErr: errors.New("deck boom")},
+			llm:     &splitLLM{mergeResp: validMergeResp, deckErr: errors.New("deck boom")},
 			wantErr: true,
 			errLike: "generate proto deck",
 		},
