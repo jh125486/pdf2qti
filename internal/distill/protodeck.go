@@ -165,11 +165,12 @@ func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Sl
 			continue
 		}
 		bullets := bulletLines(block)
-		if tag := m[2]; tag == "agenda" {
+		tag := m[2]
+		if tag == "agenda" {
 			agenda = bullets
 			continue
 		}
-		slides = append(slides, Slide{Title: firstHeading(block), Content: strings.Join(bullets, "\n")})
+		slides = append(slides, Slide{Title: firstHeading(block), Content: strings.Join(bullets, "\n"), Tag: tag})
 	}
 
 	if len(agenda) == 0 && len(slides) == 0 {

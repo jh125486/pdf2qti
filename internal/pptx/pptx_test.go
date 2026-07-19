@@ -21,9 +21,9 @@ func sampleContext() *distill.DistilledContext {
 		MaterialOverview: "Read chapter",
 		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
 		Slides: []distill.Slide{
-			{Title: "Topic A", Content: "Point 1\nPoint 2"},
-			{Title: "Topic B", Content: "Point 1"},
-			{Title: "Topic C", Content: "Point 1\nPoint 2\nPoint 3"},
+			{Title: "Topic A", Content: "Point 1\nPoint 2", Tag: "ch1"},
+			{Title: "Topic B", Content: "Point 1", Tag: "ch1"},
+			{Title: "Topic C", Content: "Point 1\nPoint 2\nPoint 3", Tag: "summary"},
 		},
 	}
 }
@@ -104,6 +104,19 @@ func TestRender_Success(t *testing.T) {
 	presRels := string(outEntries["ppt/_rels/presentation.xml.rels"])
 	if got := strings.Count(presRels, `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"`); got != 5 {
 		t.Fatalf("expected 5 slide relationships, got %d: %q", got, presRels)
+	}
+
+	if got := strings.Count(pres, "<p14:section "); got != 3 {
+		t.Fatalf("expected 3 sections (Introduction, ch1, Summary), got %d: %q", got, pres)
+	}
+	mustContainAll(t, "presentation.xml sections", pres,
+		`<p14:section name="Introduction"`, `<p14:section name="ch1"`, `<p14:section name="Summary"`)
+	// ch1 groups the two ch1-tagged slides (Topic A + Topic B) into one section, not two.
+	if idx := strings.Index(pres, `<p14:section name="ch1"`); idx != -1 {
+		end := strings.Index(pres[idx:], "</p14:section>")
+		if got := strings.Count(pres[idx:idx+end], "<p14:sldId "); got != 2 {
+			t.Fatalf("expected 2 sldIds in the ch1 section, got %d: %q", got, pres[idx:idx+end])
+		}
 	}
 }
 
@@ -278,8 +291,31 @@ func TestRender_RealTemplate(t *testing.T) {
 			t.Fatalf("expected generated slide part %q in output", name)
 		}
 	}
-	if strings.Count(string(outEntries["ppt/presentation.xml"]), "<p:sldId ") != 5 {
-		t.Fatalf("expected 5 sldId entries (title+agenda+3 content), got: %q", string(outEntries["ppt/presentation.xml"]))
+	pres := string(outEntries["ppt/presentation.xml"])
+	if strings.Count(pres, "<p:sldId ") != 5 {
+		t.Fatalf("expected 5 sldId entries (title+agenda+3 content), got: %q", pres)
+	}
+
+	// The real template already has a <p:extLst> (sldGuideLst) — sections must merge into it
+	// rather than duplicate the element, and it must still be well-formed (exactly one open/close
+	// pair) afterward.
+	if got := strings.Count(pres, "<p:extLst>"); got != 1 {
+		t.Fatalf("expected exactly 1 <p:extLst>, got %d: %q", got, pres)
+	}
+	mustContainAll(t, "presentation.xml", pres, "p15:sldGuideLst", "<p14:sectionLst", `<p14:section name="Introduction"`)
+
+	// Every picture in a slide layout should be marked decorative (empty descr), since they're
+	// template chrome (logos, background graphics) identical on every generated slide.
+	for _, name := range []string{"ppt/slideLayouts/slideLayout1.xml", "ppt/slideLayouts/slideLayout2.xml", "ppt/slideLayouts/slideLayout3.xml"} {
+		layout, ok := outEntries[name]
+		if !ok {
+			continue
+		}
+		picCount := strings.Count(string(layout), "<p:pic>")
+		descrCount := strings.Count(string(layout), `descr=""`)
+		if picCount > 0 && descrCount != picCount {
+			t.Fatalf("%s: %d pictures but only %d marked decorative", name, picCount, descrCount)
+		}
 	}
 }
 

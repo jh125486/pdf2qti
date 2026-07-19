@@ -78,10 +78,10 @@ func TestParseProtoDeck_RoundTripsGenerateProtoDeck(t *testing.T) {
 		t.Fatalf("got agenda %v, want [\"a\"]", agenda)
 	}
 	wantSlides := []distill.Slide{
-		{Title: "Slide 2", Content: "a"},
-		{Title: "Slide 3", Content: "a"},
-		{Title: "Slide 4", Content: "a"},
-		{Title: "Summary", Content: "a"},
+		{Title: "Slide 2", Content: "a", Tag: "ch1"},
+		{Title: "Slide 3", Content: "a", Tag: "ch1"},
+		{Title: "Slide 4", Content: "a", Tag: "ch1"},
+		{Title: "Summary", Content: "a", Tag: "summary"},
 	}
 	if len(slides) != len(wantSlides) {
 		t.Fatalf("got %d slides, want %d: %+v", len(slides), len(wantSlides), slides)
@@ -137,7 +137,7 @@ func TestParseProtoDeck_HandWrittenLooseSpacing(t *testing.T) {
 	if len(agenda) != 2 || agenda[0] != "one" || agenda[1] != "two" {
 		t.Fatalf("got agenda %v", agenda)
 	}
-	if len(slides) != 1 || slides[0] != (distill.Slide{Title: "A Slide", Content: "bullet"}) {
+	if len(slides) != 1 || slides[0] != (distill.Slide{Title: "A Slide", Content: "bullet", Tag: "ch01"}) {
 		t.Fatalf("got slides %+v", slides)
 	}
 }

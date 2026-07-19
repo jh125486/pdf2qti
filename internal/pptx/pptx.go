@@ -35,9 +35,39 @@ var (
 	reRelTargetAttr   = regexp.MustCompile(`\bTarget="([^"]+)"`)
 	reRelIDGlobal     = regexp.MustCompile(`Id="rId(\d+)"`)
 	reSldIDGlobal     = regexp.MustCompile(`<p:sldId id="(\d+)"`)
+	rePicBlock        = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
+	reCNvPrOpen       = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
 
 	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 )
+
+// markLayoutPicturesDecorative adds descr="" to every <p:cNvPr> inside a <p:pic> in a slide
+// layout part that doesn't already have a descr attribute. Layout-level pictures (logos,
+// background graphics) are template chrome — identical on every generated slide, never
+// content-specific — so marking them decorative for screen readers is correct, and doesn't
+// require inventing alt text no caller actually has.
+func markLayoutPicturesDecorative(parts map[string][]byte) {
+	for name, data := range parts {
+		if !reSlideLayoutPart.MatchString(name) {
+			continue
+		}
+		parts[name] = rePicBlock.ReplaceAllFunc(data, func(pic []byte) []byte {
+			return reCNvPrOpen.ReplaceAllFunc(pic, addEmptyDescr)
+		})
+	}
+}
+
+// addEmptyDescr adds descr="" to a <p:cNvPr ...> opening tag, unless it already has a descr
+// attribute, handling both self-closing (.../>) and open (...>) tag forms.
+func addEmptyDescr(tag []byte) []byte {
+	if bytes.Contains(tag, []byte("descr=")) {
+		return tag
+	}
+	if bytes.HasSuffix(tag, []byte("/>")) {
+		return append(tag[:len(tag)-2:len(tag)-2], []byte(` descr=""/>`)...)
+	}
+	return append(tag[:len(tag)-1:len(tag)-1], []byte(` descr="">`)...)
+}
 
 // Render reads a PPTX template file, validates it has Title/Agenda/Content slide layouts, fills
 // in the title slide (dc.ModuleName and courseName), the agenda bullets, and duplicates the
@@ -58,6 +88,8 @@ func Render(templatePath string, dc *distill.DistilledContext, courseName string
 	if err != nil {
 		return err
 	}
+
+	markLayoutPicturesDecorative(parts)
 
 	if err := applyDeck(parts, &order, dc, courseName); err != nil {
 		return err
@@ -182,6 +214,18 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 		return fmt.Errorf("template has no slide using the %q layout", layoutContent)
 	}
 
+	// Resolved before any mutation touches ppt/presentation.xml, since sldIDForPart reads the
+	// slide's r:id -> numeric sldId mapping directly off it.
+	presData := parts["ppt/presentation.xml"]
+	titleSldID, err := sldIDForPart(parts, presData, titleSlide)
+	if err != nil {
+		return err
+	}
+	agendaSldID, err := sldIDForPart(parts, presData, agendaSlide)
+	if err != nil {
+		return err
+	}
+
 	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName); err != nil {
 		return err
 	}
@@ -190,7 +234,13 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 		return err
 	}
 
-	return duplicateContentSlides(parts, order, contentSlide, dc.Slides)
+	contentSldIDs, err := duplicateContentSlides(parts, order, contentSlide, dc.Slides)
+	if err != nil {
+		return err
+	}
+
+	parts["ppt/presentation.xml"] = addSections(parts["ppt/presentation.xml"], titleSldID, agendaSldID, dc.Slides, contentSldIDs)
+	return nil
 }
 
 // fillTitleSlide sets the Title-layout slide's title placeholder to title and, if courseName is
@@ -301,42 +351,50 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) erro
 
 // duplicateContentSlides fills the prototype Content slide with slides[0] in place, then clones
 // it once per remaining entry, wiring up the new part's relationships, content type, and
-// presentation slide list entry.
-func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypePart string, slides []distill.Slide) error {
+// presentation slide list entry. It returns each entry's final numeric sldId, in slides order,
+// so callers can group them into PowerPoint Sections afterward.
+func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypePart string, slides []distill.Slide) ([]string, error) {
 	if len(slides) == 0 {
-		return errors.New("distilled context has no slides to render")
+		return nil, errors.New("distilled context has no slides to render")
 	}
 
 	prototypeRels, ok := parts[relsPartFor(prototypePart)]
 	if !ok {
-		return fmt.Errorf("content slide %q has no relationships part", prototypePart)
+		return nil, fmt.Errorf("content slide %q has no relationships part", prototypePart)
 	}
 
 	const presRelsPart = "ppt/_rels/presentation.xml.rels"
 	prototypeTarget := strings.TrimPrefix(prototypePart, "ppt/")
 	prevRID, err := relationshipIDForTarget(parts[presRelsPart], prototypeTarget)
 	if err != nil {
-		return fmt.Errorf("find presentation relationship for %q: %w", prototypePart, err)
+		return nil, fmt.Errorf("find presentation relationship for %q: %w", prototypePart, err)
+	}
+
+	presData := parts["ppt/presentation.xml"]
+	protoSldID, err := sldIDForRID(presData, prevRID)
+	if err != nil {
+		return nil, err
 	}
 
 	nextSlideNum := maxSlideNumber(*order) + 1
 	nextRID := maxRelID(parts[presRelsPart]) + 1
-	nextSldID := maxSldID(parts["ppt/presentation.xml"]) + 1
+	nextSldID := maxSldID(presData) + 1
 
-	presData := parts["ppt/presentation.xml"]
+	sldIDs := make([]string, len(slides))
 
 	for i, slide := range slides {
 		body, err := setPlaceholderBullets(parts[prototypePart], "title", []string{slide.Title})
 		if err != nil {
-			return fmt.Errorf("set title for slide %d: %w", i+1, err)
+			return nil, fmt.Errorf("set title for slide %d: %w", i+1, err)
 		}
 		body, err = setPlaceholderBullets(body, "body", splitBullets(slide.Content))
 		if err != nil {
-			return fmt.Errorf("set content for slide %d: %w", i+1, err)
+			return nil, fmt.Errorf("set content for slide %d: %w", i+1, err)
 		}
 
 		if i == 0 {
 			parts[prototypePart] = body
+			sldIDs[0] = protoSldID
 			continue
 		}
 
@@ -355,12 +413,35 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 		parts[presRelsPart] = addPresentationRelationship(parts[presRelsPart], rID, strings.TrimPrefix(slidePartName, "ppt/"))
 
 		presData = insertSldIDAfter(presData, prevRID, strconv.Itoa(nextSldID), rID)
+		sldIDs[i] = strconv.Itoa(nextSldID)
 		prevRID = rID
 		nextSldID++
 	}
 
 	parts["ppt/presentation.xml"] = presData
-	return nil
+	return sldIDs, nil
+}
+
+// sldIDForPart resolves partName's numeric <p:sldId id="..."> in presData, by following its
+// relationship in ppt/_rels/presentation.xml.rels.
+func sldIDForPart(parts map[string][]byte, presData []byte, partName string) (string, error) {
+	const presRelsPart = "ppt/_rels/presentation.xml.rels"
+	target := strings.TrimPrefix(partName, "ppt/")
+	rID, err := relationshipIDForTarget(parts[presRelsPart], target)
+	if err != nil {
+		return "", fmt.Errorf("find presentation relationship for %q: %w", partName, err)
+	}
+	return sldIDForRID(presData, rID)
+}
+
+// sldIDForRID resolves the numeric <p:sldId id="..."> whose r:id matches rID.
+func sldIDForRID(presData []byte, rID string) (string, error) {
+	re := regexp.MustCompile(`<p:sldId id="(\d+)" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
+	m := re.FindSubmatch(presData)
+	if m == nil {
+		return "", fmt.Errorf("no sldId found for r:id %q", rID)
+	}
+	return string(m[1]), nil
 }
 
 func relationshipIDForTarget(data []byte, target string) (string, error) {
@@ -478,9 +559,9 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]
 
 	var paragraphs strings.Builder
 	for _, b := range bullets {
-		paragraphs.WriteString(`<a:p><a:r><a:rPr lang="en-US" dirty="0"/><a:t>`)
-		paragraphs.WriteString(xmlTextReplacer.Replace(b))
-		paragraphs.WriteString(`</a:t></a:r></a:p>`)
+		paragraphs.WriteString(`<a:p>`)
+		paragraphs.WriteString(runsXML(b))
+		paragraphs.WriteString(`</a:p>`)
 	}
 
 	newBlock := make([]byte, 0, len(block)+paragraphs.Len())
@@ -493,6 +574,37 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]
 	out = append(out, newBlock...)
 	out = append(out, slideXML[spEnd:]...)
 	return out, nil
+}
+
+// reBold matches "**bold**" markdown spans — the only markdown emphasis GenerateProtoDeck's
+// prompt asks for (Summary slide bullets), and the only one runsXML renders specially.
+var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
+
+// runsXML renders text as one or more <a:r> runs, splitting on "**bold**" spans so they render
+// as actual bold text instead of showing up as literal asterisks.
+func runsXML(text string) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range reBold.FindAllStringSubmatchIndex(text, -1) {
+		if loc[0] > last {
+			b.WriteString(runXML(text[last:loc[0]], false))
+		}
+		b.WriteString(runXML(text[loc[2]:loc[3]], true))
+		last = loc[1]
+	}
+	if last < len(text) || b.Len() == 0 {
+		b.WriteString(runXML(text[last:], false))
+	}
+	return b.String()
+}
+
+// runXML renders a single <a:r> run, bold if requested.
+func runXML(text string, bold bool) string {
+	rPr := `<a:rPr lang="en-US" dirty="0"/>`
+	if bold {
+		rPr = `<a:rPr lang="en-US" b="1" dirty="0"/>`
+	}
+	return `<a:r>` + rPr + `<a:t>` + xmlTextReplacer.Replace(text) + `</a:t></a:r>`
 }
 
 // splitBullets splits content on newlines into trimmed, non-empty bullet lines.

@@ -55,7 +55,8 @@ func (o *Objective) UnmarshalJSON(data []byte) error {
 // Slide is a single content slide's title and body, one per major section.
 type Slide struct {
 	Title   string `json:"title"`
-	Content string `json:"content"` // newline-separated bullet lines
+	Content string `json:"content"`        // newline-separated bullet lines
+	Tag     string `json:"tag,omitempty"`  // chapter tag (or "summary") from the proto-deck's meta marker
 }
 
 // VocabTerm is a single vocabulary term and its definition.
