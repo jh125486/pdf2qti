@@ -75,8 +75,16 @@ Ignore any "Participation Activity", "Animation content/captions", "Static figur
 artifacts, not real content, and must not become outline entries. A "Worked Example"/"WE#" with a
 complete solution is real content and should get its own entry.
 
-Do NOT plan a "review", "summary", or "recap" content slide — a closing summary slide is always
-appended automatically after your last outline entry, so one in the outline too would duplicate it.
+Do NOT plan a slide for any "Lab", "Python Lab", or other hands-on coding-exercise section — labs
+are a separate hands-on assignment, not lecture content, even though they're real material in the
+chapter text.
+
+Every outline entry must cover NEW material not covered by any other entry — a specific
+definition, formula, rule, or worked example. Do NOT plan a slide whose purpose is to recap,
+review, or highlight material already covered elsewhere in the outline, under ANY title
+("Review", "Summary", "Recap", "Key Points", "Key Takeaways", "What We Learned", etc.) — a closing
+summary slide covering the whole deck is always appended automatically after your last outline
+entry, so any such slide in the outline itself would be redundant with it.
 
 ## Task
 Produce a JSON object with these exact fields:
@@ -223,7 +231,8 @@ in it.
 {{end}}
 Ignore any "Participation Activity", "Animation content/captions", "Static figure" caption, or
 "Check"/"Show answer" text in the source material above — these are leftover interactive-widget
-artifacts, not real content.
+artifacts, not real content. Also ignore any "Lab"/"Python Lab" hands-on coding-exercise content —
+labs are a separate assignment, not lecture material.
 
 ## Task
 Produce a JSON object: {"slides": [{"bullets": ["...", "..."]}]}, one entry per planned slide
