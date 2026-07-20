@@ -64,6 +64,14 @@ func TestDistilledContext_UnmarshalJSON_VocabularyAndSectionsTolerance(t *testin
 			wantVocabLen: 2,
 			wantSectLen:  2,
 		},
+		{
+			// The internal-consistency verify step (see verify.go) has been observed returning
+			// bare title strings for sections instead of {title, summary} objects.
+			name:         "vocabulary and sections as bare string arrays",
+			in:           `{"vocabulary":["Vector","Matrix"],"sections":["Intro","Ops","Summary"]}`,
+			wantVocabLen: 2,
+			wantSectLen:  3,
+		},
 		{name: "vocabulary is neither array nor object", in: `{"vocabulary":"nope"}`, wantErr: true},
 		{name: "sections is neither array nor object", in: `{"sections":"nope"}`, wantErr: true},
 	}

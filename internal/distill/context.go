@@ -66,19 +66,28 @@ type VocabTerm struct {
 }
 
 // vocabList unmarshals a "vocabulary" value that's expected to be an array of
-// {term, definition} objects, but tolerates a flat {term: definition} object too — LLM
-// responses aren't always consistent about which shape they emit for this field, even within
-// the same prompt template across calls.
+// {term, definition} objects, but tolerates a flat {term: definition} object, or a bare array of
+// term strings (definition left empty), too — LLM responses aren't always consistent about which
+// shape they emit for this field, even within the same prompt template across calls.
 type vocabList []VocabTerm
 
 func (v *vocabList) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] == '[' {
 		var arr []VocabTerm
-		if err := json.Unmarshal(data, &arr); err != nil {
-			return err
+		if err := json.Unmarshal(data, &arr); err == nil {
+			*v = arr
+			return nil
 		}
-		*v = arr
+		var terms []string
+		if err := json.Unmarshal(data, &terms); err != nil {
+			return fmt.Errorf("vocabulary: expected array of objects or strings: %w", err)
+		}
+		list := make([]VocabTerm, len(terms))
+		for i, t := range terms {
+			list[i] = VocabTerm{Term: t}
+		}
+		*v = list
 		return nil
 	}
 	var m map[string]string
@@ -107,18 +116,27 @@ type Section struct {
 }
 
 // sectionList unmarshals a "sections" value that's expected to be an array of
-// {title, summary} objects, but tolerates a flat {title: summary} object too, for the same
-// reason vocabList does.
+// {title, summary} objects, but tolerates a flat {title: summary} object, or a bare array of
+// title strings (summary left empty), too, for the same reason vocabList does.
 type sectionList []Section
 
 func (s *sectionList) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] == '[' {
 		var arr []Section
-		if err := json.Unmarshal(data, &arr); err != nil {
-			return err
+		if err := json.Unmarshal(data, &arr); err == nil {
+			*s = arr
+			return nil
 		}
-		*s = arr
+		var titles []string
+		if err := json.Unmarshal(data, &titles); err != nil {
+			return fmt.Errorf("sections: expected array of objects or strings: %w", err)
+		}
+		list := make([]Section, len(titles))
+		for i, t := range titles {
+			list[i] = Section{Title: t}
+		}
+		*s = list
 		return nil
 	}
 	var m map[string]string
