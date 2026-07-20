@@ -75,6 +75,9 @@ Ignore any "Participation Activity", "Animation content/captions", "Static figur
 artifacts, not real content, and must not become outline entries. A "Worked Example"/"WE#" with a
 complete solution is real content and should get its own entry.
 
+Do NOT plan a "review", "summary", or "recap" content slide — a closing summary slide is always
+appended automatically after your last outline entry, so one in the outline too would duplicate it.
+
 ## Task
 Produce a JSON object with these exact fields:
 - deck_title: short overall title for the deck
@@ -227,6 +230,10 @@ Produce a JSON object: {"slides": [{"bullets": ["...", "..."]}]}, one entry per 
 above, IN THE SAME ORDER. Each entry's bullets is an array of 5-8 strings covering exactly what
 that slide's focus describes, normal weight, wrapping only key vocabulary/terms in **bold**
 inline where they first appear — never bold a whole bullet.
+
+Each bullet is a short phrase or fragment, NOT a full flowing sentence — 11 words or fewer
+(formulas don't count toward this). Long sentences don't work on slides; cut to the essential
+words, the way a real lecture slide would, not the way a paragraph would.
 `))
 
 type expandBatchPromptData struct {
@@ -281,10 +288,11 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 
 // summaryPromptTmpl is the LLM prompt template for the deck's closing summary bullets.
 var summaryPromptTmpl = template.Must(template.New("summary").Parse(`Produce a JSON object {"bullets": ["...", "..."]}: exactly one summary bullet per agenda item
-below, in the same order, expanding each short agenda phrase into a fuller 1-sentence recap
-grounded in the chapter material — a fleshed-out version of that agenda item, not a generic
-takeaway. Normal weight, with only that bullet's key term(s) wrapped in **bold** inline — never
-bold the entire bullet.
+below, in the same order, turning each short agenda phrase into a slightly fuller takeaway
+grounded in the chapter material — more informative than the bare agenda phrase, but still a
+short phrase or fragment, NOT a full sentence: 11 words or fewer. Long, flowing sentences don't
+work on slides. Normal weight, with only that bullet's key term(s) wrapped in **bold** inline —
+never bold the entire bullet.
 
 ## Agenda
 {{range .Agenda}}- {{.}}
