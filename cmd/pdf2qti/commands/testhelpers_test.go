@@ -152,6 +152,21 @@ func assertSlideCount(t *testing.T, path string, want int) {
 	}
 }
 
+// assertSlidesOutput fails t unless outputFile (relative to dir) exists and, if wantSlideCount >
+// 0, has exactly that many slide meta markers. A no-op when outputFile is empty or wantErr is
+// true — a command that errored isn't expected to have produced output.
+func assertSlidesOutput(t *testing.T, dir, outputFile string, wantErr bool, wantSlideCount int) {
+	t.Helper()
+	if outputFile == "" || wantErr {
+		return
+	}
+	outPath := filepath.Join(dir, outputFile)
+	if _, statErr := os.Stat(outPath); statErr != nil {
+		t.Fatalf("expected slides output %q: %v", outputFile, statErr)
+	}
+	assertSlideCount(t, outPath, wantSlideCount)
+}
+
 // slidesAutoScalingPrepare returns a TestSlidesCmdRun_Table prepare func for a single-source
 // config whose src01 context has an 8000-char (20 * charsPerContentSlide) Text field, giving a
 // known distill.AutoSlideRange result (minSlides=19, maxSlides=27) to test resolveSlideRange's

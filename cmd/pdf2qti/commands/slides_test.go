@@ -204,13 +204,7 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
-			if tt.outputFile != "" {
-				outPath := filepath.Join(dir, tt.outputFile)
-				if _, statErr := os.Stat(outPath); statErr != nil {
-					t.Fatalf("expected slides output %q: %v", tt.outputFile, statErr)
-				}
-				assertSlideCount(t, outPath, tt.wantSlideCount)
-			}
+			assertSlidesOutput(t, dir, tt.outputFile, tt.wantErr, tt.wantSlideCount)
 		})
 	}
 }
