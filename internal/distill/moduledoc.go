@@ -220,7 +220,7 @@ func LoadModuleDoc(path string) (*ModuleDoc, error) {
 }
 
 // SaveModuleMarkdown writes md to path, creating or truncating the file.
-func SaveModuleMarkdown(path string, md string) error {
+func SaveModuleMarkdown(path, md string) error {
 	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {
 		return fmt.Errorf("write module markdown %q: %w", path, err)
 	}
