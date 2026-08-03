@@ -96,10 +96,18 @@ Produce a JSON object with these exact fields:
   NOT the slide's actual bullet content, just what it should be about
 
 ## Slide count
-Produce between {{.MinContent}} and {{.MaxContent}} outline entries total. Reach this by planning
-ONE topic per slide, never combining several ideas into one entry: a chapter with several
-subsections and worked examples should easily need {{.MinContent}}+ entries once you plan one
-slide per definition/concept, one per formula or rule, and one per worked example (never grouped).
+First enumerate every distinct topic across all chapters above that needs its own slide — one per
+definition/concept, one per formula or rule, one per worked example — without looking at the
+range below or stopping once some count feels "enough." Only after that enumeration is complete,
+check the total against the range.
+
+{{.MaxContent}} is your target, not a cap to avoid: a thorough enumeration of a real chapter's
+distinct definitions, formulas, rules, and worked examples should land close to it.
+{{.MinContent}} is an absolute floor for "did I skip real content," not something to stop at once
+reached — if your enumeration lands at or just above {{.MinContent}}, that's a signal you combined
+topics or missed some, not that you're done; go back through the chapter text again instead of
+padding or accepting the low count. Never combine several distinct ideas into one entry just to
+land inside the range faster.
 
 TARGET_CONTENT_RANGE: min={{.MinContent}} max={{.MaxContent}}
 `))
