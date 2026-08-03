@@ -24,13 +24,13 @@ func TestRepairJSONEscapes_Table(t *testing.T) {
 		{name: "backslash-f doubled, not left as form feed", in: `{"a":"\frac{1}{2}"}`, want: `{"a":"\\frac{1}{2}"}`},
 		{name: "trailing backslash", in: `{"a":"foo\`, want: `{"a":"foo\\`},
 		{
-			// Regression: a valid "\\" escape immediately followed by an invalid "\(" used to
-			// leave the second backslash of "\\" re-examined as its own (invalid) escape start,
-			// corrupting otherwise-valid input. Common in LaTeX matrix content ("\\" row breaks
-			// next to "\(" inline math).
-			name: "escaped backslash directly followed by invalid escape",
+			// Regression: a raw "\\" (LaTeX row break) directly followed by an invalid "\("
+			// used to be treated as an already-escaped single backslash and left untouched,
+			// silently dropping a backslash. All three raw backslashes here (row break "\\"
+			// plus inline-math-open "\(") must round-trip intact: doubled independently.
+			name: "raw double-backslash directly followed by invalid escape",
 			in:   `{"a":"\\\(x\)"}`,
-			want: `{"a":"\\\\(x\\)"}`,
+			want: `{"a":"\\\\\\(x\\)"}`,
 		},
 	}
 

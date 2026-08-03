@@ -12,7 +12,16 @@ import "strings"
 // byte anyway). Treating them as invalid (and therefore doubling them) avoids silently
 // corrupting output with control bytes; see TestRepairJSONEscapes_LatexBeginNotBackspace and
 // TestRepairJSONEscapes_LatexTimesNotTab for the concrete failures this fixes.
-const validJSONEscapes = `"\/nu`
+//
+// Backslash itself is deliberately excluded from this set, even though "\\" is a valid JSON
+// escape for a single literal backslash. The model never emits properly JSON-escaped
+// backslashes — it emits raw LaTeX — so a raw "\\" in its output is virtually always a LaTeX
+// row-break ("\\" in \begin{bmatrix}...\\...\end{bmatrix}"), meaning two literal backslashes
+// are wanted in the decoded string, not one. Treating "\\" as pre-escaped silently drops a
+// backslash (each raw "\\" collapses to a single decoded backslash), which corrupted matrix
+// row breaks into run-on rows. Excluding it means every backslash is independently doubled,
+// so N raw backslashes round-trip through JSON as N literal backslashes.
+const validJSONEscapes = `"/nu`
 
 // repairJSONEscapes doubles any backslash in s that isn't followed by a valid JSON escape
 // character. LLMs asked for "a JSON object" routinely emit LaTeX inside string values (e.g.
@@ -31,9 +40,9 @@ func repairJSONEscapes(s string) string {
 			continue
 		}
 		if i+1 < len(s) && strings.IndexByte(validJSONEscapes, s[i+1]) >= 0 {
-			// A valid 2-char escape (e.g. "\\" or "\n"): consume both chars now so the second
-			// one — which may itself be a backslash — is never re-examined on its own as the
-			// start of a new (possibly invalid) escape sequence.
+			// A valid 2-char escape (e.g. "\n" or "\""): consume both chars now so the second
+			// one is never re-examined on its own as the start of a new (possibly invalid)
+			// escape sequence.
 			b.WriteByte(c)
 			b.WriteByte(s[i+1])
 			i++
