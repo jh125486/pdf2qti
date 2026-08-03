@@ -189,7 +189,10 @@ Calls the configured LLM to turn `<outDir>/<id>_context.json` into a proto-deck:
 LaTeX math is written inline as `\(...\)` and `\begin{bmatrix}...\end{bmatrix}` — these are hand
 -editable Markdown, so review/tweak content before rendering to PPTX. Writes
 `<outDir>/<id>_slides.md` unless `--output` is given. `--min-slides`/`--max-slides` bound the
-deck length (defaults 8/30). Use `--force` to overwrite an existing slide file.
+deck length; left unset (or `0`), each bound auto-scales to the combined length of the sources'
+distilled `text` (roughly one content slide per 400 chars, ±15%/+25%), so a short chapter and a
+dense multi-section one aren't forced into the same fixed range. Use `--force` to overwrite an
+existing slide file.
 
 ### `pptx` — Render PPTX from slide Markdown and a template
 

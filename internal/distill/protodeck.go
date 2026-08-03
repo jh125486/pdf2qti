@@ -22,6 +22,63 @@ type ProtoChapterInput struct {
 	Text          string
 }
 
+// charsPerContentSlide is the calibration constant behind AutoSlideRange: the number of
+// condensed-text characters that comfortably fill one content slide's worth of bullets.
+// Calibrated against a real distilled chapter (a 9-section, ~94-page zyBooks chapter condensing
+// to ~14.2K chars of Text) where a 1-hour-lecture-worthy deck needs roughly 35-45 content slides
+// — about 350-400 chars/slide — so 400 was picked to land the target near the lower end of a
+// human-reviewed-good range rather than over-splitting sparse chapters.
+const charsPerContentSlide = 400
+
+// minContentSlides and maxContentSlides bound AutoSlideRange's content-slide estimate regardless
+// of chapter length: minContentSlides keeps very short/thin sources from producing a
+// single-slide-per-topic deck that's too sparse to present from, and maxContentSlides caps how
+// far a single deck can grow before it should probably be split into multiple decks instead.
+const (
+	minContentSlides = 6
+	maxContentSlides = 120
+)
+
+// AutoSlideRange estimates a (minSlides, maxSlides) range for GenerateProtoDeck sized to the
+// combined condensed Text length of chapters, rather than a flat default — a short chapter and a
+// dense multi-section chapter both fed a fixed 8-30 range would either force padding on the short
+// one or force under-coverage on the long one (the failure this fixes: a 6-section, ~94-page
+// chapter landing on only 17 content slides because the deck's own length told the outline model
+// nothing about how much ground it needed to cover).
+//
+// The range spans -15%/+25% around the point estimate rather than returning a single number,
+// since generateOutline plans better against a range it can exercise judgment within than a
+// single exact target (see GenerateProtoDeck's doc comment on why outline generation is a
+// bounded-enumeration task, not a precise one).
+func AutoSlideRange(chapters []ProtoChapterInput) (minSlides, maxSlides int) {
+	var totalChars int
+	for _, ch := range chapters {
+		totalChars += len(ch.Text)
+	}
+
+	target := totalChars / charsPerContentSlide
+	minContent := clamp(target*85/100, minContentSlides, maxContentSlides)
+	maxContent := clamp(target*125/100, minContentSlides, maxContentSlides)
+	if maxContent < minContent {
+		maxContent = minContent
+	}
+
+	// +2 for the deck's fixed agenda and summary slides, which minSlides/maxSlides count
+	// alongside content slides (see GenerateProtoDeck).
+	return minContent + 2, maxContent + 2
+}
+
+func clamp(n, lo, hi int) int {
+	switch {
+	case n < lo:
+		return lo
+	case n > hi:
+		return hi
+	default:
+		return n
+	}
+}
+
 var reProtoMeta = regexp.MustCompile(`(?m)^<!-- meta:\s*(\d+)\s+(\S+)\s*-->\s*$`)
 
 // GenerateProtoDeck asks llm to produce a single markdown proto-slide deck spanning all of

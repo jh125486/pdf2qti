@@ -16,12 +16,12 @@ import (
 // (Markdown + template -> .pptx) as a separate step, so a deck can also be hand-written or
 // hand-edited between the two without needing a distilled context at all.
 type SlidesCmd struct {
-	Force     bool     `help:"Overwrite existing output file."  name:"force"`
-	All       bool     `help:"Generate slides for all sources." name:"all"`
-	MinSlides int      `default:"8"                             help:"Minimum total slides in the deck."`
-	MaxSlides int      `default:"30"                            help:"Maximum total slides in the deck."`
-	Output    string   `help:"Output Markdown file path."       short:"o"`
-	IDs       []string `arg:""                                  help:"Source IDs to build a deck from."  optional:""`
+	Force     bool     `help:"Overwrite existing output file."                                             name:"force"`
+	All       bool     `help:"Generate slides for all sources."                                            name:"all"`
+	MinSlides int      `help:"Minimum total slides in the deck. Unset or 0: auto-scale to chapter length."`
+	MaxSlides int      `help:"Maximum total slides in the deck. Unset or 0: auto-scale to chapter length."`
+	Output    string   `help:"Output Markdown file path."                                                  short:"o"`
+	IDs       []string `arg:""                                                                             help:"Source IDs to build a deck from." optional:""`
 }
 
 // Run executes the slides command.
@@ -66,9 +66,11 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 		tags[i] = src.ID
 	}
 
+	minSlides, maxSlides := resolveSlideRange(s.MinSlides, s.MaxSlides, chapters)
+
 	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubSlidesLLM{chapterTags: tags})
-	logger.Info("generating slide deck", "sources", len(chapters), "minSlides", s.MinSlides, "maxSlides", s.MaxSlides)
-	deck, err := distill.GenerateProtoDeck(ctx, llm, chapters, s.MinSlides, s.MaxSlides)
+	logger.Info("generating slide deck", "sources", len(chapters), "minSlides", minSlides, "maxSlides", maxSlides)
+	deck, err := distill.GenerateProtoDeck(ctx, llm, chapters, minSlides, maxSlides)
 	if err != nil {
 		return fmt.Errorf("generate proto deck: %w", err)
 	}
@@ -78,6 +80,24 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 	logger.Info("wrote slides", "file", outFile)
 	return nil
+}
+
+// resolveSlideRange returns (minSlides, maxSlides) as given whenever both are already positive
+// (an explicit user override), and otherwise falls back to distill.AutoSlideRange(chapters) for
+// whichever of the two is unset (<=0) — so `--min-slides 40` alone still auto-scales the max.
+func resolveSlideRange(minSlides, maxSlides int, chapters []distill.ProtoChapterInput) (resolvedMin, resolvedMax int) {
+	if minSlides > 0 && maxSlides > 0 {
+		return minSlides, maxSlides
+	}
+	autoMin, autoMax := distill.AutoSlideRange(chapters)
+	resolvedMin, resolvedMax = minSlides, maxSlides
+	if resolvedMin <= 0 {
+		resolvedMin = autoMin
+	}
+	if resolvedMax <= 0 {
+		resolvedMax = autoMax
+	}
+	return resolvedMin, resolvedMax
 }
 
 func (s *SlidesCmd) selectSources(cfg *config.Config) []*config.Source {
