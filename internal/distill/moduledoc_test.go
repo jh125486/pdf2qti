@@ -105,6 +105,20 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 		},
 	}
 
+	// Chapters with an empty ModuleName fall back to Book for the section's ChapterName.
+	chaptersWithEmptyModuleName := sampleChapters()
+	chaptersWithEmptyModuleName[0].ModuleName = ""
+	t.Run("chapter with empty module name falls back to book", func(t *testing.T) {
+		t.Parallel()
+		doc, err := distill.BuildModuleDoc(context.Background(), &splitLLM{mergeResp: validMergeResp}, "mod1", "Module 1", chaptersWithEmptyModuleName, 3, 8)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if doc.Sections[0].ChapterName != "Chapter 1" {
+			t.Fatalf("expected ChapterName to fall back to Book %q, got %q", "Chapter 1", doc.Sections[0].ChapterName)
+		}
+	})
+
 	for _, tt := range tests {
 
 		t.Run(tt.name, func(t *testing.T) {
@@ -237,6 +251,24 @@ func TestSaveLoadModuleDoc_Table(t *testing.T) {
 			},
 			wantErr: true,
 			errLike: "write module markdown",
+		},
+		{
+			name: "save markdown success",
+			run: func(t *testing.T, dir string) error {
+				t.Helper()
+				path := filepath.Join(dir, "mod.md")
+				if err := distill.SaveModuleMarkdown(path, "# Module 1"); err != nil {
+					return err
+				}
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != "# Module 1" {
+					t.Fatalf("got %q, want %q", got, "# Module 1")
+				}
+				return nil
+			},
 		},
 	}
 
