@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
@@ -137,6 +138,52 @@ func countSlideMetaMarkers(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return strings.Count(string(data), "<!-- meta:")
+}
+
+// assertSlideCount fails t unless the proto-deck Markdown file at path has exactly want slide
+// meta markers (see countSlideMetaMarkers). want <= 0 means "don't check" and is a no-op.
+func assertSlideCount(t *testing.T, path string, want int) {
+	t.Helper()
+	if want <= 0 {
+		return
+	}
+	if got := countSlideMetaMarkers(t, path); got != want {
+		t.Fatalf("slide count = %d, want %d", got, want)
+	}
+}
+
+// slidesAutoScalingPrepare returns a TestSlidesCmdRun_Table prepare func for a single-source
+// config whose src01 context has an 8000-char (20 * charsPerContentSlide) Text field, giving a
+// known distill.AutoSlideRange result (minSlides=19, maxSlides=27) to test resolveSlideRange's
+// auto-scaling and clamp behavior against.
+func slidesAutoScalingPrepare(minSlides, maxSlides int) func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+	return func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+		t.Helper()
+		pdfPath := filepath.Join(dir, "src.pdf")
+		if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := writeConfigFile(t, dir, pdfPath)
+		writeDistilledContextFileWithText(t, dir, "src01", strings.Repeat("x", 8000))
+		return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: minSlides, MaxSlides: maxSlides}, &commands.CLI{Config: cfgPath}
+	}
+}
+
+// moduleAutoScalingPrepare is slidesAutoScalingPrepare's ModuleCmd counterpart: AutoSlideRange
+// sums Text length across a module's chapters, so this uses two 4000-char chapter texts
+// (src01 + src02) summing to the same 8000 chars, and the same known auto range.
+func moduleAutoScalingPrepare(minSlides, maxSlides int) func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+	return func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+		t.Helper()
+		pdfPath := filepath.Join(dir, "src.pdf")
+		if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+		writeDistilledContextFileWithText(t, dir, "src01", strings.Repeat("x", 4000))
+		writeDistilledContextFileWithText(t, dir, "src02", strings.Repeat("x", 4000))
+		return commands.ModuleCmd{ID: "mod1", MinSlides: minSlides, MaxSlides: maxSlides}, &commands.CLI{Config: cfgPath}
+	}
 }
 
 // writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/<sourceID>_slides.md
