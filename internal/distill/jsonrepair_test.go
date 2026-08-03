@@ -14,15 +14,36 @@ func TestRepairJSONEscapes_Table(t *testing.T) {
 		in   string
 		want string
 	}{
+		{name: "empty string", in: ``, want: ``},
 		{name: "no backslashes", in: `{"a":"b"}`, want: `{"a":"b"}`},
-		{name: "valid escapes untouched", in: `{"a":"line1\nline2\"q\""}`, want: `{"a":"line1\nline2\"q\""}`},
-		{name: "latex inline math doubled", in: `{"a":"\(x^2\)"}`, want: `{"a":"\\(x^2\\)"}`},
-		{name: "latex command doubled", in: `{"a":"\alpha"}`, want: `{"a":"\\alpha"}`},
-		{name: "backslash-t doubled, not left as tab", in: `{"a":"\text"}`, want: `{"a":"\\text"}`},
-		{name: "backslash-r doubled, not left as carriage return", in: `{"a":"\rangle"}`, want: `{"a":"\\rangle"}`},
-		{name: "backslash-b doubled, not left as backspace", in: `{"a":"\begin{bmatrix}"}`, want: `{"a":"\\begin{bmatrix}"}`},
-		{name: "backslash-f doubled, not left as form feed", in: `{"a":"\frac{1}{2}"}`, want: `{"a":"\\frac{1}{2}"}`},
-		{name: "trailing backslash", in: `{"a":"foo\`, want: `{"a":"foo\\`},
+		{name: "preserved quote escape only", in: `{"a":"he said \"hi\""}`, want: `{"a":"he said \"hi\""}`},
+		{name: "preserved slash escape", in: `{"a":"a\/b"}`, want: `{"a":"a\/b"}`},
+		{name: "backslash-n doubled, not newline (latex nabla)", in: `{"a":"\nabla"}`, want: `{"a":"\\nabla"}`},
+		{name: "genuine newline escape now doubled (domain choice)", in: `{"a":"line1\nline2"}`, want: `{"a":"line1\\nline2"}`},
+		{
+			name: "combined preserved-quote and doubled backslash-n",
+			in:   `{"a":"line1\nline2\"q\""}`,
+			want: `{"a":"line1\\nline2\"q\""}`,
+		},
+		{name: "backslash-neq doubled", in: `{"a":"a \neq b"}`, want: `{"a":"a \\neq b"}`},
+		{name: "backslash-notin doubled", in: `{"a":"x \notin S"}`, want: `{"a":"x \\notin S"}`},
+		{name: "backslash-newcommand doubled", in: `{"a":"\newcommand"}`, want: `{"a":"\\newcommand"}`},
+		{name: "backslash-t doubled, not tab", in: `{"a":"\text"}`, want: `{"a":"\\text"}`},
+		{name: "backslash-r doubled, not carriage return", in: `{"a":"\rangle"}`, want: `{"a":"\\rangle"}`},
+		{name: "backslash-b doubled, not backspace", in: `{"a":"\begin{bmatrix}"}`, want: `{"a":"\\begin{bmatrix}"}`},
+		{name: "backslash-f doubled, not form feed", in: `{"a":"\frac{1}{2}"}`, want: `{"a":"\\frac{1}{2}"}`},
+		{name: "latex inline math punctuation doubled", in: `{"a":"\(x^2\)"}`, want: `{"a":"\\(x^2\\)"}`},
+		{name: "latex generic command doubled", in: `{"a":"\alpha"}`, want: `{"a":"\\alpha"}`},
+		{name: "backslash-percent doubled", in: `{"a":"50\%"}`, want: `{"a":"50\\%"}`},
+		{name: "valid unicode escape kept, all digits", in: `{"a":"\u2260"}`, want: `{"a":"\u2260"}`},
+		{name: "valid unicode escape kept, lowercase hex", in: `{"a":"\u00ab"}`, want: `{"a":"\u00ab"}`},
+		{name: "valid unicode escape kept, uppercase hex", in: `{"a":"\u00AB"}`, want: `{"a":"\u00AB"}`},
+		{name: "backslash-u latex, non-hex first char (underline)", in: `{"a":"\underline"}`, want: `{"a":"\\underline"}`},
+		{name: "backslash-u latex, non-hex first char (uparrow)", in: `{"a":"\uparrow"}`, want: `{"a":"\\uparrow"}`},
+		{name: "backslash-u with 3 hex then non-hex 4th char doubled", in: `\u123g`, want: `\\u123g`},
+		{name: "backslash-u truncated, fewer than 4 trailing chars", in: `\u12`, want: `\\u12`},
+		{name: "backslash-u at end of string, nothing after", in: `\u`, want: `\\u`},
+		{name: "trailing truncated backslash at end of string", in: `{"a":"foo\`, want: `{"a":"foo\\`},
 		{
 			// Regression: a raw "\\" (LaTeX row break) directly followed by an invalid "\("
 			// used to be treated as an already-escaped single backslash and left untouched,
@@ -32,6 +53,9 @@ func TestRepairJSONEscapes_Table(t *testing.T) {
 			in:   `{"a":"\\\(x\)"}`,
 			want: `{"a":"\\\\\\(x\\)"}`,
 		},
+		{name: "multibyte rune immediately after backslash", in: "\\€", want: "\\\\€"},
+		{name: "multibyte rune elsewhere, latex command intact", in: `{"a":"\alpha€"}`, want: `{"a":"\\alpha€"}`},
+		{name: "backslash-u immediately followed by multibyte rune", in: "\\u€", want: "\\\\u€"},
 	}
 
 	for _, tt := range tests {
@@ -101,6 +125,70 @@ func TestRepairJSONEscapes_LatexTimesNotTab(t *testing.T) {
 		t.Fatalf("repaired JSON invalid: %v (repaired=%q)", err, repaired)
 	}
 	want := `verify the n \times m dimensions`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
+func TestRepairJSONEscapes_LatexNablaNotNewline(t *testing.T) {
+	t.Parallel()
+
+	// \n is technically a valid JSON escape (newline, 0x0A). Before this fix, a model
+	// forgetting to double-escape "\nabla f" produced JSON that parsed "successfully" — but
+	// into a literal newline byte + "abla f", silently corrupting the LaTeX. Many common LaTeX
+	// commands start with "n" ("\nabla", "\neq", "\notin", "\newcommand", "\nonumber").
+	raw := `{"text":"gradient \nabla f is zero"}`
+	repaired := repairJSONEscapes(raw)
+
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(repaired), &out); err != nil {
+		t.Fatalf("repaired JSON invalid: %v (repaired=%q)", err, repaired)
+	}
+	want := `gradient \nabla f is zero`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
+func TestRepairJSONEscapes_LatexUnderlineNotUnicode(t *testing.T) {
+	t.Parallel()
+
+	// \u is the start of a valid JSON unicode escape (\uXXXX) but also the start of several
+	// LaTeX commands ("\underline", "\uparrow", "\uplus"). Before this fix, "u" was whitelisted
+	// unconditionally without checking for 4 trailing hex digits, so "\underline" corrupted
+	// json.Unmarshal into an "invalid \u escape" hard failure instead of being doubled.
+	raw := `{"text":"\underline{x}"}`
+	repaired := repairJSONEscapes(raw)
+
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(repaired), &out); err != nil {
+		t.Fatalf("repaired JSON invalid: %v (repaired=%q)", err, repaired)
+	}
+	want := `\underline{x}`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
+func TestRepairJSONEscapes_GenuineUnicodeEscapePreserved(t *testing.T) {
+	t.Parallel()
+
+	// A genuine \uXXXX unicode escape (4 valid hex digits) must be preserved, not doubled, so
+	// that json.Unmarshal decodes it to the intended non-ASCII character.
+	raw := `{"text":"a \u2260 b"}`
+	repaired := repairJSONEscapes(raw)
+
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(repaired), &out); err != nil {
+		t.Fatalf("repaired JSON invalid: %v (repaired=%q)", err, repaired)
+	}
+	want := "a \u2260 b"
 	if out.Text != want {
 		t.Fatalf("got %q, want %q", out.Text, want)
 	}
