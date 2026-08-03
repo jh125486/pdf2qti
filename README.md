@@ -1,7 +1,6 @@
 # pdf2qti
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/jh125486/pdf2qti)](https://pkg.go.dev/github.com/jh125486/pdf2qti)
-[![Go Report](https://goreportcard.com/badge/github.com/jh125486/pdf2qti)](https://goreportcard.com/report/github.com/jh125486/pdf2qti)
 [![Tests](https://github.com/jh125486/pdf2qti/actions/workflows/test.yaml/badge.svg)](https://github.com/jh125486/pdf2qti/actions/workflows/test.yaml)
 [![CodeQL](https://github.com/jh125486/pdf2qti/actions/workflows/codeql.yml/badge.svg)](https://github.com/jh125486/pdf2qti/actions/workflows/codeql.yml)
 [![Codecov](https://codecov.io/gh/jh125486/pdf2qti/branch/main/graph/badge.svg)](https://codecov.io/gh/jh125486/pdf2qti)
