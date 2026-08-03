@@ -265,3 +265,63 @@ func TestParseProtoDeck_HandWrittenLooseSpacing(t *testing.T) {
 		t.Fatalf("got slides %+v", slides)
 	}
 }
+
+func TestAutoSlideRange(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		chapters []distill.ProtoChapterInput
+		wantMin  int
+		wantMax  int
+	}{
+		{
+			name:     "no chapters",
+			chapters: nil,
+			wantMin:  8, // minContentSlides(6) + 2
+			wantMax:  8, // target 0 clamps to minContentSlides on both ends
+		},
+		{
+			name:     "thin chapter clamps to floor",
+			chapters: []distill.ProtoChapterInput{{Text: strings.Repeat("x", 200)}},
+			wantMin:  8,
+			wantMax:  8,
+		},
+		{
+			name: "calibration chapter (~14.2K chars, 9-section zyBooks chapter)",
+			// Real distilled ch01: 9 sections, ~94-page source, condenses to ~14.2K chars.
+			// target = 14200/400 = 35; min = floor(35*0.85) = 29; max = ceil-ish(35*1.25) = 43.
+			chapters: []distill.ProtoChapterInput{{Text: strings.Repeat("x", 14200)}},
+			wantMin:  31, // 35*85/100 (int division) + 2
+			wantMax:  45, // 35*125/100 + 2
+		},
+		{
+			name: "multiple chapters sum text length",
+			chapters: []distill.ProtoChapterInput{
+				{Text: strings.Repeat("x", 7100)},
+				{Text: strings.Repeat("x", 7100)},
+			},
+			wantMin: 31,
+			wantMax: 45,
+		},
+		{
+			name:     "huge chapter clamps to ceiling",
+			chapters: []distill.ProtoChapterInput{{Text: strings.Repeat("x", 10_000_000)}},
+			wantMin:  122, // maxContentSlides(120) + 2
+			wantMax:  122,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotMin, gotMax := distill.AutoSlideRange(tt.chapters)
+			if gotMin != tt.wantMin || gotMax != tt.wantMax {
+				t.Fatalf("AutoSlideRange() = (%d, %d), want (%d, %d)", gotMin, gotMax, tt.wantMin, tt.wantMax)
+			}
+			if gotMin > gotMax {
+				t.Fatalf("AutoSlideRange() min %d > max %d", gotMin, gotMax)
+			}
+		})
+	}
+}

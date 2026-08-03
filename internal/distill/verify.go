@@ -3,7 +3,6 @@ package distill
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"text/template"
 )
@@ -27,7 +26,7 @@ func verifyConsistency(ctx context.Context, llm LLM, dc *DistilledContext) ([]st
 	}
 
 	var resp verifyResponse
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &resp); err != nil {
+	if err := unmarshalRepaired(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 

@@ -2,7 +2,6 @@ package distill
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -43,7 +42,7 @@ func Distill(ctx context.Context, src *config.Source, objectives []config.Course
 	}
 
 	var dc DistilledContext
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &dc); err != nil {
+	if err := unmarshalRepaired(raw, &dc); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 

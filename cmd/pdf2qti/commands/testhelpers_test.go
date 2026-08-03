@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
@@ -108,6 +110,105 @@ func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 	}
 	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeDistilledContextFileWithText is writeDistilledContextFileWithID but with a Text field of
+// the caller's choosing, so tests can drive distill.AutoSlideRange's chars-of-Text-based sizing
+// to a known, non-default target instead of the empty-Text minimum it gets otherwise.
+func writeDistilledContextFileWithText(t *testing.T, outDir, sourceID, text string) {
+	t.Helper()
+	dc := &distill.DistilledContext{
+		SourceID:         sourceID,
+		Book:             "Book",
+		Chapter:          1,
+		ModuleName:       "Module 1",
+		Overview:         "<p>Overview</p>",
+		MaterialOverview: "Read this",
+		KeyConcepts:      []string{"pipes"},
+		Text:             text,
+		Sections:         []distill.Section{{Title: "Intro", Summary: "summary"}},
+		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
+		Slides: []distill.Slide{
+			{Title: "Topic A", Content: "Point 1\nPoint 2"},
+			{Title: "Topic B", Content: "Point 1"},
+			{Title: "Topic C", Content: "Point 1\nPoint 2"},
+		},
+	}
+	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countSlideMetaMarkers returns the number of "<!-- meta: N ... -->" slide markers in a proto-deck
+// Markdown file at path, i.e. its total slide count including agenda and summary.
+func countSlideMetaMarkers(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "<!-- meta:")
+}
+
+// assertSlideCount fails t unless the proto-deck Markdown file at path has exactly want slide
+// meta markers (see countSlideMetaMarkers). want <= 0 means "don't check" and is a no-op.
+func assertSlideCount(t *testing.T, path string, want int) {
+	t.Helper()
+	if want <= 0 {
+		return
+	}
+	if got := countSlideMetaMarkers(t, path); got != want {
+		t.Fatalf("slide count = %d, want %d", got, want)
+	}
+}
+
+// assertSlidesOutput fails t unless outputFile (relative to dir) exists and, if wantSlideCount >
+// 0, has exactly that many slide meta markers. A no-op when outputFile is empty or wantErr is
+// true — a command that errored isn't expected to have produced output.
+func assertSlidesOutput(t *testing.T, dir, outputFile string, wantErr bool, wantSlideCount int) {
+	t.Helper()
+	if outputFile == "" || wantErr {
+		return
+	}
+	outPath := filepath.Join(dir, outputFile)
+	if _, statErr := os.Stat(outPath); statErr != nil {
+		t.Fatalf("expected slides output %q: %v", outputFile, statErr)
+	}
+	assertSlideCount(t, outPath, wantSlideCount)
+}
+
+// slidesAutoScalingPrepare returns a TestSlidesCmdRun_Table prepare func for a single-source
+// config whose src01 context has an 8000-char (20 * charsPerContentSlide) Text field, giving a
+// known distill.AutoSlideRange result (minSlides=19, maxSlides=27) to test resolveSlideRange's
+// auto-scaling and clamp behavior against.
+func slidesAutoScalingPrepare(minSlides, maxSlides int) func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+	return func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+		t.Helper()
+		pdfPath := filepath.Join(dir, "src.pdf")
+		if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := writeConfigFile(t, dir, pdfPath)
+		writeDistilledContextFileWithText(t, dir, "src01", strings.Repeat("x", 8000))
+		return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: minSlides, MaxSlides: maxSlides}, &commands.CLI{Config: cfgPath}
+	}
+}
+
+// moduleAutoScalingPrepare is slidesAutoScalingPrepare's ModuleCmd counterpart: AutoSlideRange
+// sums Text length across a module's chapters, so this uses two 4000-char chapter texts
+// (src01 + src02) summing to the same 8000 chars, and the same known auto range.
+func moduleAutoScalingPrepare(minSlides, maxSlides int) func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+	return func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+		t.Helper()
+		pdfPath := filepath.Join(dir, "src.pdf")
+		if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+		writeDistilledContextFileWithText(t, dir, "src01", strings.Repeat("x", 4000))
+		writeDistilledContextFileWithText(t, dir, "src02", strings.Repeat("x", 4000))
+		return commands.ModuleCmd{ID: "mod1", MinSlides: minSlides, MaxSlides: maxSlides}, &commands.CLI{Config: cfgPath}
 	}
 }
 

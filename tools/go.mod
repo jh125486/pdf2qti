@@ -8,8 +8,6 @@ tool (
 	gotest.tools/gotestsum
 )
 
-require github.com/alecthomas/kong v1.15.0
-
 require (
 	github.com/bitfield/gotestdox v0.2.2 // indirect
 	github.com/dnephin/pflag v1.0.7 // indirect
