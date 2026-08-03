@@ -3,6 +3,7 @@ package canvas_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +24,7 @@ func TestNewClient_Table(t *testing.T) {
 		{name: "empty base url", baseURL: "", token: "token", wantErr: true},
 		{name: "empty token", baseURL: "https://example.instructure.com", token: "", wantErr: true},
 		{name: "missing scheme", baseURL: "example.instructure.com", token: "token", wantErr: true},
+		{name: "unparseable url", baseURL: "://bad url\x7f", token: "token", wantErr: true},
 		{name: "valid", baseURL: "https://example.instructure.com/", token: " token\n"},
 	}
 
@@ -351,6 +353,230 @@ func TestEnsureModulePageItem_Table(t *testing.T) {
 				t.Fatalf("post count=%d want=%d", *postCount, tt.wantPost)
 			}
 		})
+	}
+}
+
+func TestUpsertPage_SearchAndUpdateErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  func(t *testing.T) *httptest.Server
+		errLike string
+	}{
+		{
+			// findPageByTitle's own search fails, surfacing through UpsertPage's passthrough.
+			name: "search page fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages" {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				}))
+			},
+			errLike: "search page",
+		},
+		{
+			// Page found (search returns a match), so UpsertPage takes the PUT/update branch,
+			// which then fails — distinct from the create-path failure already covered above.
+			name: "update page fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/pages":
+						writeJSON(t, w, http.StatusOK, []canvas.Page{{PageID: 77, Title: "Learning Objectives"}})
+					case r.Method == http.MethodPut && r.URL.Path == "/api/v1/courses/42/pages/77":
+						w.WriteHeader(http.StatusInternalServerError)
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			errLike: "update page",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tt.server(t)
+			defer ts.Close()
+
+			client, err := canvas.NewClient(ts.URL, "token", ts.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			_, err = client.UpsertPage(context.Background(), "42", "Learning Objectives", "<h1>Body</h1>", true)
+			if err == nil || !strings.Contains(err.Error(), tt.errLike) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
+			}
+		})
+	}
+}
+
+func TestEnsureModule_Errors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  func(t *testing.T) *httptest.Server
+		errLike string
+	}{
+		{
+			// findModuleByName's own search fails, surfacing through EnsureModule's passthrough.
+			name: "search module fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules" {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				}))
+			},
+			errLike: "search module",
+		},
+		{
+			name: "create module fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules":
+						writeJSON(t, w, http.StatusOK, []canvas.Module{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules":
+						w.WriteHeader(http.StatusInternalServerError)
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			errLike: "create module",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tt.server(t)
+			defer ts.Close()
+
+			client, err := canvas.NewClient(ts.URL, "token", ts.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			_, err = client.EnsureModule(context.Background(), "42", "Module 1", true)
+			if err == nil || !strings.Contains(err.Error(), tt.errLike) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
+			}
+		})
+	}
+}
+
+func TestEnsureModulePageItem_Errors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		server  func(t *testing.T) *httptest.Server
+		errLike string
+	}{
+		{
+			name: "list module items fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items" {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				}))
+			},
+			errLike: "list module items",
+		},
+		{
+			name: "create module item fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{})
+					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/courses/42/modules/7/items":
+						w.WriteHeader(http.StatusInternalServerError)
+					default:
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+					}
+				}))
+			},
+			errLike: "create module item",
+		},
+		{
+			// The first page of results has no match and a next-page Link header, but the
+			// second page's request fails — distinct from "list module items fails" above,
+			// which fails on the very first page.
+			name: "second page of listing fails",
+			server: func(t *testing.T) *httptest.Server {
+				t.Helper()
+				return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet || r.URL.Path != "/api/v1/courses/42/modules/7/items" {
+						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+						return
+					}
+					if r.URL.Query().Get("page") == "1" {
+						w.Header().Set("Link", `<https://example.instructure.com/...?page=2>; rel="next"`)
+						writeJSON(t, w, http.StatusOK, []canvas.ModuleItem{{Type: "Page", PageURL: "other-page"}})
+						return
+					}
+					w.WriteHeader(http.StatusInternalServerError)
+				}))
+			},
+			errLike: "list module items",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := tt.server(t)
+			defer ts.Close()
+
+			client, err := canvas.NewClient(ts.URL, "token", ts.Client())
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			err = client.EnsureModulePageItem(context.Background(), "42", 7, "materials-page", true)
+			if err == nil || !strings.Contains(err.Error(), tt.errLike) {
+				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
+			}
+		})
+	}
+}
+
+// errTransport always fails the request, simulating a network-level failure (as opposed to the
+// server returning an error status, already covered elsewhere).
+type errTransport struct{}
+
+func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
+}
+
+func TestRequestJSON_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	client, err := canvas.NewClient("https://example.instructure.com", "token", &http.Client{Transport: errTransport{}})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	_, err = client.UpsertPage(context.Background(), "42", "Title", "body", true)
+	if err == nil || !strings.Contains(err.Error(), "perform request") {
+		t.Fatalf("expected perform request error, got %v", err)
 	}
 }
 
