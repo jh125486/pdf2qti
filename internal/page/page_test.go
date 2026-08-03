@@ -68,6 +68,15 @@ func TestRender_Table(t *testing.T) {
 			vars:       map[string]string{"xss": "<script>alert(1)</script>"},
 			wantTokens: []string{"&lt;script&gt;alert(1)&lt;/script&gt;"},
 		},
+		{
+			// chapter is an int; accessing a field on it fails at Execute time (as opposed to
+			// the parse-error case above, which fails before Execute is ever reached).
+			name:     "template execute error",
+			template: "{{.chapter.Bogus}}",
+			vars:     map[string]string{},
+			wantErr:  true,
+			errLike:  "execute template",
+		},
 	}
 
 	for _, tt := range tests {
@@ -98,5 +107,39 @@ func TestRender_Table(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRender_NilWriterDefaultsToStdout(t *testing.T) {
+	// Not t.Parallel(): temporarily redirects the process-wide os.Stdout.
+
+	dc := &distill.DistilledContext{ModuleName: "Signals"}
+	templatePath := filepath.Join(t.TempDir(), "page.html.tmpl")
+	if err := os.WriteFile(templatePath, []byte("{{.module_name}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = origStdout }()
+
+	renderErr := page.Render(templatePath, dc, nil, nil)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if renderErr != nil {
+		t.Fatalf("unexpected error: %v", renderErr)
+	}
+
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "Signals" {
+		t.Fatalf("expected stdout to contain rendered output, got %q", got)
 	}
 }
