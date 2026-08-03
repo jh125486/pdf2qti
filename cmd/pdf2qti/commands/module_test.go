@@ -1,7 +1,6 @@
 package commands_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,20 +9,19 @@ import (
 )
 
 type moduleTestCase struct {
-	name           string
-	prepare        func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI)
-	wantErr        bool
-	checkFile      bool
-	wantSlideCount int // when > 0 (and checkFile), mod1_module.md's total slide count must equal this
+	name      string
+	prepare   func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI)
+	wantErr   bool
+	checkFile bool
 }
 
 // moduleTestCases builds TestModuleCmdRun_Table's table, including resolveSlideRange's
 // auto-scaling and clamp behavior (resolveSlideRange itself is unexported, and this package
-// tests commands black-box, so it's exercised indirectly here). AutoSlideRange sums Text length
-// across all of a module's chapters; the auto-scaling cases below use two 4000-char chapter
-// texts (src01 + src02) summing to the same 8000 chars as the slides test, giving the same known
-// auto range: minSlides=19, maxSlides=27. Split out from the test function itself to keep
-// gocyclo's complexity count on the (trivial) runner, not this literal.
+// tests commands black-box, so it's exercised indirectly here) via the "auto range" cases below —
+// asserting only that each min/max combination succeeds and produces output, not an exact slide
+// count (see slidesTestCases's doc comment for why an exact count is no longer a meaningful
+// signal at this layer). Split out from the test function itself to keep gocyclo's complexity
+// count on the (trivial) runner, not this literal.
 func moduleTestCases() []moduleTestCase {
 	return []moduleTestCase{
 		{
@@ -151,26 +149,37 @@ func moduleTestCases() []moduleTestCase {
 			wantErr: true,
 		},
 		{
-			name:           "auto range: both unset gets full auto",
-			prepare:        moduleAutoScalingPrepare(0, 0),
-			checkFile:      true,
-			wantSlideCount: autoMin,
+			name:      "auto range: both unset gets full auto",
+			prepare:   moduleAutoScalingPrepare(0, 0),
+			checkFile: true,
 		},
 		{
 			// Before the clamp fix, this errored ("invalid slide range") because the auto max
 			// (27) landed below the explicit min.
-			name:           "auto range: min explicit exceeds auto max, auto max clamped up to min",
-			prepare:        moduleAutoScalingPrepare(30, 0),
-			checkFile:      true,
-			wantSlideCount: 30,
+			name:      "auto range: min explicit exceeds auto max, auto max clamped up to min",
+			prepare:   moduleAutoScalingPrepare(30, 0),
+			checkFile: true,
 		},
 		{
 			// Before the clamp fix, this errored ("invalid slide range") because the auto min
 			// (19) landed above the explicit max.
-			name:           "auto range: max explicit below auto min, auto min clamped down to max",
-			prepare:        moduleAutoScalingPrepare(0, 15),
-			checkFile:      true,
-			wantSlideCount: 15,
+			name:      "auto range: max explicit below auto min, auto min clamped down to max",
+			prepare:   moduleAutoScalingPrepare(0, 15),
+			checkFile: true,
+		},
+		{
+			// A chapter with no Sections falls back to one synthesized pseudo-section
+			// (generateOutlineChunked) rather than failing — exercised end-to-end here.
+			name:      "zero sections falls back to one pseudo-section",
+			prepare:   moduleZeroSectionsPrepare,
+			checkFile: true,
+		},
+		{
+			// Proves DistilledContext.Sections -> ProtoChapterInput.Sections wiring at the
+			// command layer, not just inside the distill package's own tests.
+			name:      "multiple sections wired through to chunked outline generation",
+			prepare:   moduleMultiSectionsPrepare,
+			checkFile: true,
 		},
 	}
 }
@@ -183,19 +192,17 @@ func TestModuleCmdRun_Table(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			cmd, cli := tt.prepare(t, dir)
-			err := cmd.Run(context.Background(), cli)
+			err := cmd.Run(t.Context(), cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
 			if tt.checkFile {
-				mdPath := filepath.Join(dir, "mod1_module.md")
-				if _, statErr := os.Stat(mdPath); statErr != nil {
+				if _, statErr := os.Stat(filepath.Join(dir, "mod1_module.md")); statErr != nil {
 					t.Fatalf("expected module markdown output: %v", statErr)
 				}
 				if _, statErr := os.Stat(filepath.Join(dir, "mod1_module.json")); statErr != nil {
 					t.Fatalf("expected module json output: %v", statErr)
 				}
-				assertSlideCount(t, mdPath, tt.wantSlideCount)
 			}
 		})
 	}

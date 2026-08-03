@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -22,30 +21,41 @@ func validDeck(n int) string {
 }
 
 var (
-	reTargetContentRange = regexp.MustCompile(`TARGET_CONTENT_RANGE: min=(\d+) max=(\d+)`)
-	rePlannedSlideLine   = regexp.MustCompile(`(?m)^\d+\. \[`)
-	reChapterHeading     = regexp.MustCompile(`(?m)^### (\S+):`)
+	rePlannedSlideLine = regexp.MustCompile(`(?m)^\d+\. \[`)
+	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] (.*) — (.*)$`)
+	reChapterHeading   = regexp.MustCompile(`(?m)^### (\S+):`)
 )
 
-// protoDeckStubLLM answers GenerateProtoDeck's three prompt shapes (outline, batch expansion,
-// summary) — distinguished by content, like stubModuleLLM in cmd/pdf2qti/commands/module.go does
-// — plus BuildModuleDoc's JSON-merge prompt, so tests can exercise the full two-pass pipeline
-// without a real LLM. outlineCount, if non-zero, overrides how many outline entries are
-// returned, to test under/over-shoot handling; zero means "use the prompt's own requested min".
+// protoDeckStubLLM answers GenerateProtoDeck's prompt shapes (per-section outline planning,
+// outline reconciliation, agenda/title framing, batch expansion, summary) — distinguished by
+// content, like stubProtoDeckShape in cmd/pdf2qti/commands/llm.go does — plus BuildModuleDoc's
+// JSON-merge prompt, so tests can exercise the full pipeline without a real LLM.
+// sectionOutlineCount is the number of entries stubSectionOutline returns per section-outline
+// call (0 legitimately means "this section has no distinct topics," used to test the
+// no-topics-at-all hard-failure path). injectUnknownTagInReconcile adds one extra entry with a
+// tag no chapter has to the reconcile response, to test reconcileOutline's defensive drop-and-
+// warn path for a hallucinated tag.
 type protoDeckStubLLM struct {
-	err          error
-	outlineCount int
-	calls        []string // records which shape each call was, in order
+	err                         error
+	sectionOutlineCount         int
+	injectUnknownTagInReconcile bool
+	calls                       []string // records which shape each call was, in order
 }
 
-func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string) (string, error) {
+func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
 	if s.err != nil {
 		return "", s.err
 	}
 	switch {
-	case strings.Contains(prompt, "planning a prototype PowerPoint outline"):
-		s.calls = append(s.calls, "outline")
-		return s.stubOutline(prompt), nil
+	case strings.Contains(prompt, "planning a small part of a prototype PowerPoint outline"):
+		s.calls = append(s.calls, "section-outline")
+		return s.stubSectionOutline(), nil
+	case strings.Contains(prompt, "reviewing a slide outline that was planned one textbook section at a time"):
+		s.calls = append(s.calls, "reconcile")
+		return s.stubReconcileOutline(prompt), nil
+	case strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck"):
+		s.calls = append(s.calls, "agenda")
+		return stubAgenda(), nil
 	case strings.Contains(prompt, "writing the bullet content for"):
 		s.calls = append(s.calls, "expand")
 		return stubExpandBatch(prompt), nil
@@ -58,21 +68,38 @@ func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string) (string, e
 	}
 }
 
-func (s *protoDeckStubLLM) stubOutline(prompt string) string {
-	n := 1
-	if m := reTargetContentRange.FindStringSubmatch(prompt); len(m) == 3 {
-		if v, err := strconv.Atoi(m[1]); err == nil {
-			n = v
-		}
-	}
-	if s.outlineCount > 0 {
-		n = s.outlineCount
-	}
-	entries := make([]string, n)
+func (s *protoDeckStubLLM) stubSectionOutline() string {
+	entries := make([]string, s.sectionOutlineCount)
 	for i := range entries {
-		entries[i] = fmt.Sprintf(`{"tag":"ch1","title":"Slide %d","focus":"f"}`, i+1)
+		entries[i] = fmt.Sprintf(`{"title":"Slide %d","focus":"f"}`, i+1)
 	}
-	return fmt.Sprintf(`{"deck_title":"Deck","agenda":["a","b","c"],"outline":[%s]}`, strings.Join(entries, ","))
+	return fmt.Sprintf(`{"outline":[%s]}`, strings.Join(entries, ","))
+}
+
+// stubReconcileOutline echoes back the joined outline entries the reconcile prompt renders
+// (one "N. [tag] Title — Focus" line per entry), unmerged — a legitimately valid "no duplicates
+// found" response, since these stub-driven entries never actually duplicate each other. Echoes
+// the tag back WITH its surrounding brackets ("[ch01]" rather than "ch01"), matching real
+// observed behavior from the OpenAI API — this exercises reconcileOutline's defensive
+// bracket-stripping on every table case using this stub, not just a dedicated one, guarding
+// against a regression of the bug it fixed (every real-API run failing "no slide topics after
+// reconciliation" because no returned tag matched knownTags until brackets were stripped). When
+// injectUnknownTagInReconcile is set, appends one extra entry tagged with a chapter tag that
+// doesn't exist even after stripping, to test reconcileOutline's drop-and-warn path.
+func (s *protoDeckStubLLM) stubReconcileOutline(prompt string) string {
+	matches := reReconcileLine.FindAllStringSubmatch(prompt, -1)
+	entries := make([]string, 0, len(matches)+1)
+	for _, m := range matches {
+		entries = append(entries, fmt.Sprintf(`{"tag":"[%s]","title":%q,"focus":%q}`, m[1], m[2], m[3]))
+	}
+	if s.injectUnknownTagInReconcile {
+		entries = append(entries, `{"tag":"bogus-tag","title":"Ghost","focus":"f"}`)
+	}
+	return fmt.Sprintf(`{"outline":[%s],"warnings":[]}`, strings.Join(entries, ","))
+}
+
+func stubAgenda() string {
+	return `{"deck_title":"Deck","agenda":["a","b","c"]}`
 }
 
 func stubExpandBatch(prompt string) string {
@@ -102,37 +129,45 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: "t"}}
 
 	tests := []struct {
-		name      string
-		llm       *protoDeckStubLLM
-		chapters  []distill.ProtoChapterInput
-		minSlides int
-		maxSlides int
-		wantErr   bool
-		errLike   string
+		name        string
+		llm         *protoDeckStubLLM
+		chapters    []distill.ProtoChapterInput
+		minSlides   int
+		maxSlides   int
+		wantErr     bool
+		errLike     string
+		wantWarnLike string // if set, at least one returned warning must contain this
 	}{
-		{name: "happy path", llm: &protoDeckStubLLM{}, chapters: chapters, minSlides: 3, maxSlides: 8},
+		{name: "happy path", llm: &protoDeckStubLLM{sectionOutlineCount: 3}, chapters: chapters, minSlides: 3, maxSlides: 8},
 		{name: "no chapters", llm: &protoDeckStubLLM{}, chapters: nil, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "no chapters"},
 		{name: "invalid slide range", llm: &protoDeckStubLLM{}, chapters: chapters, minSlides: 8, maxSlides: 3, wantErr: true, errLike: "invalid slide range"},
 		{name: "llm error", llm: &protoDeckStubLLM{err: fmt.Errorf("boom")}, chapters: chapters, minSlides: 3, maxSlides: 8, wantErr: true, errLike: "llm complete"},
 		{
-			name: "outline undershoots minimum", llm: &protoDeckStubLLM{outlineCount: 1}, chapters: chapters,
-			minSlides: 5, maxSlides: 8, wantErr: true, errLike: "need at least",
+			// The chapter has no Sections, so it gets one synthesized pseudo-section; that
+			// section's stub outline call returns zero entries, so the joined list across all
+			// sections is empty before reconciliation is ever attempted.
+			name: "no topics in any section is a hard failure", llm: &protoDeckStubLLM{sectionOutlineCount: 0}, chapters: chapters,
+			minSlides: 5, maxSlides: 8, wantErr: true, errLike: "no slide topics",
 		},
 		{
-			// minContent=6 (maxSlides 8 - 2); outline returns 20, must be truncated to fit, not
-			// error out.
-			name: "outline overshoots maximum gets truncated", llm: &protoDeckStubLLM{outlineCount: 20}, chapters: chapters,
-			minSlides: 3, maxSlides: 8,
+			// Per-section planning has no numeric target to truncate against (that target is
+			// exactly what the old whole-chapter design anchored on and mis-satisficed) — a
+			// count above maxSlides now succeeds with an advisory warning instead of being cut.
+			name: "count above max is a warning, not truncated", llm: &protoDeckStubLLM{sectionOutlineCount: 20}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "outside the requested 3-8 range",
 		},
 		{
-			// minSlides=maxSlides=2 forces both content-budget clamps: minContent (2-2=0) clamps
-			// up to 1, and maxContent (also 0) is then below that clamped minContent, so it
-			// clamps up to match it too. The clamp itself succeeds (outline's 1 slide matches
-			// the clamped minContent exactly), but the deck's real total — agenda + 1 content +
-			// summary = 3 — can never fit the original 2-slide budget, so this also exercises
-			// validateProtoDeck's own slide-count-out-of-range error.
-			name: "minimal slide range clamps content budget but fails final validation", llm: &protoDeckStubLLM{outlineCount: 1}, chapters: chapters,
-			minSlides: 2, maxSlides: 2, wantErr: true, errLike: "expected between 2 and 2 slides, got 3",
+			// Deck total = 1 agenda + 1 content (single pseudo-section, 1 entry) + 1 summary = 3,
+			// outside the requested 2-2 range — advisory warning, not the hard failure this used
+			// to be before slide-count enforcement became advisory-only.
+			name: "count outside range is a warning, not a hard failure", llm: &protoDeckStubLLM{sectionOutlineCount: 1}, chapters: chapters,
+			minSlides: 2, maxSlides: 2, wantWarnLike: "deck has 3 slides, outside the requested 2-2 range",
+		},
+		{
+			// reconcileOutline must defensively drop (not trust) any returned entry whose tag
+			// doesn't match a known chapter, in case the LLM hallucinates one during merging.
+			name: "reconcile entry with unknown tag is dropped as a warning", llm: &protoDeckStubLLM{sectionOutlineCount: 1, injectUnknownTagInReconcile: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: `unknown tag "bogus-tag", dropped`,
 		},
 	}
 
@@ -140,7 +175,7 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := distill.GenerateProtoDeck(context.Background(), tt.llm, tt.chapters, tt.minSlides, tt.maxSlides)
+			got, warnings, err := distill.GenerateProtoDeck(t.Context(), tt.llm, tt.chapters, tt.minSlides, tt.maxSlides)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -150,32 +185,59 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			if !tt.wantErr && got == "" {
 				t.Fatal("expected non-empty deck")
 			}
+			if tt.wantWarnLike != "" {
+				found := false
+				for _, w := range warnings {
+					if strings.Contains(w, tt.wantWarnLike) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected a warning containing %q, got %v", tt.wantWarnLike, warnings)
+				}
+			}
 		})
 	}
 }
 
-func TestGenerateProtoDeck_CallsOutlineThenExpandThenSummary(t *testing.T) {
+// TestGenerateProtoDeck_CallSequence asserts the exact call sequence for a multi-section chapter
+// (3 sections: one section-outline call each, in order, then one reconcile call, one agenda call,
+// then expand batches, then summary) — a structurally different assertion (call order, not
+// error/warning shape) from TestGenerateProtoDeck_Table, so it's kept as its own function rather
+// than folded into that table.
+func TestGenerateProtoDeck_CallSequence(t *testing.T) {
 	t.Parallel()
 
-	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: "t"}}
-	llm := &protoDeckStubLLM{outlineCount: 8}
-	_, err := distill.GenerateProtoDeck(context.Background(), llm, chapters, 3, 12)
+	chapters := []distill.ProtoChapterInput{{
+		Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: "t",
+		Sections: []distill.Section{
+			{Title: "Intro", Summary: "s1"},
+			{Title: "Middle", Summary: "s2"},
+			{Title: "End", Summary: "s3"},
+		},
+	}}
+	llm := &protoDeckStubLLM{sectionOutlineCount: 3}
+	_, _, err := distill.GenerateProtoDeck(t.Context(), llm, chapters, 3, 20)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(llm.calls) < 3 {
-		t.Fatalf("expected at least 3 calls (outline, >=1 expand batch, summary), got %v", llm.calls)
+	wantPrefix := []string{"section-outline", "section-outline", "section-outline", "reconcile", "agenda"}
+	if len(llm.calls) < len(wantPrefix)+1 {
+		t.Fatalf("expected at least %d calls, got %v", len(wantPrefix)+1, llm.calls)
 	}
-	if llm.calls[0] != "outline" {
-		t.Fatalf("expected first call to be outline, got %v", llm.calls)
+	for i, want := range wantPrefix {
+		if llm.calls[i] != want {
+			t.Fatalf("call %d: got %q, want %q (full sequence: %v)", i, llm.calls[i], want, llm.calls)
+		}
 	}
 	if llm.calls[len(llm.calls)-1] != "summary" {
 		t.Fatalf("expected last call to be summary, got %v", llm.calls)
 	}
-	for _, c := range llm.calls[1 : len(llm.calls)-1] {
+	for _, c := range llm.calls[len(wantPrefix) : len(llm.calls)-1] {
 		if c != "expand" {
-			t.Fatalf("expected all calls between outline and summary to be expand, got %v", llm.calls)
+			t.Fatalf("expected all calls between agenda and summary to be expand, got %v", llm.calls)
 		}
 	}
 }

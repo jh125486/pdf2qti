@@ -37,7 +37,7 @@ func condenseChunksSize(ctx context.Context, llm LLM, text string, size int) (st
 		if err != nil {
 			return "", fmt.Errorf("build chunk prompt %d/%d: %w", i+1, len(chunks), err)
 		}
-		digest, err := llm.Complete(ctx, prompt)
+		digest, err := llm.Complete(ctx, prompt, nil)
 		if err != nil {
 			return "", fmt.Errorf("condense chunk %d/%d: %w", i+1, len(chunks), err)
 		}

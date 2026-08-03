@@ -13,7 +13,7 @@ type staticLLM struct {
 	err      error
 }
 
-func (s *staticLLM) Complete(_ context.Context, _ string) (string, error) {
+func (s *staticLLM) Complete(_ context.Context, _ string, _ *Schema) (string, error) {
 	return s.response, s.err
 }
 
@@ -48,7 +48,7 @@ func TestVerifyConsistency_Table(t *testing.T) {
 				Vocabulary: []VocabTerm{{Term: "Vector", Definition: "a"}, {Term: "vector", Definition: "b"}},
 				Sections:   []Section{{Title: "Vectors", Summary: "s1"}, {Title: "Vectors", Summary: "s2"}},
 			}
-			warnings, err := verifyConsistency(context.Background(), tt.llm, dc)
+			warnings, err := verifyConsistency(t.Context(), tt.llm, dc)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}

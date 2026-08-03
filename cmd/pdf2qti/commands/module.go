@@ -47,7 +47,6 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 
 	chapters := make([]*distill.DistilledContext, len(srcs))
-	tags := make([]string, len(srcs))
 	for i, src := range srcs {
 		ctxFile := filepath.Join(cfg.OutDir(src), src.ID+"_context.json")
 		dc, err := distill.Load(ctxFile)
@@ -55,7 +54,6 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 			return fmt.Errorf("load context for source %q (run distill for it first): %w", src.ID, err)
 		}
 		chapters[i] = dc
-		tags[i] = src.ID
 	}
 
 	protoChapters := make([]distill.ProtoChapterInput, len(chapters))
@@ -64,11 +62,14 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 	minSlides, maxSlides := resolveSlideRange(m.MinSlides, m.MaxSlides, protoChapters)
 
-	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubModuleLLM{chapterTags: tags})
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubModuleLLM{})
 	logger.Info("building module doc", "module", mod.ID, "sources", len(chapters), "minSlides", minSlides, "maxSlides", maxSlides)
 	doc, err := distill.BuildModuleDoc(ctx, llm, mod.ID, mod.Name, chapters, minSlides, maxSlides)
 	if err != nil {
 		return fmt.Errorf("build module doc: %w", err)
+	}
+	if n := len(doc.SlideWarnings); n > 0 {
+		logger.Warn("proto deck warnings", "count", n)
 	}
 
 	if err := distill.SaveModuleDoc(docFile, doc); err != nil {
@@ -83,14 +84,12 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 
 // stubModuleLLM is a placeholder LLM for the module command. Unlike stubDistillLLM (which only
 // ever answers one prompt shape), BuildModuleDoc issues several different prompts against the
-// same LLM — a JSON-merge prompt plus GenerateProtoDeck's outline/expand/summary prompts (see
-// stubProtoDeckShape in llm.go) — so this stub distinguishes them by content.
-type stubModuleLLM struct {
-	chapterTags []string
-}
+// same LLM — a JSON-merge prompt plus GenerateProtoDeck's prompt shapes (see stubProtoDeckShape
+// in llm.go) — so this stub distinguishes them by content.
+type stubModuleLLM struct{}
 
-func (s *stubModuleLLM) Complete(_ context.Context, prompt string) (string, error) {
-	if resp, ok := stubProtoDeckShape(prompt, s.chapterTags); ok {
+func (s *stubModuleLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
+	if resp, ok := stubProtoDeckShape(prompt); ok {
 		return resp, nil
 	}
 	return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil

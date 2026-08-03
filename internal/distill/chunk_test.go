@@ -51,7 +51,7 @@ type recordingLLM struct {
 	err     error
 }
 
-func (r *recordingLLM) Complete(_ context.Context, prompt string) (string, error) {
+func (r *recordingLLM) Complete(_ context.Context, prompt string, _ *Schema) (string, error) {
 	if r.err != nil {
 		return "", r.err
 	}
@@ -84,7 +84,7 @@ func TestCondenseChunks_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			llm := &recordingLLM{err: tt.llmErr}
-			got, err := condenseChunksSize(context.Background(), llm, tt.text, tt.size)
+			got, err := condenseChunksSize(t.Context(), llm, tt.text, tt.size)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}

@@ -105,7 +105,7 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 // In a real implementation this would be replaced by an actual LLM client.
 type stubDistillLLM struct{}
 
-func (s *stubDistillLLM) Complete(_ context.Context, _ string) (string, error) {
+func (s *stubDistillLLM) Complete(_ context.Context, _ string, _ *distill.Schema) (string, error) {
 	return `{
   "module_name": "",
   "text": "",

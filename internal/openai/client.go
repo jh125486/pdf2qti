@@ -13,12 +13,25 @@ import (
 	"time"
 
 	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
 const (
 	defaultBaseURL = "https://api.openai.com/v1"
 	providerOpenAI = "openai"
 	defaultModel   = "gpt-4o"
+)
+
+// maxRateLimitRetries and rateLimitBackoff bound Complete's retry behavior when OpenAI responds
+// 429 (rate limited). Observed in practice from pdf2qti's per-textbook-section outline planning
+// (one call per section, sequentially, each resending a chapter's full grounding text): a burst
+// of calls within the same minute can transiently exceed a low-TPM-tier account's rate limit,
+// with OpenAI's own error asking for waits as short as tens to hundreds of milliseconds — so a
+// short linear backoff (2s, 4s, 6s, ...) comfortably clears a transient window without
+// meaningfully slowing down the overwhelmingly common case where no retry is ever needed.
+const (
+	maxRateLimitRetries = 5
+	rateLimitBackoff    = 2 * time.Second
 )
 
 // Client calls the OpenAI chat completions API.
@@ -58,10 +71,23 @@ func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches 
 	}, nil
 }
 
+// sleepCtx waits for d, or returns ctx's error early if ctx is done first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Temperature float64       `json:"temperature,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
+	Temperature    float64         `json:"temperature,omitempty"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
@@ -69,9 +95,31 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
+// responseFormat is the request body shape for OpenAI's Structured Outputs (strict JSON Schema
+// enforcement): response_format: {type: "json_schema", json_schema: {name, strict, schema}}.
+// With strict:true, the API constrains decoding token-by-token so the response is guaranteed to
+// be syntactically valid JSON matching schema exactly — eliminating, at the source, the whole
+// class of problems distill.unmarshalRepaired's client-side parsing exists to work around (prose
+// prepended/appended around the JSON, a field silently omitted or malformed, an escaping mistake
+// inside a string value) rather than trying to out-guess every way a model might deviate from a
+// prose-described shape.
+type responseFormat struct {
+	Type       string         `json:"type"`
+	JSONSchema jsonSchemaSpec `json:"json_schema"`
+}
+
+type jsonSchemaSpec struct {
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
+}
+
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message struct {
+			Content string `json:"content"`
+			Refusal string `json:"refusal"`
+		} `json:"message"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -80,50 +128,87 @@ type chatResponse struct {
 
 // Complete sends prompt as a single user message and returns the model's reply, with any
 // surrounding Markdown code-fence stripped (models occasionally wrap JSON responses in
-// ```json ... ``` even when told not to).
-func (c *Client) Complete(ctx context.Context, prompt string) (string, error) {
+// ```json ... ``` even when told not to). When schema is non-nil, the request enforces it
+// server-side via Structured Outputs (see responseFormat) instead of relying on prompt wording
+// alone. Retries with backoff (see maxRateLimitRetries, rateLimitBackoff) when OpenAI responds
+// 429 (rate limited); any other error, including a safety refusal, is returned immediately
+// without retrying.
+func (c *Client) Complete(ctx context.Context, prompt string, schema *distill.Schema) (string, error) {
 	reqBody := chatRequest{
 		Model:       c.model,
 		Messages:    []chatMessage{{Role: "user", Content: prompt}},
 		Temperature: c.temperature,
+	}
+	if schema != nil {
+		reqBody.ResponseFormat = &responseFormat{
+			Type: "json_schema",
+			JSONSchema: jsonSchemaSpec{
+				Name:   schema.Name,
+				Strict: true,
+				Schema: schema.Definition,
+			},
+		}
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
+	var lastErr error
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, rateLimitBackoff*time.Duration(attempt)); err != nil {
+				return "", err
+			}
+		}
+		content, statusCode, err := c.doComplete(ctx, body)
+		if statusCode != http.StatusTooManyRequests {
+			return content, err
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("openai: exceeded %d retries: %w", maxRateLimitRetries, lastErr)
+}
+
+// doComplete makes one HTTP call to the chat completions API. statusCode is the response's HTTP
+// status when a response was received at all (0 if the request itself failed before getting one),
+// letting Complete decide whether this specific failure is worth retrying.
+func (c *Client) doComplete(ctx context.Context, body []byte) (content string, statusCode int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return "", 0, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req) //nolint:gosec // c.baseURL is fixed to defaultBaseURL in New; never derived from external input
 	if err != nil {
-		return "", fmt.Errorf("call openai: %w", err)
+		return "", 0, fmt.Errorf("call openai: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+		return "", resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
 
 	var out chatResponse
 	if err := json.Unmarshal(data, &out); err != nil {
-		return "", fmt.Errorf("parse response (status %d): %w", resp.StatusCode, err)
+		return "", resp.StatusCode, fmt.Errorf("parse response (status %d): %w", resp.StatusCode, err)
 	}
 	if out.Error != nil {
-		return "", fmt.Errorf("openai error (status %d): %s", resp.StatusCode, out.Error.Message)
+		return "", resp.StatusCode, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, out.Error.Message)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("openai returned status %d: %s", resp.StatusCode, string(data))
+		return "", resp.StatusCode, fmt.Errorf("openai returned status %d: %s", resp.StatusCode, string(data))
 	}
 	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("openai response had no choices")
+		return "", resp.StatusCode, fmt.Errorf("openai response had no choices")
 	}
-	return stripCodeFence(out.Choices[0].Message.Content), nil
+	if refusal := out.Choices[0].Message.Refusal; refusal != "" {
+		return "", resp.StatusCode, fmt.Errorf("openai refused the request: %s", refusal)
+	}
+	return stripCodeFence(out.Choices[0].Message.Content), resp.StatusCode, nil
 }
 
 // stripCodeFence removes a single leading/trailing ``` or ```json fence, if present.

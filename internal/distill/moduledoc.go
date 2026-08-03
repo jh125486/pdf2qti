@@ -24,14 +24,15 @@ type TaggedSection struct {
 // distilled chapters: a synthesized overview, merged learning objectives/vocabulary/theorems,
 // each chapter's sections (tagged by chapter), and a slide deck in proto-deck markdown format.
 type ModuleDoc struct {
-	ModuleID   string
-	ModuleName string
-	Overview   string
-	Objectives []Objective
-	Vocabulary []VocabTerm
-	Theorems   []Theorem
-	Sections   []TaggedSection
-	SlidesMD   string // raw GenerateProtoDeck output: headers, meta markers, and --- separators included
+	ModuleID      string
+	ModuleName    string
+	Overview      string
+	Objectives    []Objective
+	Vocabulary    []VocabTerm
+	Theorems      []Theorem
+	Sections      []TaggedSection
+	SlidesMD      string   // raw GenerateProtoDeck output: headers, meta markers, and --- separators included
+	SlideWarnings []string // advisory warnings from GenerateProtoDeck (see its doc comment), e.g. slide count outside the requested range
 }
 
 // BuildModuleDoc synthesizes chapters (already-distilled) into a single ModuleDoc: one LLM
@@ -47,7 +48,7 @@ func BuildModuleDoc(ctx context.Context, llm LLM, moduleID, moduleName string, c
 	if err != nil {
 		return nil, fmt.Errorf("build module doc prompt: %w", err)
 	}
-	raw, err := llm.Complete(ctx, prompt)
+	raw, err := llm.Complete(ctx, prompt, nil)
 	if err != nil {
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
@@ -65,9 +66,10 @@ func BuildModuleDoc(ctx context.Context, llm LLM, moduleID, moduleName string, c
 			KeyConcepts:   c.KeyConcepts,
 			TeachingNotes: c.TeachingNotes,
 			Text:          c.Text,
+			Sections:      []Section(c.Sections),
 		}
 	}
-	slidesMD, err := GenerateProtoDeck(ctx, llm, protoChapters, minSlides, maxSlides)
+	slidesMD, slideWarnings, err := GenerateProtoDeck(ctx, llm, protoChapters, minSlides, maxSlides)
 	if err != nil {
 		return nil, fmt.Errorf("generate proto deck: %w", err)
 	}
@@ -89,14 +91,15 @@ func BuildModuleDoc(ctx context.Context, llm LLM, moduleID, moduleName string, c
 	}
 
 	return &ModuleDoc{
-		ModuleID:   moduleID,
-		ModuleName: moduleName,
-		Overview:   resp.Overview,
-		Objectives: resp.Objectives,
-		Vocabulary: resp.Vocabulary,
-		Theorems:   resp.Theorems,
-		Sections:   sections,
-		SlidesMD:   slidesMD,
+		ModuleID:      moduleID,
+		ModuleName:    moduleName,
+		Overview:      resp.Overview,
+		Objectives:    resp.Objectives,
+		Vocabulary:    resp.Vocabulary,
+		Theorems:      resp.Theorems,
+		Sections:      sections,
+		SlidesMD:      slidesMD,
+		SlideWarnings: slideWarnings,
 	}, nil
 }
 

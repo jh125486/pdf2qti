@@ -254,6 +254,31 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 			raw:  `{"text":"\begin{bmatrix} 1 \end{bmatrix}"}`,
 			want: `\begin{bmatrix} 1 \end{bmatrix}`,
 		},
+		{
+			// Observed in practice against the real OpenAI API: a model occasionally prepends a
+			// preamble sentence to a JSON response despite being asked for "only JSON," making
+			// the whole response fail to parse (a distinct failure class from backslash
+			// escaping — see distill.go and outline_sections.go's callers, which all route
+			// through this function and hit this in production during expand-batch calls).
+			name: "leading prose before the JSON object is trimmed",
+			raw:  `Here is the requested JSON: {"text":"hello"}`,
+			want: `hello`,
+		},
+		{
+			name: "trailing prose after the JSON object is ignored",
+			raw:  `{"text":"hello"} Let me know if you need anything else!`,
+			want: `hello`,
+		},
+		{
+			// This package's prompts embed chapter source text full of LaTeX braces
+			// ("\begin{bmatrix}..."), so a preamble sentence quoting that source can contain a
+			// "decoy" '{' well before the real JSON object starts. Trimming to just the first
+			// '{' (a simpler fix that was tried and didn't hold up against the real API) would
+			// start parsing mid-LaTeX and fail; every '{' must be tried in turn.
+			name: "decoy brace from quoted LaTeX source before the real JSON object",
+			raw:  `Sure, using \begin{bmatrix} 1 & 2 \end{bmatrix} as reference: {"text":"hello"}`,
+			want: `hello`,
+		},
 	}
 
 	for _, tt := range tests {

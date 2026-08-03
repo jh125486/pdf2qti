@@ -2,6 +2,7 @@ package distill
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -130,9 +131,37 @@ func hasAmbiguousControlEscape(s string) bool {
 // through repairJSONEscapes's structural rule, exactly as it did before this function existed.
 func unmarshalRepaired(raw string, v any) error {
 	if !hasAmbiguousControlEscape(raw) {
-		if err := json.Unmarshal([]byte(raw), v); err == nil {
+		if err := decodeJSON(raw, v); err == nil {
 			return nil
 		}
 	}
-	return json.Unmarshal([]byte(repairJSONEscapes(raw)), v)
+	return decodeJSON(repairJSONEscapes(raw), v)
+}
+
+// decodeJSON parses the JSON object in s into v, tolerating prose a model adds around it despite
+// being asked for "only JSON" — observed in practice against the real OpenAI API. Trailing prose
+// (after a complete, valid object) is handled by json.Decoder.Decode itself, which stops after
+// one value and ignores what follows. Leading prose needs more care than just trimming to the
+// first '{': this package's prompts embed chapter source text full of LaTeX
+// ("\begin{bmatrix}...\end{bmatrix}", "\text{...}", ...), so a preamble sentence that quotes or
+// references any of that source material can contain a "decoy" '{' well before the real JSON
+// object starts. decodeJSON tries every '{' in s in order as a candidate start and returns on the
+// first one that decodes successfully, so a decoy brace (which isn't the start of valid JSON)
+// just fails and the next candidate is tried, rather than the whole parse failing at the first
+// brace found.
+func decodeJSON(s string, v any) error {
+	err := errors.New("no '{' found in response")
+	for i := strings.IndexByte(s, '{'); i >= 0; {
+		if decErr := json.NewDecoder(strings.NewReader(s[i:])).Decode(v); decErr == nil {
+			return nil
+		} else { //nolint:revive // early-return for the success case above reads clearer than inverting this branch
+			err = decErr
+		}
+		next := strings.IndexByte(s[i+1:], '{')
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	return err
 }

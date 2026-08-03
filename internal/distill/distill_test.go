@@ -18,7 +18,7 @@ type stubLLM struct {
 	err      error
 }
 
-func (s *stubLLM) Complete(_ context.Context, _ string) (string, error) {
+func (s *stubLLM) Complete(_ context.Context, _ string, _ *distill.Schema) (string, error) {
 	return s.response, s.err
 }
 
@@ -52,7 +52,7 @@ func TestDistill_Table(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			dc, err := distill.Distill(context.Background(), src, nil, tt.llm, "text")
+			dc, err := distill.Distill(t.Context(), src, nil, tt.llm, "text")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -71,7 +71,7 @@ type chunkAwareLLM struct {
 	verifyCalls int
 }
 
-func (c *chunkAwareLLM) Complete(_ context.Context, prompt string) (string, error) {
+func (c *chunkAwareLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
 	switch {
 	case strings.Contains(prompt, "pre-processing part"):
 		c.digestCalls++
@@ -100,7 +100,7 @@ func TestDistill_LargeChapterUsesCondensedTextVerbatim(t *testing.T) {
 	chapterText := strings.Join(paras, "\n\n")
 
 	llm := &chunkAwareLLM{}
-	dc, err := distill.Distill(context.Background(), src, nil, llm, chapterText)
+	dc, err := distill.Distill(t.Context(), src, nil, llm, chapterText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestDistill_SmallChapterSkipsConsistencyCheck(t *testing.T) {
 
 	src := &config.Source{ID: "ch01", Name: "Vectors and Matrices", Chapter: 1, PDF: "ch01.pdf"}
 	llm := &chunkAwareLLM{}
-	dc, err := distill.Distill(context.Background(), src, nil, llm, "a short chapter, well under the chunking threshold")
+	dc, err := distill.Distill(t.Context(), src, nil, llm, "a short chapter, well under the chunking threshold")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -11,8 +11,9 @@ import (
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
-// splitLLM answers BuildModuleDoc's JSON-merge prompt directly, and delegates its three
-// proto-deck prompt shapes (outline, batch expansion, summary) to protoDeckStubLLM.
+// splitLLM answers BuildModuleDoc's JSON-merge prompt directly, and delegates its proto-deck
+// prompt shapes (per-section outline, reconcile, agenda, batch expansion, summary) to
+// protoDeckStubLLM.
 type splitLLM struct {
 	mergeResp    string
 	mergeErr     error
@@ -22,15 +23,17 @@ type splitLLM struct {
 	sawMergeCall bool
 }
 
-func (s *splitLLM) Complete(ctx context.Context, prompt string) (string, error) {
-	if strings.Contains(prompt, "planning a prototype PowerPoint outline") ||
+func (s *splitLLM) Complete(ctx context.Context, prompt string, schema *distill.Schema) (string, error) {
+	if strings.Contains(prompt, "planning a small part of a prototype PowerPoint outline") ||
+		strings.Contains(prompt, "reviewing a slide outline that was planned one textbook section at a time") ||
+		strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck") ||
 		strings.Contains(prompt, "writing the bullet content for") ||
 		strings.Contains(prompt, "exactly one summary bullet per agenda item") {
 		s.sawDeckCall = true
 		if s.deckErr != nil {
 			return "", s.deckErr
 		}
-		return s.deck.Complete(ctx, prompt)
+		return s.deck.Complete(ctx, prompt, schema)
 	}
 	s.sawMergeCall = true
 	return s.mergeResp, s.mergeErr
@@ -68,7 +71,7 @@ func buildModuleDocTestCases() []buildModuleDocTestCase {
 	return []buildModuleDocTestCase{
 		{
 			name: "happy path",
-			llm:  &splitLLM{mergeResp: validMergeResp},
+			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{sectionOutlineCount: 1}},
 			check: func(t *testing.T, doc *distill.ModuleDoc) {
 				t.Helper()
 				if doc.Overview != "combined overview" {
@@ -109,7 +112,7 @@ func buildModuleDocTestCases() []buildModuleDocTestCase {
 		{
 			// Chapters with an empty ModuleName fall back to Book for the section's ChapterName.
 			name: "chapter with empty module name falls back to book",
-			llm:  &splitLLM{mergeResp: validMergeResp},
+			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{sectionOutlineCount: 1}},
 			chapters: func() []*distill.DistilledContext {
 				chapters := sampleChapters()
 				chapters[0].ModuleName = ""
@@ -135,7 +138,7 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 			if tt.chapters != nil {
 				chapters = tt.chapters()
 			}
-			doc, err := distill.BuildModuleDoc(context.Background(), tt.llm, "mod1", "Module 1", chapters, 3, 8)
+			doc, err := distill.BuildModuleDoc(t.Context(), tt.llm, "mod1", "Module 1", chapters, 3, 8)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -152,7 +155,7 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 func TestBuildModuleDoc_NoChapters(t *testing.T) {
 	t.Parallel()
 
-	_, err := distill.BuildModuleDoc(context.Background(), &splitLLM{}, "mod1", "Module 1", nil, 3, 8)
+	_, err := distill.BuildModuleDoc(t.Context(), &splitLLM{}, "mod1", "Module 1", nil, 3, 8)
 	if err == nil || !strings.Contains(err.Error(), "no chapters") {
 		t.Fatalf("expected 'no chapters' error, got %v", err)
 	}
