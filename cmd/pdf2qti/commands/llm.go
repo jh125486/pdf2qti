@@ -29,14 +29,14 @@ var (
 	reChapterHeading   = regexp.MustCompile(`(?m)^### (\S+):`)
 )
 
-// stubSectionOutlineEntries is the fixed number of placeholder outline entries
-// stubSectionOutlineJSON returns per section-outline call — there's no numeric target embedded in
-// that prompt to parse (see generateSectionOutline's doc comment for why), so a small constant is
-// simplest; total content-entry count for a stub-driven test fixture is fully predictable as
-// (sections-after-fallback across all chapters) × this constant.
-const stubSectionOutlineEntries = 2
+// stubChunkOutlineEntries is the fixed number of placeholder outline entries
+// stubChunkOutlineJSON returns per chunk-outline call — ignores the actual per-chunk target
+// embedded in the real prompt (see generateChunkOutline's doc comment) in favor of a small
+// constant, so a stub-driven test fixture's total content-entry count is fully predictable as
+// (chunks across all chapters) × this constant.
+const stubChunkOutlineEntries = 2
 
-// stubProtoDeckShape answers the prompt shapes distill.GenerateProtoDeck issues (per-section
+// stubProtoDeckShape answers the prompt shapes distill.GenerateProtoDeck issues (per-chunk
 // outline planning, outline reconciliation, agenda/title framing, batch bullet expansion, summary
 // bullets) with a minimal but structurally valid response, so stub LLMs (used only when no real
 // provider key is configured) can drive the full pipeline offline. Returns ok=false if prompt
@@ -44,9 +44,9 @@ const stubSectionOutlineEntries = 2
 // stubModuleLLM's JSON-merge prompt) can fall through to their own default.
 func stubProtoDeckShape(prompt string) (resp string, ok bool) {
 	switch {
-	case strings.Contains(prompt, "planning a small part of a prototype PowerPoint outline"):
-		return stubSectionOutlineJSON(), true
-	case strings.Contains(prompt, "reviewing a slide outline that was planned one textbook section at a time"):
+	case strings.Contains(prompt, "## This excerpt (part "):
+		return stubChunkOutlineJSON(), true
+	case strings.Contains(prompt, "reviewing a slide outline that was planned in fixed-size chunks of chapter text"):
 		return stubReconcileOutlineJSON(prompt), true
 	case strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck"):
 		return stubAgendaJSON(), true
@@ -59,10 +59,10 @@ func stubProtoDeckShape(prompt string) (resp string, ok bool) {
 	}
 }
 
-// stubSectionOutlineJSON builds a minimal but valid per-section outline response: a fixed small
-// number of placeholder entries (see stubSectionOutlineEntries), no parsing of the prompt needed.
-func stubSectionOutlineJSON() string {
-	entries := make([]string, stubSectionOutlineEntries)
+// stubChunkOutlineJSON builds a minimal but valid per-chunk outline response: a fixed small
+// number of placeholder entries (see stubChunkOutlineEntries), no parsing of the prompt needed.
+func stubChunkOutlineJSON() string {
+	entries := make([]string, stubChunkOutlineEntries)
 	for i := range entries {
 		entries[i] = fmt.Sprintf(`{"title":"Slide %d","focus":"placeholder"}`, i+1)
 	}

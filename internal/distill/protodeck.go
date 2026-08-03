@@ -45,10 +45,13 @@ const (
 // chapter both fed a fixed 8-30 range would either force padding on the short one or force
 // under-coverage on the long one. It's used two ways: as the CLI's --min-slides/--max-slides
 // auto-scale default, and as the comparison baseline GenerateProtoDeck's validateProtoDeck warns
-// against when the actual generated count falls outside it — advisory only, not a target the
-// outline planning itself is asked to hit (see GenerateProtoDeck's doc comment for why: forcing a
-// numeric target onto planning is exactly the failure mode that made the old whole-chapter design
-// silently drop topics).
+// against when the actual generated count falls outside it — advisory only. This range itself is
+// never passed into outline planning as a target (see GenerateProtoDeck's doc comment for why: a
+// numeric target at whole-chapter scope is exactly the failure mode that made the old whole-
+// chapter design silently drop topics) — generateOutlineChunked instead derives its own much
+// smaller per-chunk targets from charsPerContentSlide directly (see outline_chunks.go), the same
+// calibration constant this function's estimate is built on, so the two stay in sync if either is
+// ever recalibrated.
 //
 // The range spans -15%/+25% around the point estimate rather than returning a single number,
 // since it's a rough estimate from character count, not a precise measurement of how many
@@ -92,18 +95,19 @@ var reProtoMeta = regexp.MustCompile(`(?m)^<!-- meta:\s*(\d+)\s+(\S+)\s*-->\s*$`
 // Generation is multi-pass rather than one-shot, on the principle that a single call asked to do
 // several different jobs at once (plan every topic across a whole chapter, hit a numeric slide-
 // count target, AND write full slide content) reliably does each of them worse than a call scoped
-// to just one job. generateOutlineChunked plans slide topics one textbook section at a time (see
-// its doc comment for why: a single whole-chapter planning call was empirically unreliable, and
-// no amount of prompt-wording tuning fixed it), generateAgenda separately frames the deck's title
-// and agenda from the fully-planned topics, and expandOutline writes each topic's bullets in
-// small batches, grounded in the chapter's condensed text.
+// to just one job. generateOutlineChunked plans slide topics in fixed-size chunks of each
+// chapter's text, each chunk given a small explicit target slide count (see its doc comment for
+// why: a single whole-chapter planning call was empirically unreliable, and so — worse — was
+// asking one call per section with no numeric target at all; a small, bounded target per chunk is
+// what actually holds slide count consistent run to run), generateAgenda separately frames the
+// deck's title and agenda from the fully-planned topics, and expandOutline writes each topic's
+// bullets in small batches, grounded in the chapter's condensed text.
 //
 // minSlides/maxSlides are advisory, not enforced: they still size the CLI's --min-slides/
 // --max-slides default (see AutoSlideRange) and validateProtoDeck still warns when the actual
-// generated count falls outside them, but generation no longer fails over it. Per-section planning
-// has no numeric target to hit in the first place (that target was exactly what caused topics to
-// get silently dropped in the old whole-chapter design) — forcing one back on afterward would
-// partially reintroduce the same problem this design removes.
+// generated count falls outside them, but generation no longer fails over it — the reconciled
+// total is an emergent property of the chapter's actual length and each chunk's target, not
+// something planning is asked to hit directly.
 func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInput, minSlides, maxSlides int) (deck string, warnings []string, err error) {
 	if len(chapters) == 0 {
 		return "", nil, errors.New("no chapters to build a proto deck from")

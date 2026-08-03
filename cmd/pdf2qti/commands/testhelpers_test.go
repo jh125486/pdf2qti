@@ -96,10 +96,12 @@ func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 }
 
 // writeDistilledContextFileWithSections is writeDistilledContextFileWithID but with a Sections
-// field of the caller's choosing — nil/empty to exercise the pseudo-section fallback
-// (generateOutlineChunked synthesizes one section from ModuleName/Overview when a chapter has
-// none), or multiple entries to exercise the chunked-per-section wiring from
-// DistilledContext.Sections through to ProtoChapterInput.Sections at the command layer.
+// field of the caller's choosing (nil/empty, one entry, or several) — outline planning itself
+// doesn't consume Sections (it chunks Text by character count, see generateOutlineChunked's doc
+// comment), so this exercises the DistilledContext.Sections through to
+// ProtoChapterInput.Sections wiring at the command layer, not any outline-planning behavior.
+// Text is a small non-empty placeholder ("t") so generateOutlineChunked's chunking always has at
+// least one chunk to plan, regardless of how many Sections the caller passes.
 func writeDistilledContextFileWithSections(t *testing.T, outDir, sourceID string, sections []distill.Section) {
 	t.Helper()
 	dc := &distill.DistilledContext{
@@ -110,6 +112,7 @@ func writeDistilledContextFileWithSections(t *testing.T, outDir, sourceID string
 		Overview:         "<p>Overview</p>",
 		MaterialOverview: "Read this",
 		KeyConcepts:      []string{"pipes"},
+		Text:             "t",
 		Sections:         sections,
 		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
 		Slides: []distill.Slide{
@@ -152,9 +155,9 @@ func writeDistilledContextFileWithText(t *testing.T, outDir, sourceID, text stri
 
 // assertSlidesOutput fails t unless outputFile (relative to dir) exists. A no-op when outputFile
 // is empty or wantErr is true — a command that errored isn't expected to have produced output.
-// Doesn't check slide count: the stub section-outline LLM returns a fixed entry count regardless
-// of any requested range (per-section planning has no numeric target to hit at all, see
-// generateSectionOutline's doc comment), so an exact count from these command-layer tests isn't a
+// Doesn't check slide count: the stub chunk-outline LLM returns a fixed entry count regardless of
+// any requested range or the real per-chunk target embedded in the actual prompt (see
+// generateChunkOutline's doc comment), so an exact count from these command-layer tests isn't a
 // meaningful signal — see internal/distill's TestAutoSlideRange for precise range-arithmetic
 // coverage instead.
 func assertSlidesOutput(t *testing.T, dir, outputFile string, wantErr bool) {

@@ -12,7 +12,7 @@ import (
 )
 
 // splitLLM answers BuildModuleDoc's JSON-merge prompt directly, and delegates its proto-deck
-// prompt shapes (per-section outline, reconcile, agenda, batch expansion, summary) to
+// prompt shapes (per-chunk outline, reconcile, agenda, batch expansion, summary) to
 // protoDeckStubLLM.
 type splitLLM struct {
 	mergeResp    string
@@ -24,8 +24,8 @@ type splitLLM struct {
 }
 
 func (s *splitLLM) Complete(ctx context.Context, prompt string, schema *distill.Schema) (string, error) {
-	if strings.Contains(prompt, "planning a small part of a prototype PowerPoint outline") ||
-		strings.Contains(prompt, "reviewing a slide outline that was planned one textbook section at a time") ||
+	if strings.Contains(prompt, "## This excerpt (part ") ||
+		strings.Contains(prompt, "reviewing a slide outline that was planned in fixed-size chunks of chapter text") ||
 		strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck") ||
 		strings.Contains(prompt, "writing the bullet content for") ||
 		strings.Contains(prompt, "exactly one summary bullet per agenda item") {
@@ -43,12 +43,12 @@ func sampleChapters() []*distill.DistilledContext {
 	return []*distill.DistilledContext{
 		{
 			SourceID: "ch1", Book: "Chapter 1", Chapter: 1, ModuleName: "Processes",
-			Overview: "o1", KeyConcepts: []string{"fork"},
+			Overview: "o1", KeyConcepts: []string{"fork"}, Text: "t",
 			Sections: []distill.Section{{Title: "Intro", Summary: "s1"}},
 		},
 		{
 			SourceID: "ch2", Book: "Chapter 2", Chapter: 2, ModuleName: "Signals",
-			Overview: "o2", KeyConcepts: []string{"kill"},
+			Overview: "o2", KeyConcepts: []string{"kill"}, Text: "t",
 			Sections: []distill.Section{{Title: "Delivery", Summary: "s2"}, {Title: "Handlers", Summary: "s3"}},
 		},
 	}
@@ -71,7 +71,7 @@ func buildModuleDocTestCases() []buildModuleDocTestCase {
 	return []buildModuleDocTestCase{
 		{
 			name: "happy path",
-			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{sectionOutlineCount: 1}},
+			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{chunkOutlineCount: 1}},
 			check: func(t *testing.T, doc *distill.ModuleDoc) {
 				t.Helper()
 				if doc.Overview != "combined overview" {
@@ -112,7 +112,7 @@ func buildModuleDocTestCases() []buildModuleDocTestCase {
 		{
 			// Chapters with an empty ModuleName fall back to Book for the section's ChapterName.
 			name: "chapter with empty module name falls back to book",
-			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{sectionOutlineCount: 1}},
+			llm:  &splitLLM{mergeResp: validMergeResp, deck: protoDeckStubLLM{chunkOutlineCount: 1}},
 			chapters: func() []*distill.DistilledContext {
 				chapters := sampleChapters()
 				chapters[0].ModuleName = ""

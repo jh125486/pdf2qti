@@ -139,24 +139,42 @@ var expandBatchSchema = &Schema{
 	}),
 }
 
+// expandBatchMaxAttempts bounds expandBatch's retry-on-empty-response loop: expandBatchSchema
+// requires a "slides" array but (schema strictness doesn't extend to array length) doesn't
+// require it be non-empty, so a model can occasionally return a structurally valid but empty
+// response for a batch it should have populated — observed in practice against the real OpenAI
+// API. Retrying the exact same prompt once resolves it in every real-API case seen so far, so
+// this stays small; if it's ever exhausted, that's treated as a real error rather than retried
+// indefinitely.
+const expandBatchMaxAttempts = 2
+
 // expandBatch writes bullet content for batch's outline entries in one LLM call, grounded in the
-// source text of every chapter tag referenced in batch.
+// source text of every chapter tag referenced in batch. Retries once (see expandBatchMaxAttempts)
+// if the model returns fewer slide entries than batch has, since that's otherwise
+// indistinguishable from a real content failure to expandOutline's caller.
 func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) ([][]string, error) {
 	prompt, err := buildExpandBatchPrompt(chapterByTag, batch)
 	if err != nil {
 		return nil, fmt.Errorf("build expand prompt: %w", err)
 	}
-	raw, err := llm.Complete(ctx, prompt, expandBatchSchema)
-	if err != nil {
-		return nil, fmt.Errorf("llm complete: %w", err)
-	}
-	var resp expandBatchResponse
-	if err := unmarshalRepaired(raw, &resp); err != nil {
-		return nil, fmt.Errorf("parse llm response: %w", err)
-	}
-	out := make([][]string, len(resp.Slides))
-	for i, s := range resp.Slides {
-		out[i] = s.Bullets
+
+	var out [][]string
+	for attempt := 1; attempt <= expandBatchMaxAttempts; attempt++ {
+		raw, err := llm.Complete(ctx, prompt, expandBatchSchema)
+		if err != nil {
+			return nil, fmt.Errorf("llm complete: %w", err)
+		}
+		var resp expandBatchResponse
+		if err := unmarshalRepaired(raw, &resp); err != nil {
+			return nil, fmt.Errorf("parse llm response: %w", err)
+		}
+		out = make([][]string, len(resp.Slides))
+		for i, s := range resp.Slides {
+			out[i] = s.Bullets
+		}
+		if len(out) == len(batch) {
+			return out, nil
+		}
 	}
 	return out, nil
 }

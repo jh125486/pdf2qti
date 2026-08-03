@@ -19,10 +19,10 @@ type slidesTestCase struct {
 // auto-scaling and clamp behavior (resolveSlideRange itself is unexported, and this package
 // tests commands black-box, so it's exercised indirectly here) via the "auto range" cases below —
 // asserting only that each min/max combination succeeds and produces output, not an exact slide
-// count: the stub section-outline LLM (stubSectionOutlineJSON) returns a fixed entry count
-// regardless of any requested range (per-section planning has no numeric target to hit at all,
-// see generateSectionOutline's doc comment), so an exact count is no longer a meaningful signal
-// at this layer. AutoSlideRange's own arithmetic is precisely covered by TestAutoSlideRange in
+// count: the stub chunk-outline LLM (stubChunkOutlineJSON) returns a fixed entry count regardless
+// of any requested range or the real per-chunk target embedded in the actual prompt (see
+// generateChunkOutline's doc comment), so an exact count is no longer a meaningful signal at this
+// layer. AutoSlideRange's own arithmetic is precisely covered by TestAutoSlideRange in
 // internal/distill. Split out from the test function itself to keep gocyclo's complexity count on
 // the (trivial) runner, not this literal.
 func slidesTestCases() []slidesTestCase {
