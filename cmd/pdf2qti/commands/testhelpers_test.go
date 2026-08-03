@@ -34,6 +34,17 @@ func withArgs(t *testing.T, args []string) {
 	})
 }
 
+// mustWriteFile writes data to path, failing the test immediately on error. A thin wrapper
+// around os.WriteFile so table-building helpers don't each carry their own
+// if err != nil { t.Fatal(err) } branch — those add up fast across a table with many fixture
+// writes and push the enclosing function over gocyclo's complexity threshold for no real benefit.
+func mustWriteFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 const validQuizMD = `# Test Quiz
 
 ## MC
@@ -100,10 +111,10 @@ func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 	}
 }
 
-// writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/<sourceID>_slides.md
-// whose agenda/slides match writeDistilledContextFileWithID's Agenda/Slides fields, and returns
-// its path.
-func writeSlidesMarkdownFile(t *testing.T, dir, sourceID string) string {
+// writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/src01_slides.md whose
+// agenda/slides match writeDistilledContextFileWithID's Agenda/Slides fields, and returns its
+// path.
+func writeSlidesMarkdownFile(t *testing.T, dir string) string {
 	t.Helper()
 	const md = `# Module 1
 
@@ -139,7 +150,7 @@ func writeSlidesMarkdownFile(t *testing.T, dir, sourceID string) string {
 - Point 1
 - Point 2
 `
-	path := filepath.Join(dir, sourceID+"_slides.md")
+	path := filepath.Join(dir, "src01_slides.md")
 	if err := os.WriteFile(path, []byte(md), 0o600); err != nil {
 		t.Fatal(err)
 	}

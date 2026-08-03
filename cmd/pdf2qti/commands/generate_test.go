@@ -9,30 +9,28 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-func TestGenerateCmdRun_Table(t *testing.T) {
-	t.Parallel()
+type generateTestCase struct {
+	name        string
+	skipApprove bool
+	prepare     func(t *testing.T, dir string) string
+	wantErr     bool
+	checkQTI    bool
+}
 
-	tests := []struct {
-		name        string
-		skipApprove bool
-		prepare     func(t *testing.T, dir string) string
-		wantErr     bool
-		checkQTI    bool
-	}{
+// generateTestCases builds TestGenerateCmdRun_Table's table. Split out from the test function
+// itself to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func generateTestCases() []generateTestCase {
+	return []generateTestCase{
 		{
 			name: "success",
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir)
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 		},
@@ -42,15 +40,11 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir)
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 			checkQTI: true,
@@ -60,15 +54,11 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir)
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","descriptionTemplate":"Chapter {{.chapter}}","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `","openReview":true}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 		},
@@ -77,15 +67,11 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir)
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","descriptionTemplate":"{{.chapter","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 		},
@@ -100,9 +86,7 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 				t.Helper()
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + dir + `/nonexistent.pdf"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 			wantErr: true,
@@ -115,15 +99,11 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir) // module_name: ""
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 		},
@@ -134,15 +114,11 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				blocker := filepath.Join(dir, "blocker")
-				if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, blocker, []byte("x"))
 				outDir := filepath.Join(blocker, "nested")
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + outDir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 			wantErr: true,
@@ -154,26 +130,25 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
-				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, pdfPath, nil)
 				writeContextFile(t, dir)
 				if err := os.Mkdir(filepath.Join(dir, "src01_quiz.md"), 0o750); err != nil {
 					t.Fatal(err)
 				}
 				cfgFile := filepath.Join(dir, "quiz.json")
 				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
-				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				mustWriteFile(t, cfgFile, []byte(cfgJSON))
 				return cfgFile
 			},
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestGenerateCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range generateTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()

@@ -19,6 +19,7 @@ type stubLLM struct{}
 func (stubLLM) Complete(_ context.Context, _ string) (string, error) { return "stub", nil }
 
 func TestSelectLLM(t *testing.T) {
+	//nolint:gosec // Fixture env var names/values are test data, not credentials.
 	tests := []struct {
 		name       string
 		gen        config.Generation

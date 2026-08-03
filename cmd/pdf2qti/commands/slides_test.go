@@ -9,15 +9,17 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-func TestSlidesCmdRun_Table(t *testing.T) {
-	t.Parallel()
+type slidesTestCase struct {
+	name       string
+	prepare    func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
+	wantErr    bool
+	outputFile string // relative to dir; checked to exist when non-empty and !wantErr
+}
 
-	tests := []struct {
-		name       string
-		prepare    func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
-		wantErr    bool
-		outputFile string // relative to dir; checked to exist when non-empty and !wantErr
-	}{
+// slidesTestCases builds TestSlidesCmdRun_Table's table. Split out from the test function itself
+// to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func slidesTestCases() []slidesTestCase {
+	return []slidesTestCase{
 		{
 			name: "success by id",
 			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
@@ -176,9 +178,12 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestSlidesCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range slidesTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()

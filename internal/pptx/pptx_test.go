@@ -65,62 +65,6 @@ func demoSlideXML(titleText string) string {
 		`</p:spTree></p:cSld></p:sld>`
 }
 
-func TestRender_Success(t *testing.T) {
-	t.Parallel()
-
-	entries := baseTemplateEntries()
-	entries["customXml/item1.xml"] = []byte(`<root>{{.module_name}} - {{.book}}</root>`)
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, entries); err != nil {
-		t.Fatal(err)
-	}
-
-	err := pptx.Render(templatePath, sampleContext(), "Test University", map[string]string{"module_name": "Module 3"}, outputPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mustContainAll(t, "custom part", string(outEntries["customXml/item1.xml"]), "Module 3 - Systems Programming")
-	mustContainAll(t, "title slide", string(outEntries["ppt/slides/slide0.xml"]), "<a:t>Module 3</a:t>", "<a:t>Test University</a:t>")
-	mustContainAll(t, "agenda slide", string(outEntries["ppt/slides/slide1.xml"]), "<a:t>Topic A</a:t>", "<a:t>Topic B</a:t>", "<a:t>Topic C</a:t>")
-	// First content slide reuses the prototype part, id=2; slide3/4 are the duplicates.
-	mustContainAll(t, "first content slide", string(outEntries["ppt/slides/slide2.xml"]), "<a:t>Topic A</a:t>", "<a:t>Point 1</a:t>", "<a:t>Point 2</a:t>")
-	mustContainAll(t, "duplicated slide3", string(outEntries["ppt/slides/slide3.xml"]), "<a:t>Topic B</a:t>")
-	mustContainAll(t, "duplicated slide4", string(outEntries["ppt/slides/slide4.xml"]), "<a:t>Topic C</a:t>")
-	mustContainAll(t, "content types", string(outEntries["[Content_Types].xml"]), "/ppt/slides/slide3.xml", "/ppt/slides/slide4.xml")
-
-	pres := string(outEntries["ppt/presentation.xml"])
-	if got := strings.Count(pres, "<p:sldId "); got != 5 {
-		t.Fatalf("expected 5 sldId entries (title+agenda+3 content), got %d: %q", got, pres)
-	}
-
-	presRels := string(outEntries["ppt/_rels/presentation.xml.rels"])
-	if got := strings.Count(presRels, `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"`); got != 5 {
-		t.Fatalf("expected 5 slide relationships, got %d: %q", got, presRels)
-	}
-
-	if got := strings.Count(pres, "<p14:section "); got != 3 {
-		t.Fatalf("expected 3 sections (Introduction, ch1, Summary), got %d: %q", got, pres)
-	}
-	mustContainAll(t, "presentation.xml sections", pres,
-		`<p14:section name="Introduction"`, `<p14:section name="ch1"`, `<p14:section name="Summary"`)
-	// ch1 groups the two ch1-tagged slides (Topic A + Topic B) into one section, not two.
-	if idx := strings.Index(pres, `<p14:section name="ch1"`); idx != -1 {
-		end := strings.Index(pres[idx:], "</p14:section>")
-		if got := strings.Count(pres[idx:idx+end], "<p14:sldId "); got != 2 {
-			t.Fatalf("expected 2 sldIds in the ch1 section, got %d: %q", got, pres[idx:idx+end])
-		}
-	}
-}
-
 func mustContainAll(t *testing.T, label, haystack string, needles ...string) {
 	t.Helper()
 	for _, needle := range needles {
@@ -130,47 +74,251 @@ func mustContainAll(t *testing.T, label, haystack string, needles ...string) {
 	}
 }
 
-func TestRender_BinaryEntryPassthrough(t *testing.T) {
-	t.Parallel()
-
-	entries := baseTemplateEntries()
-	entries["docProps/thumb.jpeg"] = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, entries); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := pptx.Render(templatePath, sampleContext(), "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := outEntries["docProps/thumb.jpeg"]
-	want := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("expected binary entry to pass through unchanged, got %v want %v", got, want)
+// renderFirstContentSlideDC returns a dc func with slide[0]'s content overridden to content, for
+// TestRender table entries whose verify closure only needs the resulting first content slide's
+// XML rather than the full outEntries map.
+func renderFirstContentSlideDC(content string) func() *distill.DistilledContext {
+	return func() *distill.DistilledContext {
+		dc := sampleContext()
+		dc.Slides[0].Content = content
+		return dc
 	}
 }
 
-func TestRender_Table(t *testing.T) {
-	t.Parallel()
+type renderTestCase struct {
+	name           string
+	entries        func() map[string][]byte
+	rawTemplate    []byte // when set, written verbatim instead of zipping entries()
+	noTemplateFile bool   // when set, no file at all is written at templatePath
+	dc             func() *distill.DistilledContext
+	courseName     string
+	outputPath     func(dir string) string // when set, overrides the default dir/out.pptx
+	wantErr        bool
+	errLike        string
+	verify         func(t *testing.T, outEntries map[string][]byte)
+}
 
-	tests := []struct {
-		name        string
-		entries     func() map[string][]byte
-		rawTemplate []byte // when set, written verbatim instead of zipping entries()
-		dc          func() *distill.DistilledContext
-		courseName  string
-		outputPath  func(dir string) string // when set, overrides the default dir/out.pptx
-		wantErr     bool
-		errLike     string
-	}{
+// renderTestCases builds TestRender's table. Split out from the test function itself to keep
+// gocyclo's complexity count on the (trivial) runner, not this literal.
+func renderTestCases() []renderTestCase {
+	return []renderTestCase{
+		{
+			name: "success",
+			entries: func() map[string][]byte {
+				e := baseTemplateEntries()
+				e["customXml/item1.xml"] = []byte(`<root>{{.module_name}} - {{.book}}</root>`)
+				return e
+			},
+			dc:         sampleContext,
+			courseName: "Test University",
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				mustContainAll(t, "custom part", string(outEntries["customXml/item1.xml"]), "Module 3 - Systems Programming")
+				mustContainAll(t, "title slide", string(outEntries["ppt/slides/slide0.xml"]), "<a:t>Module 3</a:t>", "<a:t>Test University</a:t>")
+				mustContainAll(t, "agenda slide", string(outEntries["ppt/slides/slide1.xml"]), "<a:t>Topic A</a:t>", "<a:t>Topic B</a:t>", "<a:t>Topic C</a:t>")
+				// First content slide reuses the prototype part, id=2; slide3/4 are the duplicates.
+				mustContainAll(t, "first content slide", string(outEntries["ppt/slides/slide2.xml"]), "<a:t>Topic A</a:t>", "<a:t>Point 1</a:t>", "<a:t>Point 2</a:t>")
+				mustContainAll(t, "duplicated slide3", string(outEntries["ppt/slides/slide3.xml"]), "<a:t>Topic B</a:t>")
+				mustContainAll(t, "duplicated slide4", string(outEntries["ppt/slides/slide4.xml"]), "<a:t>Topic C</a:t>")
+				mustContainAll(t, "content types", string(outEntries["[Content_Types].xml"]), "/ppt/slides/slide3.xml", "/ppt/slides/slide4.xml")
+
+				pres := string(outEntries["ppt/presentation.xml"])
+				if got := strings.Count(pres, "<p:sldId "); got != 5 {
+					t.Fatalf("expected 5 sldId entries (title+agenda+3 content), got %d: %q", got, pres)
+				}
+
+				presRels := string(outEntries["ppt/_rels/presentation.xml.rels"])
+				if got := strings.Count(presRels, `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"`); got != 5 {
+					t.Fatalf("expected 5 slide relationships, got %d: %q", got, presRels)
+				}
+
+				if got := strings.Count(pres, "<p14:section "); got != 3 {
+					t.Fatalf("expected 3 sections (Introduction, ch1, Summary), got %d: %q", got, pres)
+				}
+				mustContainAll(t, "presentation.xml sections", pres,
+					`<p14:section name="Introduction"`, `<p14:section name="ch1"`, `<p14:section name="Summary"`)
+				// ch1 groups the two ch1-tagged slides (Topic A + Topic B) into one section, not two.
+				if idx := strings.Index(pres, `<p14:section name="ch1"`); idx != -1 {
+					end := strings.Index(pres[idx:], "</p14:section>")
+					if got := strings.Count(pres[idx:idx+end], "<p14:sldId "); got != 2 {
+						t.Fatalf("expected 2 sldIds in the ch1 section, got %d: %q", got, pres[idx:idx+end])
+					}
+				}
+			},
+		},
+		{
+			name: "binary entry passes through unchanged",
+			entries: func() map[string][]byte {
+				e := baseTemplateEntries()
+				e["docProps/thumb.jpeg"] = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
+				return e
+			},
+			dc: sampleContext,
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				got := outEntries["docProps/thumb.jpeg"]
+				want := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("expected binary entry to pass through unchanged, got %v want %v", got, want)
+				}
+			},
+		},
+		{
+			name: "empty title still produces a valid title run",
+			// An empty title bullet makes runsXML's own text-to-render empty, hitting its
+			// no-spans-matched-and-nothing-written fallback (as opposed to the normal case where
+			// even plain unmatched text still produces a non-empty run via boldRunsXML).
+			entries: baseTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				dc := sampleContext()
+				dc.ModuleName = ""
+				return dc
+			},
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				mustContainAll(t, "empty title run", string(outEntries["ppt/slides/slide0.xml"]), `<a:r><a:rPr lang="en-US" dirty="0"/><a:t></a:t></a:r>`)
+			},
+		},
+		{
+			// \[...\] display-math spans (as opposed to \(...\) inline math) are a distinct
+			// branch in runsXML's switch; without pandoc's real conversion available (as here —
+			// see math_test.go for the pandoc-available path), both bolded and unbolded must
+			// degrade to plain escaped text rather than error or drop content.
+			name:    "display math falls back to plain text without pandoc",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nSee \\[E = mc^2\\] for details and **\\[F = ma\\]** too"),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				mustContainAll(t, "display math fallback", string(outEntries["ppt/slides/slide2.xml"]), "E = mc^2", "F = ma")
+			},
+		},
+		{
+			// Plain "**bold**" with no adjacent math span at all — reMathSpan's own
+			// bold-wrapped-math alternatives never match, so this is the only way to reach
+			// boldRunsXML's own bold-run branch (as opposed to a bold marker consumed as part of
+			// a math match).
+			name:    "plain bold text renders a bold run",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nThis is **important** text"),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				mustContainAll(t, "bold run", contentSlide, `<a:rPr lang="en-US" b="1" dirty="0"/><a:t>important</a:t>`)
+				mustContainAll(t, "surrounding plain runs", contentSlide, "This is ", " text")
+			},
+		},
+		{
+			name:    "blank lines between bullets are skipped",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\n\n\nPoint 2"),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				// 1 title paragraph + 2 body bullets; blank lines must not produce empty extras.
+				if got := strings.Count(contentSlide, "<a:p>"); got != 3 {
+					t.Fatalf("expected blank lines to be skipped (3 total paragraphs: title+2 bullets), got %d: %s", got, contentSlide)
+				}
+				mustContainAll(t, "both bullets present", contentSlide, "<a:t>Point 1</a:t>", "<a:t>Point 2</a:t>")
+			},
+		},
+		{
+			name: "unresolvable extra slides are safely ignored",
+			entries: func() map[string][]byte {
+				e := baseTemplateEntries()
+				// No _rels part at all: slidesByLayoutName's own rels lookup fails and skips it.
+				e["ppt/slides/slide50.xml"] = []byte(demoSlideXML("Orphan"))
+				// A _rels part with no slideLayout-type relationship in it.
+				e["ppt/slides/slide51.xml"] = []byte(demoSlideXML("No Layout Rel"))
+				e["ppt/slides/_rels/slide51.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+					`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>`)
+				// A slideLayout relationship whose target doesn't resolve to any known layout part.
+				e["ppt/slides/slide52.xml"] = []byte(demoSlideXML("Dangling Layout Target"))
+				e["ppt/slides/_rels/slide52.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+					`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayoutMissing.xml"/></Relationships>`)
+				return e
+			},
+			dc: sampleContext,
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				// Normal slide numbering must be entirely unaffected by the unresolvable junk slides.
+				mustContainAll(t, "title slide", string(outEntries["ppt/slides/slide0.xml"]), "<a:t>Module 3</a:t>")
+				mustContainAll(t, "first content slide", string(outEntries["ppt/slides/slide2.xml"]), "<a:t>Topic A</a:t>")
+			},
+		},
+		{
+			name: "layout pictures gain descr in every tag form",
+			entries: func() map[string][]byte {
+				e := baseTemplateEntries()
+				e["ppt/slideLayouts/slideLayout1.xml"] = []byte(`<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Title">` +
+					// Self-closing <p:cNvPr .../> with no descr: must gain descr="".
+					`<p:pic><p:nvPicPr><p:cNvPr id="1" name="logo1"/></p:nvPicPr></p:pic>` +
+					// Open <p:cNvPr ...> tag with no descr: must gain descr="".
+					`<p:pic><p:nvPicPr><p:cNvPr id="2" name="logo2"></p:cNvPr></p:nvPicPr></p:pic>` +
+					// Already has a descr: left untouched.
+					`<p:pic><p:nvPicPr><p:cNvPr id="3" name="logo3" descr="Company logo"/></p:nvPicPr></p:pic>` +
+					`</p:cSld></p:sldLayout>`)
+				return e
+			},
+			dc: sampleContext,
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				layout := string(outEntries["ppt/slideLayouts/slideLayout1.xml"])
+				mustContainAll(t, "self-closing tag gains descr", layout, `<p:cNvPr id="1" name="logo1" descr=""/>`)
+				mustContainAll(t, "open tag gains descr", layout, `<p:cNvPr id="2" name="logo2" descr="">`)
+				mustContainAll(t, "existing descr left untouched", layout, `<p:cNvPr id="3" name="logo3" descr="Company logo"/>`)
+				if strings.Count(layout, `descr="Company logo"`) != 1 {
+					t.Fatalf("existing descr must not be duplicated: %s", layout)
+				}
+			},
+		},
+		{
+			name:           "missing template file",
+			noTemplateFile: true,
+			dc:             sampleContext,
+			wantErr:        true,
+			errLike:        "read pptx template",
+		},
+		{
+			name:        "template file is not a valid zip",
+			rawTemplate: []byte("this is not a zip archive"),
+			dc:          sampleContext,
+			wantErr:     true,
+			errLike:     "open pptx template",
+		},
+		{
+			// A syntactically-valid zip (correct central directory) whose title-slide entry
+			// fails its CRC-32 checksum on read — distinct from "not a valid zip" above, which
+			// fails earlier at zip.NewReader itself.
+			name:        "template entry fails checksum on read",
+			rawTemplate: zipBytesWithCorruptEntry(baseTemplateEntries(), "ppt/slides/slide0.xml"),
+			dc:          sampleContext,
+			wantErr:     true,
+			errLike:     `read template entry "ppt/slides/slide0.xml"`,
+		},
+		{
+			name:    "output dir blocked by an existing file",
+			entries: baseTemplateEntries,
+			dc:      sampleContext,
+			outputPath: func(dir string) string {
+				blocker := filepath.Join(dir, "blocker")
+				if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+					panic(err)
+				}
+				return filepath.Join(blocker, "out.pptx")
+			},
+			wantErr: true,
+			errLike: "create output dir",
+		},
+		{
+			name:    "output path is an existing directory",
+			entries: baseTemplateEntries,
+			dc:      sampleContext,
+			outputPath: func(dir string) string {
+				return dir // dir itself already exists; os.Create on it must fail
+			},
+			wantErr: true,
+			errLike: "create output",
+		},
 		{
 			name: "bad entry template syntax",
 			entries: func() map[string][]byte {
@@ -181,6 +329,17 @@ func TestRender_Table(t *testing.T) {
 			dc:      sampleContext,
 			wantErr: true,
 			errLike: "parse template entry",
+		},
+		{
+			name: "template execute error from bad field access",
+			entries: func() map[string][]byte {
+				e := baseTemplateEntries()
+				e["customXml/item1.xml"] = []byte(`<root>{{.module_name.Bogus}}</root>`)
+				return e
+			},
+			dc:      sampleContext,
+			wantErr: true,
+			errLike: "execute template entry",
 		},
 		{
 			name: "missing required layout",
@@ -238,60 +397,6 @@ func TestRender_Table(t *testing.T) {
 			},
 			wantErr: true,
 			errLike: "no slides to render",
-		},
-		{
-			name:        "template file is not a valid zip",
-			rawTemplate: []byte("this is not a zip archive"),
-			dc:          sampleContext,
-			wantErr:     true,
-			errLike:     "open pptx template",
-		},
-		{
-			// A syntactically-valid zip (correct central directory) whose title-slide entry
-			// fails its CRC-32 checksum on read — distinct from "not a valid zip" above, which
-			// fails earlier at zip.NewReader itself.
-			name:        "template entry fails checksum on read",
-			rawTemplate: zipBytesWithCorruptEntry(baseTemplateEntries(), "ppt/slides/slide0.xml"),
-			dc:          sampleContext,
-			wantErr:     true,
-			errLike:     `read template entry "ppt/slides/slide0.xml"`,
-		},
-		{
-			name: "output dir blocked by an existing file",
-			entries: func() map[string][]byte {
-				return baseTemplateEntries()
-			},
-			dc: sampleContext,
-			outputPath: func(dir string) string {
-				blocker := filepath.Join(dir, "blocker")
-				if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-					panic(err)
-				}
-				return filepath.Join(blocker, "out.pptx")
-			},
-			wantErr: true,
-			errLike: "create output dir",
-		},
-		{
-			name:    "output path is an existing directory",
-			entries: baseTemplateEntries,
-			dc:      sampleContext,
-			outputPath: func(dir string) string {
-				return dir // dir itself already exists; os.Create on it must fail
-			},
-			wantErr: true,
-			errLike: "create output",
-		},
-		{
-			name: "template execute error from bad field access",
-			entries: func() map[string][]byte {
-				e := baseTemplateEntries()
-				e["customXml/item1.xml"] = []byte(`<root>{{.module_name.Bogus}}</root>`)
-				return e
-			},
-			dc:      sampleContext,
-			wantErr: true,
-			errLike: "execute template entry",
 		},
 		{
 			name: "title slide has no title placeholder",
@@ -546,8 +651,17 @@ func TestRender_Table(t *testing.T) {
 			errLike: "no closing </p:txBody>",
 		},
 	}
+}
 
-	for _, tt := range tests {
+// TestRender covers pptx.Render (pptx.go's only exported function) end to end: the success path
+// and every error branch across template parsing, layout validation, slide duplication, and
+// section grouping. Table-driven per this repo's Go test conventions; scenarios needing a real
+// on-disk template fixture instead of the synthetic entries below are the one justified
+// exception (see TestRender_RealTemplate).
+func TestRender(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range renderTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
@@ -556,12 +670,17 @@ func TestRender_Table(t *testing.T) {
 			if tt.outputPath != nil {
 				outputPath = tt.outputPath(dir)
 			}
-			if tt.rawTemplate != nil {
+			switch {
+			case tt.noTemplateFile:
+				// intentionally leave templatePath unwritten
+			case tt.rawTemplate != nil:
 				if err := os.WriteFile(templatePath, tt.rawTemplate, 0o600); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := writeZip(templatePath, tt.entries()); err != nil {
-				t.Fatal(err)
+			default:
+				if err := writeZip(templatePath, tt.entries()); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			err := pptx.Render(templatePath, tt.dc(), tt.courseName, map[string]string{"module_name": "Module 3"}, outputPath)
@@ -571,22 +690,22 @@ func TestRender_Table(t *testing.T) {
 			if tt.errLike != "" && (err == nil || !strings.Contains(err.Error(), tt.errLike)) {
 				t.Fatalf("expected error containing %q, got %v", tt.errLike, err)
 			}
+			if tt.verify != nil {
+				outEntries, err := readZip(outputPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tt.verify(t, outEntries)
+			}
 		})
 	}
 }
 
-func TestRender_MissingTemplate(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	err := pptx.Render(filepath.Join(dir, "missing.pptx"), sampleContext(), "", nil, filepath.Join(dir, "out.pptx"))
-	if err == nil || !strings.Contains(err.Error(), "read pptx template") {
-		t.Fatalf("expected read pptx template error, got %v", err)
-	}
-}
-
-// TestRender_RealTemplate exercises the full pipeline against the actual PowerPoint-authored
-// template checked into testdata, which has richer markup (extLst, notesSlides, media, etc.)
-// than the minimal fixtures above.
+// TestRender_RealTemplate is a justified exception to the single-table-function convention
+// above: it exercises the full pipeline against the actual PowerPoint-authored template checked
+// into testdata, which has richer markup (extLst, notesSlides, media, etc.) than the minimal
+// synthetic fixtures TestRender builds, and needs its own multi-part verification that doesn't
+// reduce to a simple wantErr/errLike/verify-closure table entry.
 func TestRender_RealTemplate(t *testing.T) {
 	t.Parallel()
 
@@ -633,161 +752,6 @@ func TestRender_RealTemplate(t *testing.T) {
 		if picCount > 0 && descrCount != picCount {
 			t.Fatalf("%s: %d pictures but only %d marked decorative", name, picCount, descrCount)
 		}
-	}
-}
-
-// renderFirstContentSlide is renderMathContent's non-math-specific sibling (see math_test.go):
-// renders sampleContext() with slide[0]'s content overridden, and returns the resulting first
-// content slide's XML.
-func renderFirstContentSlide(t *testing.T, content string) string {
-	t.Helper()
-	dc := sampleContext()
-	dc.Slides[0].Content = content
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
-		t.Fatal(err)
-	}
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(outEntries["ppt/slides/slide2.xml"])
-}
-
-func TestRunsXML_DisplayMath(t *testing.T) {
-	t.Parallel()
-
-	// \[...\] display-math spans (as opposed to \(...\) inline math) are a distinct branch in
-	// runsXML's switch; without pandoc's real conversion available, both must still degrade to
-	// plain escaped text rather than error or drop content.
-	contentSlide := renderFirstContentSlide(t, "Point 1\nSee \\[E = mc^2\\] for details")
-	mustContainAll(t, "unbolded display math fallback", contentSlide, "E = mc^2")
-
-	contentSlide = renderFirstContentSlide(t, "Point 1\nSee **\\[E = mc^2\\]** for details")
-	mustContainAll(t, "bolded display math fallback", contentSlide, "E = mc^2")
-}
-
-func TestBoldRunsXML_PlainBoldText(t *testing.T) {
-	t.Parallel()
-
-	// Plain "**bold**" with no adjacent math span at all — reMathSpan's own bold-wrapped-math
-	// alternatives never match, so this is the only way to reach boldRunsXML's own bold-run
-	// branch (as opposed to a bold marker consumed as part of a math match).
-	contentSlide := renderFirstContentSlide(t, "Point 1\nThis is **important** text")
-	mustContainAll(t, "bold run", contentSlide, `<a:rPr lang="en-US" b="1" dirty="0"/><a:t>important</a:t>`)
-	mustContainAll(t, "surrounding plain runs", contentSlide, "This is ", " text")
-}
-
-func TestSplitBullets_BlankLinesSkipped(t *testing.T) {
-	t.Parallel()
-
-	contentSlide := renderFirstContentSlide(t, "Point 1\n\n\nPoint 2")
-	// 1 title paragraph + 2 body bullets; blank lines must not produce empty extra bullets.
-	if got := strings.Count(contentSlide, "<a:p>"); got != 3 {
-		t.Fatalf("expected blank lines to be skipped (3 total paragraphs: title+2 bullets), got %d: %s", got, contentSlide)
-	}
-	mustContainAll(t, "both bullets present", contentSlide, "<a:t>Point 1</a:t>", "<a:t>Point 2</a:t>")
-}
-
-func TestRender_EmptyModuleNameStillProducesValidTitleRun(t *testing.T) {
-	t.Parallel()
-
-	// An empty title bullet makes runsXML's own text-to-render empty, hitting its
-	// no-spans-matched-and-nothing-written fallback (as opposed to the normal case where even
-	// plain unmatched text still produces a non-empty run via boldRunsXML).
-	dc := sampleContext()
-	dc.ModuleName = ""
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
-		t.Fatal(err)
-	}
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	titleSlide := string(outEntries["ppt/slides/slide0.xml"])
-	mustContainAll(t, "empty title run", titleSlide, `<a:r><a:rPr lang="en-US" dirty="0"/><a:t></a:t></a:r>`)
-}
-
-func TestApplyDeck_UnresolvableExtraSlidesAreIgnored(t *testing.T) {
-	t.Parallel()
-
-	e := baseTemplateEntries()
-	// No _rels part at all: slidesByLayoutName's own rels lookup fails and skips it.
-	e["ppt/slides/slide50.xml"] = []byte(demoSlideXML("Orphan"))
-	// A _rels part with no slideLayout-type relationship in it.
-	e["ppt/slides/slide51.xml"] = []byte(demoSlideXML("No Layout Rel"))
-	e["ppt/slides/_rels/slide51.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-		`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>`)
-	// A slideLayout relationship whose target doesn't resolve to any known layout part.
-	e["ppt/slides/slide52.xml"] = []byte(demoSlideXML("Dangling Layout Target"))
-	e["ppt/slides/_rels/slide52.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-		`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayoutMissing.xml"/></Relationships>`)
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, e); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := pptx.Render(templatePath, sampleContext(), "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Normal slide numbering must be entirely unaffected by the unresolvable junk slides.
-	mustContainAll(t, "title slide", string(outEntries["ppt/slides/slide0.xml"]), "<a:t>Module 3</a:t>")
-	mustContainAll(t, "first content slide", string(outEntries["ppt/slides/slide2.xml"]), "<a:t>Topic A</a:t>")
-}
-
-func TestMarkLayoutPicturesDecorative_TagVariants(t *testing.T) {
-	t.Parallel()
-
-	e := baseTemplateEntries()
-	e["ppt/slideLayouts/slideLayout1.xml"] = []byte(`<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Title">` +
-		// Self-closing <p:cNvPr .../> with no descr: must gain descr="".
-		`<p:pic><p:nvPicPr><p:cNvPr id="1" name="logo1"/></p:nvPicPr></p:pic>` +
-		// Open <p:cNvPr ...> tag with no descr: must gain descr="".
-		`<p:pic><p:nvPicPr><p:cNvPr id="2" name="logo2"></p:cNvPr></p:nvPicPr></p:pic>` +
-		// Already has a descr: left untouched.
-		`<p:pic><p:nvPicPr><p:cNvPr id="3" name="logo3" descr="Company logo"/></p:nvPicPr></p:pic>` +
-		`</p:cSld></p:sldLayout>`)
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, e); err != nil {
-		t.Fatal(err)
-	}
-	if err := pptx.Render(templatePath, sampleContext(), "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	layout := string(outEntries["ppt/slideLayouts/slideLayout1.xml"])
-
-	mustContainAll(t, "self-closing tag gains descr", layout, `<p:cNvPr id="1" name="logo1" descr=""/>`)
-	mustContainAll(t, "open tag gains descr", layout, `<p:cNvPr id="2" name="logo2" descr="">`)
-	mustContainAll(t, "existing descr left untouched", layout, `<p:cNvPr id="3" name="logo3" descr="Company logo"/>`)
-	if strings.Count(layout, `descr="Company logo"`) != 1 {
-		t.Fatalf("existing descr must not be duplicated: %s", layout)
 	}
 }
 

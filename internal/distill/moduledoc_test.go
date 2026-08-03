@@ -53,16 +53,19 @@ func sampleChapters() []*distill.DistilledContext {
 
 const validMergeResp = `{"overview":"combined overview","objectives":[{"co":1,"text":"obj"}],"vocabulary":[{"term":"fork","definition":"def"}],"theorems":[]}`
 
-func TestBuildModuleDoc_Table(t *testing.T) {
-	t.Parallel()
+type buildModuleDocTestCase struct {
+	name     string
+	llm      *splitLLM
+	chapters func() []*distill.DistilledContext // nil -> sampleChapters()
+	wantErr  bool
+	errLike  string
+	check    func(t *testing.T, doc *distill.ModuleDoc)
+}
 
-	tests := []struct {
-		name    string
-		llm     *splitLLM
-		wantErr bool
-		errLike string
-		check   func(t *testing.T, doc *distill.ModuleDoc)
-	}{
+// buildModuleDocTestCases builds TestBuildModuleDoc_Table's table. Split out from the test
+// function itself to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func buildModuleDocTestCases() []buildModuleDocTestCase {
+	return []buildModuleDocTestCase{
 		{
 			name: "happy path",
 			llm:  &splitLLM{mergeResp: validMergeResp},
@@ -103,27 +106,36 @@ func TestBuildModuleDoc_Table(t *testing.T) {
 			wantErr: true,
 			errLike: "generate proto deck",
 		},
+		{
+			// Chapters with an empty ModuleName fall back to Book for the section's ChapterName.
+			name: "chapter with empty module name falls back to book",
+			llm:  &splitLLM{mergeResp: validMergeResp},
+			chapters: func() []*distill.DistilledContext {
+				chapters := sampleChapters()
+				chapters[0].ModuleName = ""
+				return chapters
+			},
+			check: func(t *testing.T, doc *distill.ModuleDoc) {
+				t.Helper()
+				if doc.Sections[0].ChapterName != "Chapter 1" {
+					t.Fatalf("expected ChapterName to fall back to Book %q, got %q", "Chapter 1", doc.Sections[0].ChapterName)
+				}
+			},
+		},
 	}
+}
 
-	// Chapters with an empty ModuleName fall back to Book for the section's ChapterName.
-	chaptersWithEmptyModuleName := sampleChapters()
-	chaptersWithEmptyModuleName[0].ModuleName = ""
-	t.Run("chapter with empty module name falls back to book", func(t *testing.T) {
-		t.Parallel()
-		doc, err := distill.BuildModuleDoc(context.Background(), &splitLLM{mergeResp: validMergeResp}, "mod1", "Module 1", chaptersWithEmptyModuleName, 3, 8)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if doc.Sections[0].ChapterName != "Chapter 1" {
-			t.Fatalf("expected ChapterName to fall back to Book %q, got %q", "Chapter 1", doc.Sections[0].ChapterName)
-		}
-	})
+func TestBuildModuleDoc_Table(t *testing.T) {
+	t.Parallel()
 
-	for _, tt := range tests {
-
+	for _, tt := range buildModuleDocTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			doc, err := distill.BuildModuleDoc(context.Background(), tt.llm, "mod1", "Module 1", sampleChapters(), 3, 8)
+			chapters := sampleChapters()
+			if tt.chapters != nil {
+				chapters = tt.chapters()
+			}
+			doc, err := distill.BuildModuleDoc(context.Background(), tt.llm, "mod1", "Module 1", chapters, 3, 8)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}

@@ -9,15 +9,17 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
-	t.Parallel()
+type distillTestCase struct {
+	name      string
+	prepare   func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI)
+	wantErr   bool
+	checkFile bool
+}
 
-	tests := []struct {
-		name      string
-		prepare   func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI)
-		wantErr   bool
-		checkFile bool
-	}{
+// distillTestCases builds TestDistillCmdRun_NoSourcesSelected's table. Split out from the test
+// function itself to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func distillTestCases() []distillTestCase {
+	return []distillTestCase{
 		{
 			name: "no sources selected",
 			prepare: func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI) {
@@ -157,9 +159,12 @@ func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range distillTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()

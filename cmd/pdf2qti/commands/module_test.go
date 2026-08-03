@@ -9,15 +9,17 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-func TestModuleCmdRun_Table(t *testing.T) {
-	t.Parallel()
+type moduleTestCase struct {
+	name      string
+	prepare   func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI)
+	wantErr   bool
+	checkFile bool
+}
 
-	tests := []struct {
-		name      string
-		prepare   func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI)
-		wantErr   bool
-		checkFile bool
-	}{
+// moduleTestCases builds TestModuleCmdRun_Table's table. Split out from the test function itself
+// to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func moduleTestCases() []moduleTestCase {
+	return []moduleTestCase{
 		{
 			name: "success",
 			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
@@ -143,9 +145,12 @@ func TestModuleCmdRun_Table(t *testing.T) {
 			wantErr: true,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestModuleCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range moduleTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()

@@ -15,7 +15,11 @@ import (
 	"github.com/jh125486/pdf2qti/internal/config"
 )
 
-const defaultBaseURL = "https://api.openai.com/v1"
+const (
+	defaultBaseURL = "https://api.openai.com/v1"
+	providerOpenAI = "openai"
+	defaultModel   = "gpt-4o"
+)
 
 // Client calls the OpenAI chat completions API.
 type Client struct {
@@ -30,7 +34,7 @@ type Client struct {
 // environment variable named by cfg.APIKeyEnv. Returns an error if the provider isn't
 // "openai" or the key env var is unset/empty.
 func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere (internal/generate.New)
-	if cfg.Provider != "openai" {
+	if cfg.Provider != providerOpenAI {
 		return nil, fmt.Errorf("unsupported provider %q (only \"openai\" is implemented)", cfg.Provider)
 	}
 	keyEnv := cfg.APIKeyEnv
@@ -43,7 +47,7 @@ func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches 
 	}
 	model := cfg.Model
 	if model == "" {
-		model = "gpt-4o"
+		model = defaultModel
 	}
 	return &Client{
 		httpClient:  &http.Client{Timeout: 5 * time.Minute},

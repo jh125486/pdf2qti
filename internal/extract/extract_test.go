@@ -83,6 +83,7 @@ func TestExtractText_PopplerPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	//nolint:gosec // Fixture strings and stub script contents are test data, not credentials.
 	tests := []struct {
 		name        string
 		stubScript  string // empty means no pdftotext stub on PATH at all
@@ -149,6 +150,7 @@ func TestExtractText_PDFLibFallback(t *testing.T) {
 		t.Skip("PATH-stubbing via a shell script assumes a POSIX shell")
 	}
 
+	//nolint:gosec // Fixture text is test data, not credentials.
 	tests := []struct {
 		name      string
 		pdf       []byte
