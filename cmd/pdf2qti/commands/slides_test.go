@@ -4,20 +4,30 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
+// TestSlidesCmdRun_Table covers SlidesCmd.Run, including resolveSlideRange's auto-scaling and
+// clamp behavior (resolveSlideRange itself is unexported, and this package tests commands
+// black-box, so it's exercised indirectly here). The stub outline LLM (stubOutlineJSON) always
+// emits exactly the requested minimum content-slide count, so a case's resulting file's slide
+// count == its resolved minSlides — letting the auto-scaling cases below assert
+// resolveSlideRange's output indirectly but precisely via wantSlideCount.
 func TestSlidesCmdRun_Table(t *testing.T) {
 	t.Parallel()
 
+	// autoMin is the known auto-computed minimum (see distill.AutoSlideRange's -15%/+25% band
+	// and +2 for agenda/summary) for slidesAutoScalingPrepare's 8000-char fixture Text.
+	const autoMin = 19
+
 	tests := []struct {
-		name       string
-		prepare    func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
-		wantErr    bool
-		outputFile string // relative to dir; checked to exist when non-empty and !wantErr
+		name           string
+		prepare        func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
+		wantErr        bool
+		outputFile     string // relative to dir; checked to exist when non-empty and !wantErr
+		wantSlideCount int    // when > 0, outputFile's total "<!-- meta:" slide count must equal this
 	}{
 		{
 			name: "success by id",
@@ -142,6 +152,46 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:           "auto range: both unset gets full auto",
+			prepare:        slidesAutoScalingPrepare(0, 0),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: autoMin,
+		},
+		{
+			name:           "auto range: min explicit within auto max passes through, auto max unaffected",
+			prepare:        slidesAutoScalingPrepare(10, 0),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: 10,
+		},
+		{
+			name:           "auto range: max explicit above auto min passes through, auto min unaffected",
+			prepare:        slidesAutoScalingPrepare(0, 30),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: autoMin,
+		},
+		{
+			// Before the clamp fix, this errored ("invalid slide range") because the auto max
+			// (27) landed below the explicit min.
+			name:           "auto range: min explicit exceeds auto max, auto max clamped up to min",
+			prepare:        slidesAutoScalingPrepare(30, 0),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: 30,
+		},
+		{
+			// Before the clamp fix, this errored ("invalid slide range") because the auto min
+			// (19) landed above the explicit max.
+			name:           "auto range: max explicit below auto min, auto min clamped down to max",
+			prepare:        slidesAutoScalingPrepare(0, 15),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: 15,
+		},
+		{
+			name:           "auto range: both explicit, no auto-scaling involved",
+			prepare:        slidesAutoScalingPrepare(3, 8),
+			outputFile:     "src01_slides.md",
+			wantSlideCount: 3,
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,68 +204,7 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
-			if tt.outputFile != "" {
-				if _, statErr := os.Stat(filepath.Join(dir, tt.outputFile)); statErr != nil {
-					t.Fatalf("expected slides output %q: %v", tt.outputFile, statErr)
-				}
-			}
-		})
-	}
-}
-
-// TestSlidesCmdRun_AutoSlideRange exercises resolveSlideRange's auto-scaling and clamp behavior
-// through the public SlidesCmd.Run API (resolveSlideRange itself is unexported, and this package
-// tests commands black-box). The stub outline LLM (stubOutlineJSON) always emits exactly the
-// requested minimum content-slide count, so the resulting file's slide count == the resolved
-// minSlides — letting these cases assert resolveSlideRange's output indirectly but precisely.
-//
-// The fixture chapter's Text is 8000 chars (20 * charsPerContentSlide), giving a known
-// auto-computed range of minSlides=19, maxSlides=27 (see distill.AutoSlideRange's -15%/+25%
-// band and +2 for agenda/summary) to test against.
-func TestSlidesCmdRun_AutoSlideRange(t *testing.T) {
-	t.Parallel()
-
-	const (
-		autoMin = 19
-		autoMax = 27
-	)
-
-	tests := []struct {
-		name         string
-		minSlides    int
-		maxSlides    int
-		wantSlides   int
-		wantErrOnOld bool // documents that this case errored ("invalid slide range") before the clamp fix
-	}{
-		{name: "both unset: full auto", minSlides: 0, maxSlides: 0, wantSlides: autoMin},
-		{name: "min explicit within auto max: passthrough min, auto max unaffected", minSlides: 10, maxSlides: 0, wantSlides: 10},
-		{name: "max explicit above auto min: auto min unaffected, passthrough max", minSlides: 0, maxSlides: 30, wantSlides: autoMin},
-		{name: "min explicit exceeds auto max: auto max clamped up to min", minSlides: 30, maxSlides: 0, wantSlides: 30, wantErrOnOld: true},
-		{name: "max explicit below auto min: auto min clamped down to max", minSlides: 0, maxSlides: 15, wantSlides: 15, wantErrOnOld: true},
-		{name: "both explicit: no auto-scaling involved", minSlides: 3, maxSlides: 8, wantSlides: 3},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			pdfPath := filepath.Join(dir, "src.pdf")
-			if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfgPath := writeConfigFile(t, dir, pdfPath)
-			writeDistilledContextFileWithText(t, dir, "src01", strings.Repeat("x", 8000))
-
-			cmd := commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: tt.minSlides, MaxSlides: tt.maxSlides}
-			cli := &commands.CLI{Config: cfgPath}
-			if err := cmd.Run(context.Background(), cli); err != nil {
-				t.Fatalf("unexpected error (wantErrOnOld=%v documents pre-fix behavior only): %v", tt.wantErrOnOld, err)
-			}
-
-			outFile := filepath.Join(dir, "src01_slides.md")
-			if got := countSlideMetaMarkers(t, outFile); got != tt.wantSlides {
-				t.Fatalf("slide count = %d, want %d", got, tt.wantSlides)
-			}
+			assertSlidesOutput(t, dir, tt.outputFile, tt.wantErr, tt.wantSlideCount)
 		})
 	}
 }
