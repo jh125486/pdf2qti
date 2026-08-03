@@ -10,12 +10,14 @@ A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LL
 
 ## Overview
 
-`pdf2qti` automates the creation of quiz content for Canvas LMS from existing PDF materials. It:
+`pdf2qti` automates the creation of course content for Canvas LMS from existing PDF materials. It:
 
 - **Extracts** text from PDF documents
-- **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice, Short Answer, Essay, Matching, Numerical) via an LLM provider
-- **Renders** a human-reviewable Markdown draft for editing and approval
-- **Converts** approved drafts to QTI 1.2 XML ready for Canvas import
+- **Distills** each PDF into structured context JSON (concepts, examples, LaTeX-bearing prose) via an LLM provider — the shared input for everything below
+- **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice, Short Answer, Essay, Matching, Numerical) from that context
+- **Renders** a human-reviewable Markdown draft for editing and approval, and converts approved drafts to QTI 1.2 XML ready for Canvas import
+- **Builds** slide-deck Markdown from the same context and renders it into a PPTX using a template
+- **Publishes** Learning Objectives / Materials pages directly to Canvas
 
 ## Features
 
@@ -72,6 +74,13 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
       "chapter": 1,
       "pdf": "pdfs/chapter01.pdf"
     }
+  ],
+  "modules": [
+    {
+      "id": "mod01",
+      "name": "Module 1: Introduction",
+      "sourceIds": ["ch01"]
+    }
   ]
 }
 ```
@@ -83,8 +92,13 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 | `version` | Config schema version (must be `1`) |
 | `defaults` | Global defaults for `quiz`, `generation`, `validation`, and `workflow` |
 | `sources` | Array of PDF sources; each source can override any default |
+| `modules` | Array of modules grouping one or more `sources` (by `sourceIds`) for the `module` command |
 
 Each `source` requires at minimum an `id` and a `pdf` path. All other fields inherit from `defaults`.
+
+Each `module` requires an `id`, a `name`, and `sourceIds` (one or more `source.id` values it spans).
+
+`defaults.workflow.outDir` is where every generated artifact lands: `<id>_context.json` (`distill`), `<id>_quiz.md`/`<id>.qti` (`generate`/`approve`), and `<id>_slides.md` (`slides`). Point it wherever you want that scratch/output tree to live — e.g. `"ctx"` if you'd rather keep it out of an `out/` you use for something else.
 
 ## Usage
 
@@ -94,17 +108,55 @@ pdf2qti [--config <file>] <command>
 
 `--config` / `-c` defaults to `quiz_input.json`.
 
-### `generate` — Extract PDF and create a quiz draft
+### Pipeline overview
+
+`distill` is the shared first step for everything else — it's the only command that reads the
+PDF. Every other command reads the `<outDir>/<id>_context.json` it produces.
+
+```
+                              ┌─→ generate → validate → approve → <id>.qti
+pdf.pdf → distill → context.json
+                              └─→ slides → pptx → <output>.pptx
+
+module <id>  (combines context.json for each source in the module → one slide deck)
+```
+
+A typical end-to-end run for one source:
+
+```bash
+pdf2qti distill ch01              # ctx/ch01_context.json
+pdf2qti generate                  # ctx/ch01_quiz.md   (all sources in config)
+pdf2qti approve                   # ctx/ch01.qti
+
+pdf2qti slides ch01                                    # ctx/ch01_slides.md
+pdf2qti pptx --slides=ctx/ch01_slides.md \
+             --output=out/ch01.pptx template.pptx      # out/ch01.pptx
+```
+
+### `distill` — Extract a PDF into structured context JSON
+
+```bash
+pdf2qti distill ch01 [ch02 ...]   # specific sources
+pdf2qti distill --all             # every source in the config
+```
+
+For each requested source, `distill` extracts the PDF text, calls the configured LLM to
+distill it into structured context (concepts, worked examples, LaTeX-bearing prose, module
+name), and writes `<outDir>/<id>_context.json`. This file is the required input for `generate`,
+`slides`, `page`, `publish`, and `module`. Use `--force` to overwrite an existing context file.
+
+### `generate` — Create a quiz draft from a distilled context
 
 ```bash
 pdf2qti generate [--skip-approve]
 ```
 
-For each source in the config, `generate`:
+Requires `<outDir>/<id>_context.json` to already exist (run `distill` first — `generate` errors
+out with the exact command to run if it's missing). For each source in the config, `generate`:
 
-1. Extracts text from the PDF and writes `<outDir>/<id>_context.md`
-2. Calls the configured LLM to produce TF, MA, and MC questions
-3. Writes a Markdown quiz draft to `<outDir>/<id>_quiz.md` for human review
+1. Loads the distilled context and calls the configured LLM once per question type (TF, MA, MC,
+   SA, ES, MT, NR) using each type's configured count
+2. Writes a Markdown quiz draft to `<outDir>/<id>_quiz.md` for human review
 
 Pass `--skip-approve` to skip the review step and immediately convert the draft to QTI.
 
@@ -123,6 +175,49 @@ pdf2qti approve
 ```
 
 Reads the approved `<outDir>/<id>_quiz.md` and writes a Canvas-compatible QTI 1.2 XML file to `<outDir>/<id>.qti`.
+
+### `slides` — Generate proto-deck slide Markdown from a distilled context
+
+```bash
+pdf2qti slides ch01 [ch02 ...]     # specific sources
+pdf2qti slides --all               # every source in the config
+pdf2qti slides ch01 -o custom.md   # override the output path
+```
+
+Calls the configured LLM to turn `<outDir>/<id>_context.json` into a proto-deck: one slide per
+`<!-- meta -->`-tagged section with a `#` heading and bullet points, `---` between slides.
+LaTeX math is written inline as `\(...\)` and `\begin{bmatrix}...\end{bmatrix}` — these are hand
+-editable Markdown, so review/tweak content before rendering to PPTX. Writes
+`<outDir>/<id>_slides.md` unless `--output` is given. `--min-slides`/`--max-slides` bound the
+deck length (defaults 8/30). Use `--force` to overwrite an existing slide file.
+
+### `pptx` — Render PPTX from slide Markdown and a template
+
+```bash
+pdf2qti pptx --slides=ctx/ch01_slides.md \
+             --output=out/ch01.pptx \
+             -v key=value \
+             template.pptx
+```
+
+Renders the slide Markdown produced by `slides` (or `module`) into a PPTX by cloning the layout
+of the given `<template>` file for each slide. `--slides` and `--output` are required; the
+template path is a positional argument. `-v`/`--vars` passes extra `key=value` template
+variables (`;`-separated for multiple) available inside the template alongside the distilled
+context data.
+
+### `module` — Build a combined slide-deck Markdown doc across chapters
+
+```bash
+pdf2qti module mod01
+```
+
+Reads the `modules` entry with the given `id` from the config, loads the distilled context
+(`<outDir>/<id>_context.json`) for every source in its `sourceIds`, and calls the LLM to
+produce one combined proto-deck spanning all of them — useful when a Canvas module covers more
+than one chapter/PDF. Writes `<outDir>/<module-id>_module.md` (plus an intermediate
+`<module-id>_module.json`). Same `--min-slides`/`--max-slides`/`--force` flags as `slides`. Feed
+the result to `pptx` the same way as a single-source slide deck.
 
 ### `page` — Render HTML from a distilled context
 
