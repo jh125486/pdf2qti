@@ -156,6 +156,9 @@ func (c *Config) Validate() error {
 		if s.PDF == "" {
 			return fmt.Errorf("sources[%d].pdf must not be empty", i)
 		}
+		if sourceIDs[s.ID] {
+			return fmt.Errorf("sources[%d].id %q is duplicated", i, s.ID)
+		}
 		sourceIDs[s.ID] = true
 	}
 	moduleIDs := make(map[string]bool, len(c.Modules))

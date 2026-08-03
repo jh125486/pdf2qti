@@ -409,8 +409,14 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 		rID := fmt.Sprintf("rId%d", nextRID)
 		nextRID++
 
-		parts["[Content_Types].xml"] = addContentTypeOverride(parts["[Content_Types].xml"], slidePartName)
-		parts[presRelsPart] = addPresentationRelationship(parts[presRelsPart], rID, strings.TrimPrefix(slidePartName, "ppt/"))
+		parts["[Content_Types].xml"], err = addContentTypeOverride(parts["[Content_Types].xml"], slidePartName)
+		if err != nil {
+			return nil, err
+		}
+		parts[presRelsPart], err = addPresentationRelationship(parts[presRelsPart], rID, strings.TrimPrefix(slidePartName, "ppt/"))
+		if err != nil {
+			return nil, err
+		}
 
 		presData = insertSldIDAfter(presData, prevRID, strconv.Itoa(nextSldID), rID)
 		sldIDs[i] = strconv.Itoa(nextSldID)
@@ -496,14 +502,20 @@ func maxSldID(data []byte) int {
 	return maxID
 }
 
-func addContentTypeOverride(data []byte, slidePartName string) []byte {
+func addContentTypeOverride(data []byte, slidePartName string) ([]byte, error) {
+	if !bytes.Contains(data, []byte("</Types>")) {
+		return nil, fmt.Errorf("add content-type override for %q: %q has no </Types> marker", slidePartName, "[Content_Types].xml")
+	}
 	entry := fmt.Sprintf(`<Override PartName="/%s" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`, slidePartName)
-	return bytes.Replace(data, []byte("</Types>"), append([]byte(entry), []byte("</Types>")...), 1)
+	return bytes.Replace(data, []byte("</Types>"), append([]byte(entry), []byte("</Types>")...), 1), nil
 }
 
-func addPresentationRelationship(data []byte, rID, target string) []byte {
+func addPresentationRelationship(data []byte, rID, target string) ([]byte, error) {
+	if !bytes.Contains(data, []byte("</Relationships>")) {
+		return nil, fmt.Errorf("add presentation relationship %q: presentation.xml.rels has no </Relationships> marker", rID)
+	}
 	entry := fmt.Sprintf(`<Relationship Id=%q Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target=%q/>`, rID, target)
-	return bytes.Replace(data, []byte("</Relationships>"), append([]byte(entry), []byte("</Relationships>")...), 1)
+	return bytes.Replace(data, []byte("</Relationships>"), append([]byte(entry), []byte("</Relationships>")...), 1), nil
 }
 
 // insertSldIDAfter inserts a new <p:sldId> element immediately after the one whose r:id matches

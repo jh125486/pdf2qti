@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -34,6 +35,9 @@ func (o *Objective) UnmarshalJSON(data []byte) error {
 	}
 	switch v := aux.CO.(type) {
 	case float64:
+		if v != math.Trunc(v) {
+			return fmt.Errorf("objective.co: %v is not an integer", v)
+		}
 		o.CO = int(v)
 	case string:
 		digits := reCODigits.FindString(v)

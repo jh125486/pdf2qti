@@ -3,8 +3,11 @@ package pptx
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
@@ -73,9 +76,18 @@ func insertSectionExt(presData []byte, extXML string) []byte {
 	return bytes.Replace(presData, []byte("</p:presentation>"), []byte(wrapped+"</p:presentation>"), 1)
 }
 
-// newSectionID generates a GUID-formatted id, as PowerPoint's Section schema requires.
+// sectionIDFallbackSeq is only touched when crypto/rand.Read fails, to keep fallback IDs unique
+// within a process even if called multiple times in the same nanosecond.
+var sectionIDFallbackSeq atomic.Uint32
+
+// newSectionID generates a GUID-formatted id, as PowerPoint's Section schema requires. If the
+// system CSPRNG is unavailable, it falls back to a timestamp+counter-derived id instead of
+// silently emitting an all-zero GUID (which would collide across every section in the deck).
 func newSectionID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		binary.BigEndian.PutUint64(b[0:8], uint64(time.Now().UnixNano())) //nolint:gosec // fallback path only; not used for security
+		binary.BigEndian.PutUint32(b[8:12], sectionIDFallbackSeq.Add(1))
+	}
 	return fmt.Sprintf("{%X-%X-%X-%X-%X}", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
