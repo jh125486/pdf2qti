@@ -1,6 +1,9 @@
 package pptx_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -8,6 +11,146 @@ import (
 
 	"github.com/jh125486/pdf2qti/internal/pptx"
 )
+
+// stubPandoc puts an executable named "pandoc" (running script) on a fresh PATH-only directory
+// and points PATH at it, so toOMML's exec.LookPath("pandoc") finds a deterministic stand-in
+// instead of (or in addition to) whatever the real pandoc on this machine would do. Not usable
+// from a t.Parallel() test: mutates PATH via t.Setenv.
+func stubPandoc(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pandoc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// zipBytes builds an in-memory zip archive from name->content pairs, for feeding to a stub
+// pandoc's stdout as fake docx output.
+func zipBytes(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// catScript writes data to a fixture file under dir and returns a shell script that cats it to
+// stdout, standing in for a stub pandoc's binary docx output. Uses an absolute path to cat
+// rather than relying on PATH lookup: stubPandoc's caller overrides PATH down to just the stub
+// directory (so exec.LookPath("pandoc") finds only the stub), which also makes `cat` on its own
+// unresolvable from inside the script — it fails with "command not found" (exit 127), not the
+// intended checksum/parse error, if left unqualified.
+func catScript(t *testing.T, data []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "out.docx")
+	if err := os.WriteFile(fixture, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "#!/bin/sh\n/bin/cat '" + fixture + "'\n"
+}
+
+func renderMathContent(t *testing.T, content string) string {
+	t.Helper()
+	dc := sampleContext()
+	dc.Slides[0].Content = content
+
+	dir := t.TempDir()
+	templatePath := filepath.Join(dir, "template.pptx")
+	outputPath := filepath.Join(dir, "out.pptx")
+	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
+		t.Fatal(err)
+	}
+	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	outEntries, err := readZip(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(outEntries["ppt/slides/slide2.xml"])
+}
+
+// Every math formula used anywhere in this file must be unique: toOMML caches successful
+// conversions in a package-level map keyed by formula text, shared across all tests in this
+// binary regardless of t.Parallel(). Reusing a formula across a "succeeds with real pandoc"
+// test and a "must fall back, pandoc unavailable" test lets the first poison the second's
+// result via the cache, independent of that test's own PATH stubbing.
+
+func TestToOMML_FallbackPaths(t *testing.T) {
+	// Not t.Parallel(): each case stubs PATH via t.Setenv.
+
+	tests := []struct {
+		name   string
+		script string
+	}{
+		{name: "pandoc present but exits nonzero", script: "#!/bin/sh\nexit 1\n"},
+		{name: "pandoc emits non-zip garbage", script: "#!/bin/sh\nprintf 'not a zip file'\n"},
+		{
+			name: "pandoc emits valid zip with no word/document.xml",
+			script: func() string {
+				z := zipBytes(t, map[string]string{"other.xml": "<root/>"})
+				return catScript(t, z)
+			}(),
+		},
+		{
+			name: "pandoc emits valid docx with no m:oMath in document.xml",
+			script: func() string {
+				z := zipBytes(t, map[string]string{"word/document.xml": "<w:document><w:body>plain</w:body></w:document>"})
+				return catScript(t, z)
+			}(),
+		},
+		{
+			// A syntactically-valid zip whose word/document.xml entry fails its CRC-32 checksum
+			// on read — distinct from "non-zip garbage" above, which fails earlier at
+			// zip.NewReader itself.
+			name: "pandoc emits docx whose document.xml fails checksum on read",
+			script: catScript(t, zipBytesWithCorruptEntry(
+				map[string][]byte{"word/document.xml": []byte("<w:document><w:body>plain</w:body></w:document>")},
+				"word/document.xml",
+			)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
+			stubPandoc(t, tt.script)
+			contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+			mustContainAll(t, "fallback text", contentSlide, "m^7")
+			if strings.Contains(contentSlide, "mc:AlternateContent") {
+				t.Fatalf("expected graceful fallback (no math markup), got: %s", contentSlide)
+			}
+		})
+	}
+}
+
+func TestToOMML_CacheHit(t *testing.T) {
+	// Not t.Parallel(): relies on real pandoc via PATH untouched, gated by hasPandoc; kept
+	// non-parallel for consistency with the other PATH-sensitive math tests in this file.
+	if !hasPandoc(t) {
+		t.Skip("pandoc not available on PATH")
+	}
+
+	// Same formula twice: the second occurrence must hit toOMML's cache instead of re-invoking
+	// pandoc, and still render identical math markup.
+	contentSlide := renderMathContent(t, "Point 1\nSee \\(k^5\\) and again \\(k^5\\) for details")
+	if got := strings.Count(contentSlide, "m:oMath"); got < 2 {
+		t.Fatalf("expected repeated formula to render twice (cache hit reuses the same OMML), got %d occurrences: %s", got, contentSlide)
+	}
+}
 
 // hasPandoc reports whether pandoc is on PATH, so math tests can assert real OMML output when
 // it's available and graceful-fallback behavior otherwise, without failing in either environment.
@@ -133,8 +276,15 @@ func TestMathConverter_UnavailableFallsBackGracefully(t *testing.T) {
 	// Rendering a formula when the converter can't find pandoc must degrade to plain escaped
 	// text, not error — exercised indirectly via a real Render call with an empty PATH, since
 	// the converter type and its cache are unexported.
+	//
+	// Formula must be unique across this file (see the cache-collision note above
+	// TestToOMML_FallbackPaths): this one used to share "x^2" with
+	// TestRender_BoldWrappedMathStillConverts, which — when it runs first with real pandoc
+	// available — poisons the shared cache and makes this test flakily see cached real OMML
+	// instead of exercising the fallback path at all. Only surfaced under `-shuffle=on`, since
+	// plain `go test`'s fixed ordering happened to always run this after the parallel tests.
 	dc := sampleContext()
-	dc.Slides[0].Content = "See \\(x^2\\) here"
+	dc.Slides[0].Content = "See \\(n^3\\) here"
 
 	dir := t.TempDir()
 	templatePath := filepath.Join(dir, "template.pptx")
@@ -153,7 +303,7 @@ func TestMathConverter_UnavailableFallsBackGracefully(t *testing.T) {
 		t.Fatal(err)
 	}
 	contentSlide := string(outEntries["ppt/slides/slide2.xml"])
-	mustContainAll(t, "content slide with no pandoc on PATH", contentSlide, "x^2")
+	mustContainAll(t, "content slide with no pandoc on PATH", contentSlide, "n^3")
 	if strings.Contains(contentSlide, "mc:AlternateContent") {
 		t.Fatalf("expected no math markup with empty PATH, got: %s", contentSlide)
 	}
