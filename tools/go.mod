@@ -1,4 +1,4 @@
-module github.com/jh125486/pdf2qti
+module github.com/jh125486/pdf2qti/tools
 
 go 1.26.1
 

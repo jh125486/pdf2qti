@@ -1,4 +1,4 @@
-module github.com/jh12546/pdf2qti/golangci-lint
+module github.com/jh125486/pdf2qti/tools/golangci-lint
 
 go 1.26.1
 
