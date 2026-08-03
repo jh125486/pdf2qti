@@ -107,6 +107,69 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// No titleTemplate and an empty module_name/source-name both fall through: the
+			// title-fallback loop walks all three candidates (dc.ModuleName, src.Name, src.ID),
+			// landing on src.ID.
+			name: "empty title template falls back through candidates to source id",
+			prepare: func(t *testing.T, dir string) string {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeContextFile(t, dir) // module_name: ""
+				cfgFile := filepath.Join(dir, "quiz.json")
+				cfgJSON := `{"version":1,"defaults":{"quiz":{"counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
+				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return cfgFile
+			},
+		},
+		{
+			// outDir's parent path component ("blocker") is pre-created as a regular file, so
+			// os.MkdirAll(outDir, ...) fails with "not a directory".
+			name: "create outDir error",
+			prepare: func(t *testing.T, dir string) string {
+				t.Helper()
+				blocker := filepath.Join(dir, "blocker")
+				if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				outDir := filepath.Join(blocker, "nested")
+				cfgFile := filepath.Join(dir, "quiz.json")
+				cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + outDir + `"}},"sources":[{"id":"src01","pdf":"src01.pdf"}]}`
+				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return cfgFile
+			},
+			wantErr: true,
+		},
+		{
+			// Pre-creating a directory at the quiz output path makes os.WriteFile fail,
+			// exercising the write-quiz-file error branch.
+			name: "write quiz file error, output path is a directory",
+			prepare: func(t *testing.T, dir string) string {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeContextFile(t, dir)
+				if err := os.Mkdir(filepath.Join(dir, "src01_quiz.md"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				cfgFile := filepath.Join(dir, "quiz.json")
+				cfgJSON := `{"version":1,"defaults":{"quiz":{"titleTemplate":"Test Quiz","counts":{"tf":1,"mc":1}},"workflow":{"outDir":"` + dir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
+				if err := os.WriteFile(cfgFile, []byte(cfgJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return cfgFile
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

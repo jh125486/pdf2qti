@@ -102,6 +102,46 @@ func TestModuleCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// Pre-creating a directory at the module JSON output path makes SaveModuleDoc's
+			// os.WriteFile fail.
+			name: "save module doc error, json output path is a directory",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				writeDistilledContextFileWithID(t, dir, "src02")
+				if err := os.Mkdir(filepath.Join(dir, "mod1_module.json"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			// Pre-creating a directory at the module Markdown output path makes
+			// SaveModuleMarkdown's os.WriteFile fail.
+			name: "save module markdown error, md output path is a directory",
+			prepare: func(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				writeDistilledContextFileWithID(t, dir, "src02")
+				if err := os.Mkdir(filepath.Join(dir, "mod1_module.md"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

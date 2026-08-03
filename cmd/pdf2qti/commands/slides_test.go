@@ -141,6 +141,40 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			// MinSlides > MaxSlides makes GenerateProtoDeck reject the range before ever
+			// calling the LLM.
+			name: "generate proto deck error, invalid slide range",
+			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 10, MaxSlides: 3}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			// Pre-creating a directory at the output path makes os.WriteFile fail.
+			name: "write slides error, output path is a directory",
+			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				if err := os.Mkdir(filepath.Join(dir, "src01_slides.md"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

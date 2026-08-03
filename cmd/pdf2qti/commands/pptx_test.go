@@ -92,6 +92,44 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "course_name var overrides config course name",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
+				outPath := filepath.Join(dir, "out.pptx")
+				return commands.PPTXCmd{
+					Slides: slidesPath, Template: realPPTXTemplate, Output: outPath,
+					Vars: map[string]string{"course_name": "Override University"},
+				}
+			},
+			verify: func(t *testing.T, dir string) {
+				t.Helper()
+				titleSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(titleSlide), "Override University") {
+					t.Fatalf("expected title slide to contain course_name var override, got: %q", string(titleSlide))
+				}
+				if strings.Contains(string(titleSlide), "Test University") {
+					t.Fatalf("expected config course name to be overridden, got: %q", string(titleSlide))
+				}
+			},
+		},
+		{
+			name: "render pptx error, template not a valid pptx",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
+				badTemplate := filepath.Join(dir, "bad_template.pptx")
+				if err := os.WriteFile(badTemplate, []byte("not a zip"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.PPTXCmd{Slides: slidesPath, Template: badTemplate, Output: filepath.Join(dir, "out.pptx")}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

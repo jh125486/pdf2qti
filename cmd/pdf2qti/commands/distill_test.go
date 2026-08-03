@@ -105,6 +105,57 @@ func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
 			},
 			checkFile: true,
 		},
+		{
+			// outDir's parent path component ("blocker") is pre-created as a regular file, so
+			// os.MkdirAll(outDir, ...) fails with "not a directory".
+			name: "create outDir error",
+			prepare: func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(hello from chapter text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				blocker := filepath.Join(dir, "blocker")
+				if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				outDir := filepath.Join(blocker, "nested")
+				cfgPath := filepath.Join(dir, "quiz.json")
+				cfgJSON := `{"version":1,"defaults":{"workflow":{"outDir":"` + outDir + `"}},"sources":[{"id":"src01","pdf":"` + pdfPath + `"}]}`
+				if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.DistillCmd{All: true}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			name: "extract PDF error, source file missing",
+			prepare: func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI) {
+				t.Helper()
+				cfgPath := writeConfigFile(t, dir, filepath.Join(dir, "does_not_exist.pdf"))
+				return commands.DistillCmd{All: true}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			// Pre-creating a directory at the context output path makes distill.Save's
+			// os.WriteFile fail, exercising the "save context" error branch.
+			name: "save context error, output path is a directory",
+			prepare: func(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src01.pdf")
+				if err := os.WriteFile(pdfPath, []byte("(hello from chapter text)"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				if err := os.Mkdir(filepath.Join(dir, "src01_context.json"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return commands.DistillCmd{All: true}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
