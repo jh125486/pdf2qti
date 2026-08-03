@@ -210,44 +210,46 @@ func TestRepairJSONEscapes_AdjacentValidAndInvalidEscapes(t *testing.T) {
 	}
 }
 
-// TestUnmarshalRepaired_AlreadyValidEscapeNotOverDoubled is the regression test for the
-// ch01_slides.md slide-3 bug: a model response containing "\\overrightarrow" (a genuine, already
-// -correct JSON escape for a single literal backslash immediately followed by an unrelated LaTeX
-// command) parses as valid JSON on its own. repairJSONEscapes can't tell that "\\" apart from two
-// independent raw backslashes each needing doubling, and mangles it into two literal backslashes
-// if run unconditionally. unmarshalRepaired must only reach for repairJSONEscapes when the raw
-// response fails to parse as-is, so this case is decoded correctly without ever invoking it.
-func TestUnmarshalRepaired_AlreadyValidEscapeNotOverDoubled(t *testing.T) {
+// TestUnmarshalRepaired_Table covers unmarshalRepaired's two paths: raw input that's already
+// valid JSON must be decoded as-is without ever reaching repairJSONEscapes (the regression case
+// for the ch01_slides.md slide-3 bug — a model response containing "\\overrightarrow", a genuine,
+// already-correct JSON escape for a single literal backslash immediately followed by an unrelated
+// LaTeX command, that repairJSONEscapes can't tell apart from two independent raw backslashes
+// each needing doubling, and would mangle into two literal backslashes if run unconditionally);
+// and raw input that fails to parse must still fall back to repairJSONEscapes exactly as it
+// always has.
+func TestUnmarshalRepaired_Table(t *testing.T) {
 	t.Parallel()
 
-	raw := `{"text":"directed line segment \\(\\overrightarrow{AB}\\)"}`
-	var out struct {
-		Text string `json:"text"`
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "already-valid escape decoded as-is, not over-doubled",
+			raw:  `{"text":"directed line segment \\(\\overrightarrow{AB}\\)"}`,
+			want: `directed line segment \(\overrightarrow{AB}\)`,
+		},
+		{
+			name: "broken raw JSON falls back to repairJSONEscapes",
+			raw:  `{"text":"\overrightarrow{AB}"}`,
+			want: `\overrightarrow{AB}`,
+		},
 	}
-	if err := unmarshalRepaired(raw, &out); err != nil {
-		t.Fatalf("unmarshalRepaired: %v", err)
-	}
-	want := `directed line segment \(\overrightarrow{AB}\)`
-	if out.Text != want {
-		t.Fatalf("got %q, want %q", out.Text, want)
-	}
-}
 
-// TestUnmarshalRepaired_FallsBackOnBrokenRawJSON confirms unmarshalRepaired still repairs
-// genuinely broken input (raw, unescaped LaTeX backslashes that fail to parse as JSON on their
-// own) exactly as repairJSONEscapes always has — the fallback path, not just the fast path.
-func TestUnmarshalRepaired_FallsBackOnBrokenRawJSON(t *testing.T) {
-	t.Parallel()
-
-	raw := `{"text":"\overrightarrow{AB}"}`
-	var out struct {
-		Text string `json:"text"`
-	}
-	if err := unmarshalRepaired(raw, &out); err != nil {
-		t.Fatalf("unmarshalRepaired: %v", err)
-	}
-	want := `\overrightarrow{AB}`
-	if out.Text != want {
-		t.Fatalf("got %q, want %q", out.Text, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var out struct {
+				Text string `json:"text"`
+			}
+			if err := unmarshalRepaired(tt.raw, &out); err != nil {
+				t.Fatalf("unmarshalRepaired: %v", err)
+			}
+			if out.Text != tt.want {
+				t.Fatalf("got %q, want %q", out.Text, tt.want)
+			}
+		})
 	}
 }
