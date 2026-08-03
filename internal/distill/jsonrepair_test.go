@@ -210,14 +210,17 @@ func TestRepairJSONEscapes_AdjacentValidAndInvalidEscapes(t *testing.T) {
 	}
 }
 
-// TestUnmarshalRepaired_Table covers unmarshalRepaired's two paths: raw input that's already
-// valid JSON must be decoded as-is without ever reaching repairJSONEscapes (the regression case
-// for the ch01_slides.md slide-3 bug — a model response containing "\\overrightarrow", a genuine,
-// already-correct JSON escape for a single literal backslash immediately followed by an unrelated
-// LaTeX command, that repairJSONEscapes can't tell apart from two independent raw backslashes
-// each needing doubling, and would mangle into two literal backslashes if run unconditionally);
-// and raw input that fails to parse must still fall back to repairJSONEscapes exactly as it
-// always has.
+// TestUnmarshalRepaired_Table covers unmarshalRepaired's paths: raw input that's already valid
+// JSON with no ambiguous control escape must be decoded as-is without ever reaching
+// repairJSONEscapes (the regression case for the ch01_slides.md slide-3 bug — a model response
+// containing "\\overrightarrow", a genuine, already-correct JSON escape for a single literal
+// backslash immediately followed by an unrelated LaTeX command, that repairJSONEscapes can't tell
+// apart from two independent raw backslashes each needing doubling, and would mangle into two
+// literal backslashes if run unconditionally); raw input that fails to parse must fall back to
+// repairJSONEscapes; and — critically — raw input containing an ambiguous control escape
+// (b/f/n/r/t) must ALSO always fall back to repairJSONEscapes even though it parses successfully
+// on its own, since trusting that parse is exactly the bug class repairJSONEscapes exists to
+// catch (\nabla/\times/\begin/\frac/\right decoding into a control byte plus mangled text).
 func TestUnmarshalRepaired_Table(t *testing.T) {
 	t.Parallel()
 
@@ -235,6 +238,21 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 			name: "broken raw JSON falls back to repairJSONEscapes",
 			raw:  `{"text":"\overrightarrow{AB}"}`,
 			want: `\overrightarrow{AB}`,
+		},
+		{
+			name: "ambiguous control escape (nabla) repaired despite parsing successfully as-is",
+			raw:  `{"text":"gradient \nabla f is zero"}`,
+			want: `gradient \nabla f is zero`,
+		},
+		{
+			name: "ambiguous control escape (times) repaired despite parsing successfully as-is",
+			raw:  `{"text":"3 \times 4"}`,
+			want: `3 \times 4`,
+		},
+		{
+			name: "ambiguous control escape (begin) repaired despite parsing successfully as-is",
+			raw:  `{"text":"\begin{bmatrix} 1 \end{bmatrix}"}`,
+			want: `\begin{bmatrix} 1 \end{bmatrix}`,
 		},
 	}
 
