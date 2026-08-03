@@ -63,6 +63,81 @@ func TestDistill_Table(t *testing.T) {
 	}
 }
 
+// chunkAwareLLM distinguishes the chunk-condensing, final-synthesis, and consistency-check
+// prompts by content, like stubModuleLLM in cmd/pdf2qti/commands/module.go does for its two
+// prompt shapes.
+type chunkAwareLLM struct {
+	digestCalls int
+	verifyCalls int
+}
+
+func (c *chunkAwareLLM) Complete(_ context.Context, prompt string) (string, error) {
+	switch {
+	case strings.Contains(prompt, "pre-processing part"):
+		c.digestCalls++
+		return "DIGEST", nil
+	case strings.Contains(prompt, "checking one already-distilled"):
+		c.verifyCalls++
+		return `{"vocabulary":[],"sections":[],"warnings":["dummy warning"]}`, nil
+	default:
+		dc := distill.DistilledContext{ModuleName: "Vectors", Text: "short synthesized text", Overview: "<p>Overview</p>"}
+		b, _ := json.Marshal(dc)
+		return string(b), nil
+	}
+}
+
+func TestDistill_LargeChapterUsesCondensedTextVerbatim(t *testing.T) {
+	t.Parallel()
+
+	src := &config.Source{ID: "ch01", Name: "Vectors and Matrices", Chapter: 1, PDF: "ch01.pdf"}
+	// Paragraphs so splitIntoChunks can pack them without a mid-paragraph hard split, and large
+	// enough (with maxDirectChars=70000) to force the condense path.
+	para := strings.Repeat("a", 500)
+	var paras []string
+	for i := 0; i < 200; i++ {
+		paras = append(paras, para)
+	}
+	chapterText := strings.Join(paras, "\n\n")
+
+	llm := &chunkAwareLLM{}
+	dc, err := distill.Distill(context.Background(), src, nil, llm, chapterText)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if llm.digestCalls == 0 {
+		t.Fatal("expected chunking to occur for a large chapterText, got 0 digest calls")
+	}
+	if dc.Text == "short synthesized text" {
+		t.Fatal("expected condensed digest text, got the (discarded) synthesis-call text field")
+	}
+	if !strings.Contains(dc.Text, "DIGEST") {
+		t.Fatalf("expected dc.Text to contain condensed digests, got %q", dc.Text)
+	}
+	if llm.verifyCalls != 1 {
+		t.Fatalf("expected exactly 1 consistency check call for a chunked chapter, got %d", llm.verifyCalls)
+	}
+	if len(dc.VerificationWarnings) != 1 || dc.VerificationWarnings[0] != "dummy warning" {
+		t.Fatalf("expected verification warnings to be surfaced on DistilledContext, got %v", dc.VerificationWarnings)
+	}
+}
+
+func TestDistill_SmallChapterSkipsConsistencyCheck(t *testing.T) {
+	t.Parallel()
+
+	src := &config.Source{ID: "ch01", Name: "Vectors and Matrices", Chapter: 1, PDF: "ch01.pdf"}
+	llm := &chunkAwareLLM{}
+	dc, err := distill.Distill(context.Background(), src, nil, llm, "a short chapter, well under the chunking threshold")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if llm.verifyCalls != 0 {
+		t.Fatalf("expected no consistency check call for a small chapter, got %d", llm.verifyCalls)
+	}
+	if len(dc.VerificationWarnings) != 0 {
+		t.Fatalf("expected no verification warnings for a small chapter, got %v", dc.VerificationWarnings)
+	}
+}
+
 func TestLoadSave_Table(t *testing.T) {
 	t.Parallel()
 

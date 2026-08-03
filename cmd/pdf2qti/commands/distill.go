@@ -32,8 +32,8 @@ func (d *DistillCmd) Run(ctx context.Context, cli *CLI) error {
 		return fmt.Errorf("no sources selected; specify source IDs or use --all")
 	}
 
-	llm := &stubDistillLLM{}
 	for _, src := range sources {
+		llm := selectLLM(cfg.EffectiveGeneration(src), logger, &stubDistillLLM{})
 		if err := runDistillSource(ctx, cfg, src, logger, llm, d.Force); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
@@ -88,6 +88,10 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 	dc, err := distill.Distill(ctx, src, cfg.CourseObjectives, llm, text)
 	if err != nil {
 		return fmt.Errorf("distill: %w", err)
+	}
+
+	if len(dc.VerificationWarnings) > 0 {
+		logger.Warn("consistency check found unresolved issues", "source", src.ID, "count", len(dc.VerificationWarnings))
 	}
 
 	if err := distill.Save(ctxFile, dc); err != nil {

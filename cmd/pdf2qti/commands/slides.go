@@ -1,0 +1,116 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/jh125486/pdf2qti/internal/audit"
+	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
+)
+
+// SlidesCmd generates proto-deck slide Markdown from one or more already-distilled chapters.
+// It's the first half of a two-command pipeline: `slides` (context -> Markdown) feeds `pptx`
+// (Markdown + template -> .pptx) as a separate step, so a deck can also be hand-written or
+// hand-edited between the two without needing a distilled context at all.
+type SlidesCmd struct {
+	Force     bool     `help:"Overwrite existing output file."  name:"force"`
+	All       bool     `help:"Generate slides for all sources." name:"all"`
+	MinSlides int      `default:"8"                             help:"Minimum total slides in the deck."`
+	MaxSlides int      `default:"30"                            help:"Maximum total slides in the deck."`
+	Output    string   `help:"Output Markdown file path."       short:"o"`
+	IDs       []string `arg:""                                  help:"Source IDs to build a deck from."  optional:""`
+}
+
+// Run executes the slides command.
+func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	logger := audit.New(logOutput)
+
+	srcs := s.selectSources(cfg)
+	if len(srcs) == 0 {
+		return fmt.Errorf("no sources selected; specify source IDs or use --all")
+	}
+
+	outFile := s.Output
+	if outFile == "" {
+		outFile = filepath.Join(cfg.OutDir(srcs[0]), srcs[0].ID+"_slides.md")
+	}
+	if !s.Force {
+		if _, err := os.Stat(outFile); err == nil {
+			return fmt.Errorf("output file already exists: %q — use --force to overwrite", outFile)
+		}
+	}
+
+	chapters := make([]distill.ProtoChapterInput, len(srcs))
+	tags := make([]string, len(srcs))
+	for i, src := range srcs {
+		ctxFile := filepath.Join(cfg.OutDir(src), src.ID+"_context.json")
+		dc, err := distill.Load(ctxFile)
+		if err != nil {
+			return fmt.Errorf("load context for source %q (run distill for it first): %w", src.ID, err)
+		}
+		chapters[i] = distill.ProtoChapterInput{
+			Tag:           src.ID,
+			ModuleName:    dc.ModuleName,
+			Overview:      dc.Overview,
+			KeyConcepts:   dc.KeyConcepts,
+			TeachingNotes: dc.TeachingNotes,
+			Text:          dc.Text,
+		}
+		tags[i] = src.ID
+	}
+
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubSlidesLLM{chapterTags: tags})
+	logger.Info("generating slide deck", "sources", len(chapters), "minSlides", s.MinSlides, "maxSlides", s.MaxSlides)
+	deck, err := distill.GenerateProtoDeck(ctx, llm, chapters, s.MinSlides, s.MaxSlides)
+	if err != nil {
+		return fmt.Errorf("generate proto deck: %w", err)
+	}
+
+	if err := os.WriteFile(outFile, []byte(deck), 0o600); err != nil {
+		return fmt.Errorf("write slides %q: %w", outFile, err)
+	}
+	logger.Info("wrote slides", "file", outFile)
+	return nil
+}
+
+func (s *SlidesCmd) selectSources(cfg *config.Config) []*config.Source {
+	if s.All {
+		ptrs := make([]*config.Source, len(cfg.Sources))
+		for i := range cfg.Sources {
+			ptrs[i] = &cfg.Sources[i]
+		}
+		return ptrs
+	}
+	if len(s.IDs) == 0 {
+		return nil
+	}
+	idSet := make(map[string]bool, len(s.IDs))
+	for _, id := range s.IDs {
+		idSet[id] = true
+	}
+	var ptrs []*config.Source
+	for i := range cfg.Sources {
+		if idSet[cfg.Sources[i].ID] {
+			ptrs = append(ptrs, &cfg.Sources[i])
+		}
+	}
+	return ptrs
+}
+
+// stubSlidesLLM is a placeholder LLM for the slides command, used only when no real provider key
+// is configured (see selectLLM). SlidesCmd only ever issues GenerateProtoDeck's three prompt
+// shapes (see stubProtoDeckShape in llm.go), unlike ModuleCmd, which also issues a JSON-merge
+// prompt.
+type stubSlidesLLM struct{ chapterTags []string }
+
+func (s *stubSlidesLLM) Complete(_ context.Context, prompt string) (string, error) {
+	resp, _ := stubProtoDeckShape(prompt, s.chapterTags)
+	return resp, nil
+}

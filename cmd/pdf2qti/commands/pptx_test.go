@@ -3,6 +3,7 @@ package commands_test
 import (
 	"archive/zip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,20 @@ import (
 
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
+
+const realPPTXTemplate = "../../../internal/pptx/testdata/template.pptx"
+
+// writePPTXConfigFile writes a minimal valid config with the given courseName and returns its
+// path. PPTXCmd loads config for CourseName alone, so the config doesn't need real sources.
+func writePPTXConfigFile(t *testing.T, dir, courseName string) string {
+	t.Helper()
+	cfgPath := filepath.Join(dir, "quiz.json")
+	cfgJSON := fmt.Sprintf(`{"version":1,"courseName":%q,"sources":[{"id":"src01","pdf":"unused.pdf"}]}`, courseName)
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
 
 func TestPPTXCmdRun_Table(t *testing.T) {
 	t.Parallel()
@@ -25,30 +40,55 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			name: "success",
 			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
 				t.Helper()
-				contextPath := filepath.Join(dir, "src01_context.json")
-				writeDistilledContextFile(t, dir)
-				templatePath := filepath.Join(dir, "template.pptx")
+				slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
 				outPath := filepath.Join(dir, "out.pptx")
-				if err := writePPTXTemplate(templatePath, `<a:t>{{.module_name}}</a:t>`); err != nil {
-					t.Fatal(err)
-				}
-				return commands.PPTXCmd{Context: contextPath, Template: templatePath, Output: outPath}
+				return commands.PPTXCmd{Slides: slidesPath, Template: realPPTXTemplate, Output: outPath}
 			},
 			verify: func(t *testing.T, dir string) {
 				t.Helper()
-				slideText, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
+				titleSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(string(slideText), "Module 1") {
-					t.Fatalf("expected rendered module name, got: %q", string(slideText))
+				for _, want := range []string{"Module 1", "Test University"} {
+					if !strings.Contains(string(titleSlide), want) {
+						t.Fatalf("expected title slide to contain %q, got: %q", want, string(titleSlide))
+					}
+				}
+
+				agendaSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide2.xml")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, bullet := range []string{"Topic A", "Topic B", "Topic C"} {
+					if !strings.Contains(string(agendaSlide), bullet) {
+						t.Fatalf("expected agenda slide to contain %q, got: %q", bullet, string(agendaSlide))
+					}
+				}
+
+				for _, slidePart := range []string{"ppt/slides/slide3.xml", "ppt/slides/slide4.xml", "ppt/slides/slide5.xml"} {
+					if _, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), slidePart); err != nil {
+						t.Fatalf("expected generated content slide %q: %v", slidePart, err)
+					}
 				}
 			},
 		},
 		{
-			name: "load context error",
+			name: "read slides error",
 			prepare: func(_ *testing.T, _ string) commands.PPTXCmd {
-				return commands.PPTXCmd{Context: "/no/context.json", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}
+				return commands.PPTXCmd{Slides: "/no/slides.md", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "unparseable slides markdown",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := filepath.Join(dir, "bad_slides.md")
+				if err := os.WriteFile(slidesPath, []byte("no meta markers here"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.PPTXCmd{Slides: slidesPath, Template: realPPTXTemplate, Output: filepath.Join(dir, "out.pptx")}
 			},
 			wantErr: true,
 		},
@@ -59,8 +99,9 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
+			cfgPath := writePPTXConfigFile(t, dir, "Test University")
 			cmd := tt.prepare(t, dir)
-			err := cmd.Run(context.Background(), &commands.CLI{})
+			err := cmd.Run(context.Background(), &commands.CLI{Config: cfgPath})
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -71,51 +112,33 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 	}
 }
 
+func TestPPTXCmdRun_BadConfig(t *testing.T) {
+	t.Parallel()
+	err := (&commands.PPTXCmd{Slides: "/no/slides.md", Template: "/no/template.pptx", Output: "/tmp/out.pptx"}).
+		Run(context.Background(), &commands.CLI{Config: "/no/such/quiz.json"})
+	if err == nil {
+		t.Fatal("expected error for missing config")
+	}
+}
+
 func TestExecute_PPTXCommandSuccess(t *testing.T) {
 	dir := t.TempDir()
-	writeDistilledContextFile(t, dir)
-	templatePath := filepath.Join(dir, "template.pptx")
+	cfgPath := writePPTXConfigFile(t, dir, "Test University")
+	slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
 	outPath := filepath.Join(dir, "out.pptx")
-	if err := writePPTXTemplate(templatePath, `<a:t>{{.module_name}}</a:t>`); err != nil {
-		t.Fatal(err)
-	}
 
 	withArgs(t, []string{
 		"pdf2qti",
-		"--config", filepath.Join(dir, "unused.json"),
+		"--config", cfgPath,
 		"pptx",
-		"--context", filepath.Join(dir, "src01_context.json"),
+		"--slides", slidesPath,
 		"--output", outPath,
-		templatePath,
+		realPPTXTemplate,
 	})
 
 	if err := commands.Execute(); err != nil {
 		t.Fatalf("unexpected execute error: %v", err)
 	}
-}
-
-func writePPTXTemplate(path, slideXML string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	zw := zip.NewWriter(f)
-	entries := map[string]string{
-		"[Content_Types].xml":   `<?xml version="1.0"?><Types></Types>`,
-		"ppt/slides/slide1.xml": slideXML,
-	}
-	for name, body := range entries {
-		w, err := zw.Create(name)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write([]byte(body)); err != nil {
-			return err
-		}
-	}
-	return zw.Close()
 }
 
 func readPPTXEntry(path, entry string) ([]byte, error) {

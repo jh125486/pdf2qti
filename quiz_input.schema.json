@@ -10,6 +10,10 @@
       "enum": [1],
       "description": "Config schema version (must be 1)"
     },
+    "courseName": {
+      "type": "string",
+      "description": "Course-wide display name, used to fill the subtitle placeholder on generated PPTX title slides"
+    },
     "defaults": {
       "$ref": "#/definitions/defaults"
     },
@@ -17,6 +21,10 @@
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/definitions/source" }
+    },
+    "modules": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/module" }
     }
   },
   "definitions": {
@@ -99,6 +107,19 @@
         "generation": { "$ref": "#/definitions/generation" },
         "validation": { "$ref": "#/definitions/validation" },
         "workflow": { "$ref": "#/definitions/workflow" }
+      }
+    },
+    "module": {
+      "type": "object",
+      "required": ["id", "name", "sourceIds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "sourceIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     }
   }

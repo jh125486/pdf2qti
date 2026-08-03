@@ -1,0 +1,91 @@
+package commands
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/jh125486/pdf2qti/internal/audit"
+	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
+)
+
+// ModuleCmd builds a combined Markdown document (and JSON) for a module spanning one or more
+// already-distilled chapters.
+type ModuleCmd struct {
+	Force     bool   `help:"Overwrite existing module doc." name:"force"`
+	MinSlides int    `default:"8"                           help:"Minimum total slides in the module deck."`
+	MaxSlides int    `default:"30"                          help:"Maximum total slides in the module deck."`
+	ID        string `arg:""                                help:"Module ID from config."`
+}
+
+// Run executes the module command.
+func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
+	cfg, err := config.Load(cli.Config)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	logger := audit.New(logOutput)
+
+	mod, err := cfg.ModuleByID(m.ID)
+	if err != nil {
+		return err
+	}
+	srcs, err := cfg.SourcesForModule(mod)
+	if err != nil {
+		return err
+	}
+
+	outDir := cfg.OutDir(srcs[0])
+	docFile := filepath.Join(outDir, mod.ID+"_module.json")
+	mdFile := filepath.Join(outDir, mod.ID+"_module.md")
+	if !m.Force {
+		if _, err := os.Stat(mdFile); err == nil {
+			return fmt.Errorf("module doc already exists: %q — use --force to overwrite", mdFile)
+		}
+	}
+
+	chapters := make([]*distill.DistilledContext, len(srcs))
+	tags := make([]string, len(srcs))
+	for i, src := range srcs {
+		ctxFile := filepath.Join(cfg.OutDir(src), src.ID+"_context.json")
+		dc, err := distill.Load(ctxFile)
+		if err != nil {
+			return fmt.Errorf("load context for source %q (run distill for it first): %w", src.ID, err)
+		}
+		chapters[i] = dc
+		tags[i] = src.ID
+	}
+
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubModuleLLM{chapterTags: tags})
+	logger.Info("building module doc", "module", mod.ID, "sources", len(chapters))
+	doc, err := distill.BuildModuleDoc(ctx, llm, mod.ID, mod.Name, chapters, m.MinSlides, m.MaxSlides)
+	if err != nil {
+		return fmt.Errorf("build module doc: %w", err)
+	}
+
+	if err := distill.SaveModuleDoc(docFile, doc); err != nil {
+		return fmt.Errorf("save module doc: %w", err)
+	}
+	if err := distill.SaveModuleMarkdown(mdFile, distill.RenderModuleMarkdown(doc)); err != nil {
+		return fmt.Errorf("save module markdown: %w", err)
+	}
+	logger.Info("wrote module doc", "json", docFile, "markdown", mdFile)
+	return nil
+}
+
+// stubModuleLLM is a placeholder LLM for the module command. Unlike stubDistillLLM (which only
+// ever answers one prompt shape), BuildModuleDoc issues several different prompts against the
+// same LLM — a JSON-merge prompt plus GenerateProtoDeck's outline/expand/summary prompts (see
+// stubProtoDeckShape in llm.go) — so this stub distinguishes them by content.
+type stubModuleLLM struct {
+	chapterTags []string
+}
+
+func (s *stubModuleLLM) Complete(_ context.Context, prompt string) (string, error) {
+	if resp, ok := stubProtoDeckShape(prompt, s.chapterTags); ok {
+		return resp, nil
+	}
+	return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil
+}
