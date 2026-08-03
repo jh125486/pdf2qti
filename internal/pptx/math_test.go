@@ -1,6 +1,9 @@
 package pptx_test
 
 import (
+	"archive/zip"
+	"bytes"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -17,53 +20,65 @@ func hasPandoc(t *testing.T) bool {
 	return err == nil
 }
 
-func TestRender_InlineMathInBullet(t *testing.T) {
-	t.Parallel()
-
-	dc := sampleContext()
-	dc.Slides[0].Content = "Point 1\nSee \\(x^2 + y^2 = z^2\\) for details"
-
+// stubPandoc puts an executable named "pandoc" (running script) on a fresh PATH-only directory
+// and points PATH at it, so toOMML's exec.LookPath("pandoc") finds a deterministic stand-in
+// instead of (or in addition to) whatever the real pandoc on this machine would do. An empty
+// script leaves the directory empty, simulating pandoc being unavailable at all. Not usable from
+// a t.Parallel() test: mutates PATH via t.Setenv.
+func stubPandoc(t *testing.T, script string) {
+	t.Helper()
 	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentSlide := string(outEntries["ppt/slides/slide2.xml"])
-
-	if hasPandoc(t) {
-		mustContainAll(t, "content slide with pandoc available", contentSlide,
-			"mc:AlternateContent", "m:oMath", "m:sSup")
-		// The escaped LaTeX must still be present as the mc:Fallback for older PowerPoint.
-		if !strings.Contains(contentSlide, "mc:Fallback") {
-			t.Fatalf("expected mc:Fallback alongside real math, got: %s", contentSlide)
-		}
-	} else {
-		// No pandoc: must degrade to plain escaped text, never a hard error or dropped content.
-		mustContainAll(t, "content slide without pandoc", contentSlide, "x^2 + y^2 = z^2")
-		if strings.Contains(contentSlide, "mc:AlternateContent") {
-			t.Fatalf("expected no math markup without pandoc, got: %s", contentSlide)
+	if script != "" {
+		if err := os.WriteFile(filepath.Join(dir, "pandoc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
+			t.Fatal(err)
 		}
 	}
+	t.Setenv("PATH", dir)
 }
 
-func TestRender_BoldWrappedMathStillConverts(t *testing.T) {
-	t.Parallel()
+// zipBytes builds an in-memory zip archive from name->content pairs, for feeding to a stub
+// pandoc's stdout as fake docx output.
+func zipBytes(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
 
-	// Regression: LLM output routinely wraps a formula in bold, e.g. "**\(\mathbb{R}^n\)**".
-	// Matching "**bold**" before math used to swallow the whole span as a literal-text bold run,
-	// so the formula never reached mathRunXML at all and rendered as raw LaTeX source.
+// catScript writes data to a fixture file under dir and returns a shell script that cats it to
+// stdout, standing in for a stub pandoc's binary docx output. Uses an absolute path to cat
+// rather than relying on PATH lookup: stubPandoc's caller overrides PATH down to just the stub
+// directory (so exec.LookPath("pandoc") finds only the stub), which also makes `cat` on its own
+// unresolvable from inside the script — it fails with "command not found" (exit 127), not the
+// intended checksum/parse error, if left unqualified.
+func catScript(t *testing.T, data []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "out.docx")
+	if err := os.WriteFile(fixture, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "#!/bin/sh\n/bin/cat '" + fixture + "'\n"
+}
+
+// renderMathContent renders sampleContext() with slide[0]'s content overridden to content, and
+// returns the resulting first content slide's XML.
+func renderMathContent(t *testing.T, content string) string {
+	t.Helper()
 	dc := sampleContext()
-	dc.Slides[0].Content = "Point 1\nSee **\\(x^2\\)** for details"
+	dc.Slides[0].Content = content
 
 	dir := t.TempDir()
 	templatePath := filepath.Join(dir, "template.pptx")
@@ -71,90 +86,185 @@ func TestRender_BoldWrappedMathStillConverts(t *testing.T) {
 	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	outEntries, err := readZip(outputPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	contentSlide := string(outEntries["ppt/slides/slide2.xml"])
-
-	if hasPandoc(t) {
-		// Before the fix, "**bold**" matched first and swallowed the whole span as a literal
-		// bold text run — no mc:AlternateContent/m:oMath would appear at all in that case.
-		mustContainAll(t, "bold-wrapped math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
-	} else {
-		mustContainAll(t, "bold-wrapped math without pandoc", contentSlide, "x^2")
-	}
+	return string(outEntries["ppt/slides/slide2.xml"])
 }
 
-func TestRender_PaddedDelimitersStillConvert(t *testing.T) {
-	t.Parallel()
-
-	// Regression: "\( x^2 \)" with padding space right after "\(" and before "\)" (the LLM
-	// writes both padded and unpadded delimiters) used to silently fail: pandoc's markdown
-	// reader requires a non-space char immediately inside "$...$" to recognize inline math at
-	// all (disambiguating from currency like "$5"), so wrapping the untrimmed, space-padded
-	// formula in "$...$" made pandoc treat the whole thing as literal text — exit 0, no error,
-	// just no <m:oMath> either, so it looked like a silent no-op rather than a clear failure.
-	dc := sampleContext()
-	dc.Slides[0].Content = "Point 1\nSee \\( x^2 + y^2 = z^2 \\) for details"
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
-		t.Fatal(err)
+// TestRender_MathConversion covers pptx.Render's LaTeX-to-OMML math conversion (math.go), both
+// the real-pandoc path and every way toOMML/extractDocumentXML degrade gracefully instead of
+// erroring. Every formula used across these cases must be unique: toOMML caches successful
+// conversions in a package-level map keyed by formula text, shared across all tests in this
+// binary regardless of t.Parallel() — reusing a formula between a "succeeds with real pandoc"
+// case and a "must fall back" case lets the first poison the second's result via the cache,
+// independent of that case's own PATH stubbing.
+func TestRender_MathConversion(t *testing.T) {
+	tests := []struct {
+		name         string
+		content      string
+		pathOverride bool   // stubs PATH via t.Setenv; the case can't run t.Parallel() when set
+		pandocScript string // pandoc stub script content; empty + pathOverride means no pandoc on PATH at all
+		verify       func(t *testing.T, contentSlide string)
+	}{
+		{
+			name:    "inline math, real pandoc or graceful fallback",
+			content: "Point 1\nSee \\(x^2 + y^2 = z^2\\) for details",
+			verify: func(t *testing.T, contentSlide string) {
+				t.Helper()
+				if hasPandoc(t) {
+					mustContainAll(t, "content slide with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
+					if !strings.Contains(contentSlide, "mc:Fallback") {
+						t.Fatalf("expected mc:Fallback alongside real math, got: %s", contentSlide)
+					}
+				} else {
+					mustContainAll(t, "content slide without pandoc", contentSlide, "x^2 + y^2 = z^2")
+					if strings.Contains(contentSlide, "mc:AlternateContent") {
+						t.Fatalf("expected no math markup without pandoc, got: %s", contentSlide)
+					}
+				}
+			},
+		},
+		{
+			// Regression: LLM output routinely wraps a formula in bold, e.g.
+			// "**\(\mathbb{R}^n\)**". Matching "**bold**" before math used to swallow the whole
+			// span as a literal-text bold run, so the formula never reached mathRunXML at all
+			// and rendered as raw LaTeX source.
+			name:    "bold-wrapped math still converts",
+			content: "Point 1\nSee **\\(q^4\\)** for details",
+			verify: func(t *testing.T, contentSlide string) {
+				t.Helper()
+				if hasPandoc(t) {
+					// Before the fix, "**bold**" matched first and swallowed the whole span as
+					// a literal bold text run — no mc:AlternateContent/m:oMath would appear.
+					mustContainAll(t, "bold-wrapped math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
+				} else {
+					mustContainAll(t, "bold-wrapped math without pandoc", contentSlide, "q^4")
+				}
+			},
+		},
+		{
+			// Regression: "\( x^2 \)" with padding space right after "\(" and before "\)" (the
+			// LLM writes both padded and unpadded delimiters) used to silently fail: pandoc's
+			// markdown reader requires a non-space char immediately inside "$...$" to recognize
+			// inline math at all (disambiguating from currency like "$5"), so wrapping the
+			// untrimmed, space-padded formula in "$...$" made pandoc treat the whole thing as
+			// literal text — exit 0, no error, just no <m:oMath> either.
+			name:    "padded delimiters still convert",
+			content: "Point 1\nSee \\( y^6 + z^6 = w^6 \\) for details",
+			verify: func(t *testing.T, contentSlide string) {
+				t.Helper()
+				if hasPandoc(t) {
+					mustContainAll(t, "padded-delimiter math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
+				} else {
+					mustContainAll(t, "padded-delimiter math without pandoc", contentSlide, "y^6 + z^6 = w^6")
+				}
+			},
+		},
+		{
+			// Rendering a formula when the converter can't find pandoc at all must degrade to
+			// plain escaped text, not error.
+			name:         "pandoc unavailable falls back gracefully",
+			content:      "See \\(n^3\\) here",
+			pathOverride: true,
+			verify: func(t *testing.T, contentSlide string) {
+				t.Helper()
+				mustContainAll(t, "content slide with no pandoc on PATH", contentSlide, "n^3")
+				if strings.Contains(contentSlide, "mc:AlternateContent") {
+					t.Fatalf("expected no math markup with empty PATH, got: %s", contentSlide)
+				}
+			},
+		},
+		{
+			name:         "pandoc present but exits nonzero",
+			content:      "Point 1\nSee \\(m^7\\) for details",
+			pathOverride: true,
+			pandocScript: "#!/bin/sh\nexit 1\n",
+			verify:       verifyMathFallback,
+		},
+		{
+			name:         "pandoc emits non-zip garbage",
+			content:      "Point 1\nSee \\(m^7\\) for details",
+			pathOverride: true,
+			pandocScript: "#!/bin/sh\nprintf 'not a zip file'\n",
+			verify:       verifyMathFallback,
+		},
 	}
 
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.pathOverride {
+				t.Parallel()
+			} else {
+				// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
+				stubPandoc(t, tt.pandocScript)
+			}
+			contentSlide := renderMathContent(t, tt.content)
+			tt.verify(t, contentSlide)
+		})
 	}
 
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentSlide := string(outEntries["ppt/slides/slide2.xml"])
-
-	if hasPandoc(t) {
-		mustContainAll(t, "padded-delimiter math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
-	} else {
-		mustContainAll(t, "padded-delimiter math without pandoc", contentSlide, "x^2 + y^2 = z^2")
-	}
+	// The remaining two "pandoc emits a superficially-valid-but-unusable docx" cases build their
+	// script content from a real zip byte buffer, which needs its own t (for t.Fatal on zip
+	// construction failure) rather than fitting the simple string-literal table shape above.
+	t.Run("pandoc emits valid zip with no word/document.xml", func(t *testing.T) {
+		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
+		z := zipBytes(t, map[string]string{"other.xml": "<root/>"})
+		stubPandoc(t, catScript(t, z))
+		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide)
+	})
+	t.Run("pandoc emits valid docx with no m:oMath in document.xml", func(t *testing.T) {
+		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
+		z := zipBytes(t, map[string]string{"word/document.xml": "<w:document><w:body>plain</w:body></w:document>"})
+		stubPandoc(t, catScript(t, z))
+		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide)
+	})
+	t.Run("pandoc emits docx whose document.xml fails checksum on read", func(t *testing.T) {
+		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
+		// A syntactically-valid zip whose word/document.xml entry fails its CRC-32 checksum on
+		// read — distinct from "non-zip garbage" above, which fails earlier at zip.NewReader
+		// itself.
+		z := zipBytesWithCorruptEntry(
+			map[string][]byte{"word/document.xml": []byte("<w:document><w:body>plain</w:body></w:document>")},
+			"word/document.xml",
+		)
+		stubPandoc(t, catScript(t, z))
+		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide)
+	})
 }
 
-func TestMathConverter_UnavailableFallsBackGracefully(t *testing.T) {
-	// No t.Parallel(): t.Setenv panics in parallel tests, and this test needs to control PATH.
-
-	// Rendering a formula when the converter can't find pandoc must degrade to plain escaped
-	// text, not error — exercised indirectly via a real Render call with an empty PATH, since
-	// the converter type and its cache are unexported.
-	dc := sampleContext()
-	dc.Slides[0].Content = "See \\(x^2\\) here"
-
-	dir := t.TempDir()
-	templatePath := filepath.Join(dir, "template.pptx")
-	outputPath := filepath.Join(dir, "out.pptx")
-	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", dir) // a directory with no pandoc binary in it
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	outEntries, err := readZip(outputPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentSlide := string(outEntries["ppt/slides/slide2.xml"])
-	mustContainAll(t, "content slide with no pandoc on PATH", contentSlide, "x^2")
+// verifyMathFallback asserts formula "m^7" (the shared formula for every case in this file that
+// exercises a fallback path) appears as plain escaped text and no math markup was produced — the
+// expected outcome whenever pandoc is present but its output can't be turned into usable OMML.
+func verifyMathFallback(t *testing.T, contentSlide string) {
+	t.Helper()
+	mustContainAll(t, "fallback text", contentSlide, "m^7")
 	if strings.Contains(contentSlide, "mc:AlternateContent") {
-		t.Fatalf("expected no math markup with empty PATH, got: %s", contentSlide)
+		t.Fatalf("expected graceful fallback (no math markup), got: %s", contentSlide)
+	}
+}
+
+// TestToOMML_CacheHit is a justified exception to one-function-per-scenario consolidation above:
+// it needs real pandoc (gated by hasPandoc, no PATH override) and asserts a distinct property
+// (repeat-formula caching) that doesn't fit the pass/fail verify shape used elsewhere in this
+// file.
+func TestToOMML_CacheHit(t *testing.T) {
+	t.Parallel()
+	if !hasPandoc(t) {
+		t.Skip("pandoc not available on PATH")
+	}
+
+	// Same formula twice: the second occurrence must hit toOMML's cache instead of re-invoking
+	// pandoc, and still render identical math markup.
+	contentSlide := renderMathContent(t, "Point 1\nSee \\(k^5\\) and again \\(k^5\\) for details")
+	if got := strings.Count(contentSlide, "m:oMath"); got < 2 {
+		t.Fatalf("expected repeated formula to render twice (cache hit reuses the same OMML), got %d occurrences: %s", got, contentSlide)
 	}
 }

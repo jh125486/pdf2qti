@@ -9,26 +9,28 @@ import (
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
 )
 
-// TestSlidesCmdRun_Table covers SlidesCmd.Run, including resolveSlideRange's auto-scaling and
-// clamp behavior (resolveSlideRange itself is unexported, and this package tests commands
-// black-box, so it's exercised indirectly here). The stub outline LLM (stubOutlineJSON) always
-// emits exactly the requested minimum content-slide count, so a case's resulting file's slide
-// count == its resolved minSlides — letting the auto-scaling cases below assert
-// resolveSlideRange's output indirectly but precisely via wantSlideCount.
-func TestSlidesCmdRun_Table(t *testing.T) {
-	t.Parallel()
+// autoMin is the known auto-computed minimum (see distill.AutoSlideRange's -15%/+25% band and
+// +2 for agenda/summary) for slidesAutoScalingPrepare's 8000-char fixture Text.
+const autoMin = 19
 
-	// autoMin is the known auto-computed minimum (see distill.AutoSlideRange's -15%/+25% band
-	// and +2 for agenda/summary) for slidesAutoScalingPrepare's 8000-char fixture Text.
-	const autoMin = 19
+type slidesTestCase struct {
+	name           string
+	prepare        func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
+	wantErr        bool
+	outputFile     string // relative to dir; checked to exist when non-empty and !wantErr
+	wantSlideCount int    // when > 0, outputFile's total "<!-- meta:" slide count must equal this
+}
 
-	tests := []struct {
-		name           string
-		prepare        func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI)
-		wantErr        bool
-		outputFile     string // relative to dir; checked to exist when non-empty and !wantErr
-		wantSlideCount int    // when > 0, outputFile's total "<!-- meta:" slide count must equal this
-	}{
+// slidesTestCases builds TestSlidesCmdRun_Table's table, including resolveSlideRange's
+// auto-scaling and clamp behavior (resolveSlideRange itself is unexported, and this package
+// tests commands black-box, so it's exercised indirectly here). The stub outline LLM
+// (stubOutlineJSON) always emits exactly the requested minimum content-slide count, so a case's
+// resulting file's slide count == its resolved minSlides — letting the auto-scaling cases below
+// assert resolveSlideRange's output indirectly but precisely via wantSlideCount. Split out from
+// the test function itself to keep gocyclo's complexity count on the (trivial) runner, not this
+// literal.
+func slidesTestCases() []slidesTestCase {
+	return []slidesTestCase{
 		{
 			name: "success by id",
 			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
@@ -153,6 +155,41 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// MinSlides > MaxSlides makes GenerateProtoDeck reject the range before ever
+			// calling the LLM. Both are explicit/nonzero, so resolveSlideRange's auto-scaling
+			// doesn't apply here — see the "auto range" cases below for that.
+			name: "generate proto deck error, invalid slide range",
+			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 10, MaxSlides: 3}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
+			// Pre-creating a directory at the output path makes os.WriteFile fail.
+			name: "write slides error, output path is a directory",
+			prepare: func(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+				t.Helper()
+				pdfPath := filepath.Join(dir, "src.pdf")
+				if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfgPath := writeConfigFile(t, dir, pdfPath)
+				writeDistilledContextFileWithID(t, dir, "src01")
+				if err := os.Mkdir(filepath.Join(dir, "src01_slides.md"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+			},
+			wantErr: true,
+		},
+		{
 			name:           "auto range: both unset gets full auto",
 			prepare:        slidesAutoScalingPrepare(0, 0),
 			outputFile:     "src01_slides.md",
@@ -193,9 +230,12 @@ func TestSlidesCmdRun_Table(t *testing.T) {
 			wantSlideCount: 3,
 		},
 	}
+}
 
-	for _, tt := range tests {
+func TestSlidesCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range slidesTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()

@@ -2,10 +2,28 @@ package distill_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
+
+func TestSave_WriteError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Pre-create a directory at the target path, so Save's os.WriteFile fails.
+	path := filepath.Join(dir, "context.json")
+	if err := os.Mkdir(path, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	err := distill.Save(path, &distill.DistilledContext{SourceID: "src01"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
 
 func TestObjective_UnmarshalJSON_Table(t *testing.T) {
 	t.Parallel()
@@ -23,6 +41,23 @@ func TestObjective_UnmarshalJSON_Table(t *testing.T) {
 		{name: "non-numeric string co", in: `{"co":"not a number","text":"a"}`, wantErr: true},
 		{name: "co is an object", in: `{"co":{},"text":"a"}`, wantErr: true},
 		{name: "malformed json", in: `{`, wantErr: true},
+		{
+			// The outer document is syntactically complete (so UnmarshalJSON is actually
+			// invoked, unlike the "malformed json" case above which fails at the top-level
+			// scan before ever reaching it), but "text" doesn't match its expected type.
+			name:    "well-formed but wrong field type",
+			in:      `{"co":1,"text":123}`,
+			wantErr: true,
+		},
+		{name: "non-integer float co", in: `{"co":1.5,"text":"a"}`, wantErr: true},
+		{
+			// Regex finds digits, but they overflow int, so strconv.Atoi itself fails —
+			// distinct from "non-numeric string co" above, where the regex finds no digits at
+			// all.
+			name:    "string co digits overflow int",
+			in:      `{"co":"CO99999999999999999999","text":"a"}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -74,6 +109,18 @@ func TestDistilledContext_UnmarshalJSON_VocabularyAndSectionsTolerance(t *testin
 		},
 		{name: "vocabulary is neither array nor object", in: `{"vocabulary":"nope"}`, wantErr: true},
 		{name: "sections is neither array nor object", in: `{"sections":"nope"}`, wantErr: true},
+		{
+			// An array, but neither of objects nor of strings — distinct from the "neither
+			// array nor object" cases above.
+			name:    "vocabulary is an array of numbers",
+			in:      `{"vocabulary":[1,2,3]}`,
+			wantErr: true,
+		},
+		{
+			name:    "sections is an array of numbers",
+			in:      `{"sections":[1,2,3]}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

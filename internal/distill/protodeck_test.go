@@ -124,6 +124,16 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			name: "outline overshoots maximum gets truncated", llm: &protoDeckStubLLM{outlineCount: 20}, chapters: chapters,
 			minSlides: 3, maxSlides: 8,
 		},
+		{
+			// minSlides=maxSlides=2 forces both content-budget clamps: minContent (2-2=0) clamps
+			// up to 1, and maxContent (also 0) is then below that clamped minContent, so it
+			// clamps up to match it too. The clamp itself succeeds (outline's 1 slide matches
+			// the clamped minContent exactly), but the deck's real total — agenda + 1 content +
+			// summary = 3 — can never fit the original 2-slide budget, so this also exercises
+			// validateProtoDeck's own slide-count-out-of-range error.
+			name: "minimal slide range clamps content budget but fails final validation", llm: &protoDeckStubLLM{outlineCount: 1}, chapters: chapters,
+			minSlides: 2, maxSlides: 2, wantErr: true, errLike: "expected between 2 and 2 slides, got 3",
+		},
 	}
 
 	for _, tt := range tests {
@@ -212,6 +222,14 @@ func TestParseProtoDeck_Table(t *testing.T) {
 		{
 			name: "hand-written deck, loose spacing",
 			in: "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n---\n" +
+				"<!-- meta: 2 ch01 -->\n# A Slide\n- bullet\n",
+		},
+		{
+			// A stray block with no meta marker at all (e.g. leftover prose between separators)
+			// must be silently skipped, not break parsing of the valid blocks around it.
+			name: "stray block without meta marker is skipped",
+			in: "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n---\n" +
+				"Some stray prose with no meta marker at all.\n---\n" +
 				"<!-- meta: 2 ch01 -->\n# A Slide\n- bullet\n",
 		},
 	}

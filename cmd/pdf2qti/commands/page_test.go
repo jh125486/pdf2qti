@@ -52,6 +52,15 @@ func TestPageCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "render page error, missing template file",
+			prepare: func(t *testing.T, dir string) commands.PageCmd {
+				t.Helper()
+				writeDistilledContextFile(t, dir)
+				return commands.PageCmd{Context: filepath.Join(dir, "src01_context.json"), Template: filepath.Join(dir, "does_not_exist.tmpl")}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -27,20 +27,22 @@ func writePPTXConfigFile(t *testing.T, dir, courseName string) string {
 	return cfgPath
 }
 
-func TestPPTXCmdRun_Table(t *testing.T) {
-	t.Parallel()
+type pptxCmdTestCase struct {
+	name    string
+	prepare func(t *testing.T, dir string) commands.PPTXCmd
+	wantErr bool
+	verify  func(t *testing.T, dir string)
+}
 
-	tests := []struct {
-		name    string
-		prepare func(t *testing.T, dir string) commands.PPTXCmd
-		wantErr bool
-		verify  func(t *testing.T, dir string)
-	}{
+// pptxCmdTestCases builds TestPPTXCmdRun_Table's table. Split out from the test function itself
+// to keep gocyclo's complexity count on the (trivial) runner, not this literal.
+func pptxCmdTestCases() []pptxCmdTestCase {
+	return []pptxCmdTestCase{
 		{
 			name: "success",
 			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
 				t.Helper()
-				slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
+				slidesPath := writeSlidesMarkdownFile(t, dir)
 				outPath := filepath.Join(dir, "out.pptx")
 				return commands.PPTXCmd{Slides: slidesPath, Template: realPPTXTemplate, Output: outPath}
 			},
@@ -92,10 +94,51 @@ func TestPPTXCmdRun_Table(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "course_name var overrides config course name",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := writeSlidesMarkdownFile(t, dir)
+				outPath := filepath.Join(dir, "out.pptx")
+				return commands.PPTXCmd{
+					Slides: slidesPath, Template: realPPTXTemplate, Output: outPath,
+					Vars: map[string]string{"course_name": "Override University"},
+				}
+			},
+			verify: func(t *testing.T, dir string) {
+				t.Helper()
+				titleSlide, err := readPPTXEntry(filepath.Join(dir, "out.pptx"), "ppt/slides/slide1.xml")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(titleSlide), "Override University") {
+					t.Fatalf("expected title slide to contain course_name var override, got: %q", string(titleSlide))
+				}
+				if strings.Contains(string(titleSlide), "Test University") {
+					t.Fatalf("expected config course name to be overridden, got: %q", string(titleSlide))
+				}
+			},
+		},
+		{
+			name: "render pptx error, template not a valid pptx",
+			prepare: func(t *testing.T, dir string) commands.PPTXCmd {
+				t.Helper()
+				slidesPath := writeSlidesMarkdownFile(t, dir)
+				badTemplate := filepath.Join(dir, "bad_template.pptx")
+				if err := os.WriteFile(badTemplate, []byte("not a zip"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return commands.PPTXCmd{Slides: slidesPath, Template: badTemplate, Output: filepath.Join(dir, "out.pptx")}
+			},
+			wantErr: true,
+		},
 	}
+}
 
-	for _, tt := range tests {
+func TestPPTXCmdRun_Table(t *testing.T) {
+	t.Parallel()
 
+	for _, tt := range pptxCmdTestCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
@@ -124,7 +167,7 @@ func TestPPTXCmdRun_BadConfig(t *testing.T) {
 func TestExecute_PPTXCommandSuccess(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writePPTXConfigFile(t, dir, "Test University")
-	slidesPath := writeSlidesMarkdownFile(t, dir, "src01")
+	slidesPath := writeSlidesMarkdownFile(t, dir)
 	outPath := filepath.Join(dir, "out.pptx")
 
 	withArgs(t, []string{
