@@ -1,6 +1,9 @@
 package distill
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // leaveAloneEscapes are the characters immediately after a backslash that are left as a
 // genuine, load-bearing JSON escape rather than doubled. This package's LLM prompts are full
@@ -82,4 +85,26 @@ func repairJSONEscapes(s string) string {
 		b.WriteString(`\\`)
 	}
 	return b.String()
+}
+
+// unmarshalRepaired parses raw LLM JSON output into v, applying repairJSONEscapes only if a
+// direct, unmodified parse fails.
+//
+// repairJSONEscapes's doubling heuristic assumes the model never emits a correctly-escaped
+// backslash on its own — true for the common case (raw, unescaped LaTeX) but not always: a model
+// can occasionally emit a backslash that's already valid JSON (e.g. "\\overrightarrow", a
+// genuine "\\" escape immediately followed by an unrelated LaTeX command). Running the repair
+// unconditionally, as every caller of repairJSONEscapes did before this, mangles that valid
+// input: unaware "\\" was already a complete, correct escape, it doubles both backslashes
+// independently and the result decodes to two literal backslashes instead of one
+// ("\\overrightarrow" instead of "\overrightarrow").
+//
+// Trying the unmodified raw text first means repair only ever touches responses that are
+// actually broken, leaving already-valid JSON (however it happened to escape its backslashes)
+// untouched.
+func unmarshalRepaired(raw string, v any) error {
+	if err := json.Unmarshal([]byte(raw), v); err == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(repairJSONEscapes(raw)), v)
 }

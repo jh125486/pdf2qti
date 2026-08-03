@@ -3,7 +3,6 @@ package distill
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,7 +38,7 @@ func generateOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput,
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
 	var resp outlineResponse
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &resp); err != nil {
+	if err := unmarshalRepaired(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 	if len(resp.Outline) > maxContent {
@@ -205,7 +204,7 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
 	var resp expandBatchResponse
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &resp); err != nil {
+	if err := unmarshalRepaired(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 	out := make([][]string, len(resp.Slides))
@@ -286,7 +285,7 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 	var resp struct {
 		Bullets []string `json:"bullets"`
 	}
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &resp); err != nil {
+	if err := unmarshalRepaired(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 	if len(resp.Bullets) == 0 {

@@ -52,7 +52,7 @@ func BuildModuleDoc(ctx context.Context, llm LLM, moduleID, moduleName string, c
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
 	var resp moduleDocResponse
-	if err := json.Unmarshal([]byte(repairJSONEscapes(raw)), &resp); err != nil {
+	if err := unmarshalRepaired(raw, &resp); err != nil {
 		return nil, fmt.Errorf("parse llm response: %w", err)
 	}
 
