@@ -34,11 +34,19 @@ var (
 // call (0 legitimately means "this section has no distinct topics," used to test the
 // no-topics-at-all hard-failure path). injectUnknownTagInReconcile adds one extra entry with a
 // tag no chapter has to the reconcile response, to test reconcileOutline's defensive drop-and-
-// warn path for a hallucinated tag.
+// warn path for a hallucinated tag. reconcileEntryAsRawString appends one bare JSON string
+// (instead of a {tag,title,focus} object) to the reconcile response's outline array, to test
+// outlineEntry.UnmarshalJSON's string-fallback path. agendaBulletCount, if nonzero, overrides
+// how many agenda bullets stubAgenda returns, to test generateAgenda's 3-8 bullet-count
+// validation. summaryEmpty makes stubSummary return zero bullets, to test expandSummary's
+// no-bullets error.
 type protoDeckStubLLM struct {
 	err                         error
 	sectionOutlineCount         int
 	injectUnknownTagInReconcile bool
+	reconcileEntryAsRawString   bool
+	agendaBulletCount           int
+	summaryEmpty                bool
 	calls                       []string // records which shape each call was, in order
 }
 
@@ -55,13 +63,13 @@ func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string, _ *distill
 		return s.stubReconcileOutline(prompt), nil
 	case strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck"):
 		s.calls = append(s.calls, "agenda")
-		return stubAgenda(), nil
+		return s.stubAgenda(), nil
 	case strings.Contains(prompt, "writing the bullet content for"):
 		s.calls = append(s.calls, "expand")
 		return stubExpandBatch(prompt), nil
 	case strings.Contains(prompt, "exactly one summary bullet per agenda item"):
 		s.calls = append(s.calls, "summary")
-		return stubSummary(prompt), nil
+		return s.stubSummary(prompt), nil
 	default:
 		s.calls = append(s.calls, "merge")
 		return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil
@@ -95,11 +103,24 @@ func (s *protoDeckStubLLM) stubReconcileOutline(prompt string) string {
 	if s.injectUnknownTagInReconcile {
 		entries = append(entries, `{"tag":"bogus-tag","title":"Ghost","focus":"f"}`)
 	}
+	if s.reconcileEntryAsRawString {
+		entries = append(entries, `"just a title string"`)
+	}
 	return fmt.Sprintf(`{"outline":[%s],"warnings":[]}`, strings.Join(entries, ","))
 }
 
-func stubAgenda() string {
-	return `{"deck_title":"Deck","agenda":["a","b","c"]}`
+// stubAgenda returns a fixed 3-bullet agenda by default, or agendaBulletCount bullets when set,
+// to test generateAgenda's 3-8 bullet-count validation.
+func (s *protoDeckStubLLM) stubAgenda() string {
+	n := 3
+	if s.agendaBulletCount != 0 {
+		n = s.agendaBulletCount
+	}
+	bullets := make([]string, n)
+	for i := range bullets {
+		bullets[i] = fmt.Sprintf(`"item %d"`, i+1)
+	}
+	return fmt.Sprintf(`{"deck_title":"Deck","agenda":[%s]}`, strings.Join(bullets, ","))
 }
 
 func stubExpandBatch(prompt string) string {
@@ -111,7 +132,12 @@ func stubExpandBatch(prompt string) string {
 	return fmt.Sprintf(`{"slides":[%s]}`, strings.Join(slides, ","))
 }
 
-func stubSummary(prompt string) string {
+// stubSummary returns one bullet per chapter heading in prompt (a fixed 1 if empty), or zero
+// bullets when summaryEmpty is set, to test expandSummary's no-bullets error.
+func (s *protoDeckStubLLM) stubSummary(prompt string) string {
+	if s.summaryEmpty {
+		return `{"bullets":[]}`
+	}
 	n := len(reChapterHeading.FindAllString(prompt, -1))
 	if n == 0 {
 		n = 1
@@ -168,6 +194,24 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			// doesn't match a known chapter, in case the LLM hallucinates one during merging.
 			name: "reconcile entry with unknown tag is dropped as a warning", llm: &protoDeckStubLLM{sectionOutlineCount: 1, injectUnknownTagInReconcile: true}, chapters: chapters,
 			minSlides: 3, maxSlides: 8, wantWarnLike: `unknown tag "bogus-tag", dropped`,
+		},
+		{
+			// outlineEntry.UnmarshalJSON's bare-string fallback (Tag left empty) must not crash
+			// reconcileOutline's parse — the resulting empty tag is then correctly dropped by the
+			// same knownTags check as any other unrecognized tag.
+			name: "reconcile entry as bare string is tolerated and dropped as a warning", llm: &protoDeckStubLLM{sectionOutlineCount: 1, reconcileEntryAsRawString: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: `unknown tag ""`,
+		},
+		{
+			// generateAgenda validates the model returned 3-8 agenda bullets, same as the old
+			// whole-chapter design's agenda validation.
+			name: "agenda with too few bullets is an error", llm: &protoDeckStubLLM{sectionOutlineCount: 1, agendaBulletCount: 2}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantErr: true, errLike: "agenda has 2 bullets, need 3-8",
+		},
+		{
+			// expandSummary requires at least one summary bullet.
+			name: "empty summary is an error", llm: &protoDeckStubLLM{sectionOutlineCount: 1, summaryEmpty: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantErr: true, errLike: "summary has no bullets",
 		},
 	}
 
