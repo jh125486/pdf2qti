@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -98,6 +99,44 @@ func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeDistilledContextFileWithText is writeDistilledContextFileWithID but with a Text field of
+// the caller's choosing, so tests can drive distill.AutoSlideRange's chars-of-Text-based sizing
+// to a known, non-default target instead of the empty-Text minimum it gets otherwise.
+func writeDistilledContextFileWithText(t *testing.T, outDir, sourceID, text string) {
+	t.Helper()
+	dc := &distill.DistilledContext{
+		SourceID:         sourceID,
+		Book:             "Book",
+		Chapter:          1,
+		ModuleName:       "Module 1",
+		Overview:         "<p>Overview</p>",
+		MaterialOverview: "Read this",
+		KeyConcepts:      []string{"pipes"},
+		Text:             text,
+		Sections:         []distill.Section{{Title: "Intro", Summary: "summary"}},
+		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
+		Slides: []distill.Slide{
+			{Title: "Topic A", Content: "Point 1\nPoint 2"},
+			{Title: "Topic B", Content: "Point 1"},
+			{Title: "Topic C", Content: "Point 1\nPoint 2"},
+		},
+	}
+	if err := distill.Save(filepath.Join(outDir, sourceID+"_context.json"), dc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countSlideMetaMarkers returns the number of "<!-- meta: N ... -->" slide markers in a proto-deck
+// Markdown file at path, i.e. its total slide count including agenda and summary.
+func countSlideMetaMarkers(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "<!-- meta:")
 }
 
 // writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/<sourceID>_slides.md

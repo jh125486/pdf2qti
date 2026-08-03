@@ -85,6 +85,11 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 // resolveSlideRange returns (minSlides, maxSlides) as given whenever both are already positive
 // (an explicit user override), and otherwise falls back to distill.AutoSlideRange(chapters) for
 // whichever of the two is unset (<=0) — so `--min-slides 40` alone still auto-scales the max.
+//
+// An explicit bound always wins over its auto-derived counterpart: if the user pins one side and
+// the auto-derived other side would make the range invalid (min > max) — e.g. `--min-slides 60`
+// against an auto max of 45 — the auto side is pulled to match the explicit one instead of
+// returning an invalid range for GenerateProtoDeck to reject.
 func resolveSlideRange(minSlides, maxSlides int, chapters []distill.ProtoChapterInput) (resolvedMin, resolvedMax int) {
 	if minSlides > 0 && maxSlides > 0 {
 		return minSlides, maxSlides
@@ -96,6 +101,13 @@ func resolveSlideRange(minSlides, maxSlides int, chapters []distill.ProtoChapter
 	}
 	if resolvedMax <= 0 {
 		resolvedMax = autoMax
+	}
+	if resolvedMin > resolvedMax {
+		if minSlides > 0 {
+			resolvedMax = resolvedMin
+		} else {
+			resolvedMin = resolvedMax
+		}
 	}
 	return resolvedMin, resolvedMax
 }

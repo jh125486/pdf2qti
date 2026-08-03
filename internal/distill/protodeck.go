@@ -42,7 +42,7 @@ const (
 // AutoSlideRange estimates a (minSlides, maxSlides) range for GenerateProtoDeck sized to the
 // combined condensed Text length of chapters, rather than a flat default — a short chapter and a
 // dense multi-section chapter both fed a fixed 8-30 range would either force padding on the short
-// one or force under-coverage on the long one (the failure this fixes: a 6-section, ~94-page
+// one or force under-coverage on the long one (the failure this fixes: a 9-section, ~94-page
 // chapter landing on only 17 content slides because the deck's own length told the outline model
 // nothing about how much ground it needed to cover).
 //
