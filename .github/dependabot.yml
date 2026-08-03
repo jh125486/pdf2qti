@@ -10,6 +10,33 @@ updates:
       all:
         patterns:
           - "*"
+  # Dependabot's gomod ecosystem only ever looks for a file literally named
+  # "go.mod" in `directory` — it has no way to target a `-modfile=`-style
+  # alternate modfile in the same directory (dependabot-core's go_modules
+  # file-fetcher hardcodes the filename). Build-tool dependencies therefore
+  # live in their own nested modules with a real go.mod each, invoked via
+  # `go tool -modfile=tools/go.mod ...` / `go tool -modfile=tools/golangci-lint/go.mod ...`
+  # (see Makefile) — one dependabot entry per nested module below.
+  - package-ecosystem: "gomod"
+    directory: "/tools"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    groups:
+      all:
+        patterns:
+          - "*"
+  - package-ecosystem: "gomod"
+    directory: "/tools/golangci-lint"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+    groups:
+      all:
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
