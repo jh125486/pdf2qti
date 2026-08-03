@@ -139,19 +139,23 @@ var expandBatchSchema = &Schema{
 	}),
 }
 
-// expandBatchMaxAttempts bounds expandBatch's retry-on-empty-response loop: expandBatchSchema
-// requires a "slides" array but (schema strictness doesn't extend to array length) doesn't
-// require it be non-empty, so a model can occasionally return a structurally valid but empty
-// response for a batch it should have populated — observed in practice against the real OpenAI
-// API. Retrying the exact same prompt once resolves it in every real-API case seen so far, so
-// this stays small; if it's ever exhausted, that's treated as a real error rather than retried
-// indefinitely.
+// expandBatchMaxAttempts bounds expandBatch's retry loop, for two distinct failure modes
+// observed in practice against the real OpenAI API: (1) expandBatchSchema requires a "slides"
+// array but (schema strictness doesn't extend to array length) doesn't require it be non-empty,
+// so a model can occasionally return a structurally valid but empty response for a batch it
+// should have populated; (2) the model's completion content can be truncated mid-JSON (a genuine
+// parse failure, not a schema violation — the outer HTTP response is complete and valid, but the
+// inner content string itself cuts off, most likely a token-limit truncation on an unusually
+// dense batch). Retrying the exact same prompt once resolves both in every real-API case seen so
+// far, so this stays small; if it's ever exhausted, that's treated as a real error rather than
+// retried indefinitely.
 const expandBatchMaxAttempts = 2
 
 // expandBatch writes bullet content for batch's outline entries in one LLM call, grounded in the
-// source text of every chapter tag referenced in batch. Retries once (see expandBatchMaxAttempts)
-// if the model returns fewer slide entries than batch has, since that's otherwise
-// indistinguishable from a real content failure to expandOutline's caller.
+// source text of every chapter tag referenced in batch. Retries (see expandBatchMaxAttempts) if
+// the response doesn't parse at all, or parses but returns fewer slide entries than batch has,
+// since both are otherwise indistinguishable from a real content failure to expandOutline's
+// caller.
 func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) ([][]string, error) {
 	prompt, err := buildExpandBatchPrompt(chapterByTag, batch)
 	if err != nil {
@@ -159,6 +163,7 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 	}
 
 	var out [][]string
+	var lastErr error
 	for attempt := 1; attempt <= expandBatchMaxAttempts; attempt++ {
 		raw, err := llm.Complete(ctx, prompt, expandBatchSchema)
 		if err != nil {
@@ -166,8 +171,10 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 		}
 		var resp expandBatchResponse
 		if err := unmarshalRepaired(raw, &resp); err != nil {
-			return nil, fmt.Errorf("parse llm response: %w", err)
+			lastErr = fmt.Errorf("parse llm response: %w", err)
+			continue
 		}
+		lastErr = nil
 		out = make([][]string, len(resp.Slides))
 		for i, s := range resp.Slides {
 			out[i] = s.Bullets
@@ -175,6 +182,9 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 		if len(out) == len(batch) {
 			return out, nil
 		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return out, nil
 }

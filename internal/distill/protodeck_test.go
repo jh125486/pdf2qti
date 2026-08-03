@@ -42,6 +42,10 @@ var (
 // no-bullets error. expandEmptyFirstCall makes the first expand-batch call return zero slide
 // entries (a schema-valid but empty response, observed in practice against the real OpenAI API)
 // to test expandBatch's retry-once behavior; every subsequent expand call succeeds normally.
+// expandTruncatedFirstCall makes the first expand-batch call return truncated (invalid) JSON —
+// observed in practice against the real OpenAI API as a distinct failure mode from the empty-
+// response case above — to test expandBatch retries a genuine parse failure too, not just a
+// successful-but-short response.
 type protoDeckStubLLM struct {
 	err                         error
 	chunkOutlineCount           int
@@ -50,6 +54,7 @@ type protoDeckStubLLM struct {
 	agendaBulletCount           int
 	summaryEmpty                bool
 	expandEmptyFirstCall        bool
+	expandTruncatedFirstCall    bool
 	expandCalls                 int
 	calls                       []string // records which shape each call was, in order
 }
@@ -131,6 +136,9 @@ func (s *protoDeckStubLLM) stubExpandBatch(prompt string) string {
 	s.expandCalls++
 	if s.expandEmptyFirstCall && s.expandCalls == 1 {
 		return `{"slides":[]}`
+	}
+	if s.expandTruncatedFirstCall && s.expandCalls == 1 {
+		return `{"slides":[{"bullets":["a"]` // deliberately truncated mid-object
 	}
 	n := len(rePlannedSlideLine.FindAllString(prompt, -1))
 	slides := make([]string, n)
@@ -227,6 +235,15 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			// response (observed in practice against the real OpenAI API) — the retry succeeds
 			// and generation completes normally rather than failing on the first empty response.
 			name: "expand batch retries once on empty response", llm: &protoDeckStubLLM{chunkOutlineCount: 1, expandEmptyFirstCall: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8,
+		},
+		{
+			// expandBatch retries once when the model's response content is truncated mid-JSON
+			// (observed in practice against the real OpenAI API, distinct from the empty-response
+			// case above: the outer HTTP response is valid, but unmarshalRepaired fails to parse
+			// the inner content string at all) — the retry succeeds and generation completes
+			// normally rather than failing on the first parse error.
+			name: "expand batch retries once on truncated response", llm: &protoDeckStubLLM{chunkOutlineCount: 1, expandTruncatedFirstCall: true}, chapters: chapters,
 			minSlides: 3, maxSlides: 8,
 		},
 	}
