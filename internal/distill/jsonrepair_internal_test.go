@@ -279,6 +279,26 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 			raw:  `Sure, using \begin{bmatrix} 1 & 2 \end{bmatrix} as reference: {"text":"hello"}`,
 			want: `hello`,
 		},
+		{
+			// Caught in PR review: a leading example/illustration of the requested shape is a
+			// COMPLETE, validly-decodable JSON object in its own right (unlike a LaTeX decoy
+			// brace, which never is) — decodeJSON must not stop at the first successful decode
+			// and silently keep this wrong-but-valid one; it must keep going and prefer the real
+			// answer that follows.
+			name: "leading example JSON object is superseded by the real one that follows",
+			raw:  `Here's an example of the format: {"text":"EXAMPLE, NOT THE ANSWER"} Now here's my answer: {"text":"hello"}`,
+			want: `hello`,
+		},
+		{
+			// Regression: a nested object under an unrelated key (e.g. "meta") is itself
+			// syntactically valid JSON when decoded starting at its own brace, and would wrongly
+			// decode into the target type too (unknown fields are ignored, not an error) —
+			// decodeJSON must skip past the whole outer match's consumed span so this inner
+			// brace is never probed as a separate candidate that could supersede it.
+			name: "nested object under a different key is not mistaken for a separate candidate",
+			raw:  `{"meta":{"text":"WRONG, NOT THE ANSWER"},"text":"hello"}`,
+			want: `hello`,
+		},
 	}
 
 	for _, tt := range tests {
