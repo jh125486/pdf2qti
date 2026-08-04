@@ -3,6 +3,7 @@ package distill
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -338,5 +339,40 @@ func TestUnmarshalRepaired_MixedLeavesInSameResponse(t *testing.T) {
 	want := []string{`inline math \(x\) here`, `separately \frac{1}{2} elsewhere`}
 	if len(out.Bullets) != 2 || out.Bullets[0] != want[0] || out.Bullets[1] != want[1] {
 		t.Fatalf("got %q, want %q", out.Bullets, want)
+	}
+}
+
+// TestHasAmbiguousControlByte_Map and TestMergeAmbiguousLeaves_Map cover the map-valued branches
+// of hasAmbiguousControlByte/mergeAmbiguousLeaves directly via reflection, since no current
+// response struct in this package actually has a map-typed field to exercise them through
+// unmarshalRepaired end-to-end — both functions are written generically to walk any of this
+// package's response shapes, not just the ones in use today, so the branch is real and worth
+// covering on its own rather than only through the shapes that happen to exist right now.
+func TestHasAmbiguousControlByte_Map(t *testing.T) {
+	t.Parallel()
+
+	clean := map[string]string{"a": `\(x\)`}
+	if hasAmbiguousControlByte(reflect.ValueOf(clean)) {
+		t.Fatal("clean map value flagged as ambiguous")
+	}
+
+	dirty := map[string]string{"a": "gradient \nabla f"}
+	if !hasAmbiguousControlByte(reflect.ValueOf(dirty)) {
+		t.Fatal("map value containing a literal newline not flagged as ambiguous")
+	}
+}
+
+func TestMergeAmbiguousLeaves_Map(t *testing.T) {
+	t.Parallel()
+
+	direct := map[string]string{"clean": `\(x\)`, "dirty": "gradient \nabla f"}
+	repaired := map[string]string{"clean": `\\(x\\)`, "dirty": `gradient \nabla f`}
+	mergeAmbiguousLeaves(reflect.ValueOf(direct), reflect.ValueOf(repaired))
+
+	if direct["clean"] != `\(x\)` {
+		t.Fatalf(`clean leaf changed: got %q, want %q`, direct["clean"], `\(x\)`)
+	}
+	if direct["dirty"] != `gradient \nabla f` {
+		t.Fatalf(`dirty leaf not repaired: got %q, want %q`, direct["dirty"], `gradient \nabla f`)
 	}
 }
