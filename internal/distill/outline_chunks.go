@@ -102,7 +102,7 @@ func generateChunkOutline(ctx context.Context, llm LLM, chapter *ProtoChapterInp
 	}
 	entries := make([]outlineEntry, len(resp.Outline))
 	for i, e := range resp.Outline {
-		entries[i] = outlineEntry{Tag: chapter.Tag, Title: e.Title, Focus: e.Focus}
+		entries[i] = outlineEntry{Tag: chapter.Tag, Title: e.Title, Focus: e.Focus, ChunkIndices: []int{chunkIndex}}
 	}
 	return entries, nil
 }
@@ -222,15 +222,19 @@ func reconcileOutline(ctx context.Context, llm LLM, entries []outlineEntry, know
 	warnings = resp.Warnings
 	reconciled = make([]outlineEntry, 0, len(resp.Outline))
 	for _, e := range resp.Outline {
-		// The joined outline is rendered to the model as "N. [tag] Title — Focus" (see
-		// reconcileOutlinePromptTmpl); observed in practice against the real API: the model
+		// The joined outline is rendered to the model as "N. [tag] (from chunk N) Title — Focus"
+		// (see reconcileOutlinePromptTmpl); observed in practice against the real API: the model
 		// sometimes echoes the tag back including the surrounding brackets ("[ch01]") instead of
-		// just the tag itself ("ch01"). Strip them defensively rather than trust the model to
-		// reproduce the delimiter-free value every time — every entry silently failing this
-		// check (because none matched knownTags) is exactly what caused
-		// generateOutlineChunked's "no slide topics after reconciliation" error to fire on every
-		// real-API run before this fix.
+		// just the tag itself ("ch01"), and separately, sometimes folds the chunk annotation into
+		// the tag string too ("ch01#2") despite tag and chunk_indices being distinct schema
+		// fields. Strip both defensively rather than trust the model to reproduce the
+		// delimiter-free value every time — every entry silently failing this check (because none
+		// matched knownTags) is exactly what caused generateOutlineChunked's "no slide topics
+		// after reconciliation" error to fire on every real-API run before this fix.
 		tag := strings.Trim(strings.TrimSpace(e.Tag), "[]")
+		if i := strings.IndexByte(tag, '#'); i >= 0 {
+			tag = tag[:i]
+		}
 		if !knownTags[tag] {
 			warnings = append(warnings, fmt.Sprintf("reconciled outline entry %q has unknown tag %q, dropped", e.Title, e.Tag))
 			continue
@@ -256,9 +260,10 @@ var reconcileOutlineSchema = &Schema{
 	Name: "reconciled_outline",
 	Definition: jsonSchemaObject(map[string]any{
 		"outline": jsonSchemaArray(jsonSchemaObject(map[string]any{
-			"tag":   jsonSchemaString,
-			"title": jsonSchemaString,
-			"focus": jsonSchemaString,
+			"tag":           jsonSchemaString,
+			"title":         jsonSchemaString,
+			"focus":         jsonSchemaString,
+			"chunk_indices": jsonSchemaArray(jsonSchemaInteger),
 		})),
 		"warnings": jsonSchemaArray(jsonSchemaString),
 	}),
@@ -267,27 +272,36 @@ var reconcileOutlineSchema = &Schema{
 // reconcileOutlinePromptTmpl is the LLM prompt template for merging duplicate topics out of a
 // joined, independently-planned-per-chunk outline.
 //
-// Each entry is rendered as "N. [tag] Title — Focus", one per line — the same "N. [tag] Title —
-// Focus" shape buildExpandBatchPrompt already uses for its planned-slides list (see outline.go),
-// reused here for consistency and because it's a stable, easily-parsed format.
+// Each entry is rendered as "N. [tag] (chunk C) Title — Focus", one per line — the "[tag]" part
+// keeps the exact "N. [tag] Title — Focus" shape buildExpandBatchPrompt already uses for its
+// planned-slides list (see outline.go), reused here for consistency and because it's a stable,
+// easily-parsed format; the chunk annotation is a visually separate parenthetical, deliberately
+// NOT crammed inside the brackets with tag (an earlier "[tag#chunkIndex]" combined format was
+// tried and, observed in practice against the real OpenAI API, led the model to echo the whole
+// combined string back as the tag value instead of splitting it into the two distinct schema
+// fields tag/chunk_indices actually are).
 var reconcileOutlinePromptTmpl = template.Must(template.New("reconcileoutline").Parse(`You are reviewing a slide outline that was planned in fixed-size chunks of chapter text, one
 chunk at a time, independently, which can produce duplicate entries where two chunks' material
 overlaps at a boundary.
 
 ## Planned outline
-{{range $i, $e := .Entries}}{{$i}}. [{{$e.Tag}}] {{$e.Title}} — {{$e.Focus}}
+{{range $i, $e := .Entries}}{{$i}}. [{{$e.Tag}}] (chunk {{index $e.ChunkIndices 0}}) {{$e.Title}} — {{$e.Focus}}
 {{end}}
 ## Task
-Produce a JSON object: {"outline": [{"tag": "...", "title": "...", "focus": "..."}], "warnings": ["..."]}.
+Produce a JSON object: {"outline": [{"tag": "...", "title": "...", "focus": "...", "chunk_indices": [...]}], "warnings": ["..."]}.
 
-- outline: the list above, with duplicate entries merged. EVERY object must include all three
-  fields (tag, title, focus) copied verbatim from its source entry above — never omit tag or
-  leave it blank, even when merging two entries into one. Only merge two entries if they describe
-  the EXACT SAME specific content restated differently — the same formula, the same definition,
-  the same worked example. Do NOT merge entries that are merely related or in the same topic area
-  ("Matrix Addition" and "Matrix Subtraction" are DIFFERENT entries and must both be kept). When
-  merging, keep the tag of either entry and the more complete/specific focus of the two. Preserve
-  the original relative order of the entries you keep.
+- outline: the list above, with duplicate entries merged. EVERY object must include all four
+  fields (tag, title, focus, chunk_indices) as four SEPARATE fields — never omit tag or leave it
+  blank, and never combine tag with the chunk number into one string. tag/title/focus are copied
+  verbatim from the kept (or more complete) source entry — tag is ONLY the bracketed value (e.g.
+  "ch01"), never the "(chunk N)" annotation next to it. chunk_indices is that source entry's chunk
+  number (the N in "(chunk N)") as a one-element array when keeping an entry as-is, or the union
+  of both entries' chunk numbers as a two-element array when merging (e.g. merging an entry from
+  chunk 2 with one from chunk 3 produces chunk_indices: [2, 3]). Only merge two entries if they
+  describe the EXACT SAME specific content restated differently — the same formula, the same
+  definition, the same worked example. Do NOT merge entries that are merely related or in the same
+  topic area ("Matrix Addition" and "Matrix Subtraction" are DIFFERENT entries and must both be
+  kept). Preserve the original relative order of the entries you keep.
 - warnings: array of short strings, one per case you weren't confident enough to resolve on your
   own (e.g. two entries that might be the same topic but you're not sure); empty array if none
 `))
