@@ -70,7 +70,7 @@ func stubChunkOutlineJSON() string {
 }
 
 // stubReconcileOutlineJSON echoes back the joined outline entries the reconcile prompt renders
-// (one "N. [tag#chunkIndex] Title — Focus" line per entry), unmerged — a legitimately valid "no
+// (one "N. [tag] (chunk N) Title — Focus" line per entry), unmerged — a legitimately valid "no
 // duplicates found" reconciliation response, since a stub-driven test fixture's synthetic entries
 // never actually duplicate. Echoes the parsed chunk index back as chunk_indices, so this stub
 // exercises the real scoped-grounding path (see groundingText in internal/distill/outline.go)

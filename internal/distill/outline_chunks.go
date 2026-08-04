@@ -222,8 +222,8 @@ func reconcileOutline(ctx context.Context, llm LLM, entries []outlineEntry, know
 	warnings = resp.Warnings
 	reconciled = make([]outlineEntry, 0, len(resp.Outline))
 	for _, e := range resp.Outline {
-		// The joined outline is rendered to the model as "N. [tag] (from chunk N) Title — Focus"
-		// (see reconcileOutlinePromptTmpl); observed in practice against the real API: the model
+		// The joined outline is rendered to the model as "N. [tag] (chunk N) Title — Focus" (see
+		// reconcileOutlinePromptTmpl); observed in practice against the real API: the model
 		// sometimes echoes the tag back including the surrounding brackets ("[ch01]") instead of
 		// just the tag itself ("ch01"), and separately, sometimes folds the chunk annotation into
 		// the tag string too ("ch01#2") despite tag and chunk_indices being distinct schema

@@ -96,7 +96,7 @@ func (s *protoDeckStubLLM) stubChunkOutline() string {
 }
 
 // stubReconcileOutline echoes back the joined outline entries the reconcile prompt renders
-// (one "N. [tag#chunkIndex] Title — Focus" line per entry), unmerged — a legitimately valid "no
+// (one "N. [tag] (chunk N) Title — Focus" line per entry), unmerged — a legitimately valid "no
 // duplicates found" response, since these stub-driven entries never actually duplicate each
 // other. Echoes the tag back WITH its surrounding brackets ("[ch01]" rather than "ch01"),
 // matching real observed behavior from the OpenAI API — this exercises reconcileOutline's

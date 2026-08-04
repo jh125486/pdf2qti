@@ -38,7 +38,7 @@ const jsonSchemaTypeKey = "type"
 // with the helpers below rather than repeating the {"type": "string"} literal at every leaf.
 var jsonSchemaString = map[string]any{jsonSchemaTypeKey: "string"}
 
-// jsonSchemaInteger is the JSON Schema node for a plain integer value, shared the same way as
+// jsonSchemaInteger is the JSON Schema node for a plain integer value, shared in the same way as
 // jsonSchemaString above.
 var jsonSchemaInteger = map[string]any{jsonSchemaTypeKey: "integer"}
 
