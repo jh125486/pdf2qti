@@ -767,6 +767,15 @@ func TestRender_RealTemplate(t *testing.T) {
 			t.Fatalf("%s: %d bodyPr but only %d with normAutofit", name, bodyPrCount, autofitCount)
 		}
 	}
+
+	// This real template's viewProps.xml declares lastView="sldMasterView" (its author's last
+	// save was in Slide Master view) — Render must force it to "sldView" so a generated deck
+	// opens straight to slide 1 in Normal view instead of inheriting the template author's
+	// editing view.
+	mustContainAll(t, "viewProps.xml", string(outEntries["ppt/viewProps.xml"]), `lastView="sldView"`)
+	if strings.Contains(string(outEntries["ppt/viewProps.xml"]), "sldMasterView") {
+		t.Fatal("viewProps.xml still declares sldMasterView")
+	}
 }
 
 func writeZip(path string, entries map[string][]byte) error {

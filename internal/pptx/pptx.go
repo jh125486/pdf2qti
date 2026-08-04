@@ -37,6 +37,7 @@ var (
 	reSldIDGlobal     = regexp.MustCompile(`<p:sldId id="(\d+)"`)
 	rePicBlock        = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
 	reCNvPrOpen       = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
+	reLastView        = regexp.MustCompile(`\blastView="[^"]*"`)
 
 	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 )
@@ -69,6 +70,24 @@ func addEmptyDescr(tag []byte) []byte {
 	return append(tag[:len(tag)-1:len(tag)-1], []byte(` descr="">`)...)
 }
 
+// resetLastView forces ppt/viewProps.xml's lastView attribute to "sldView" (PowerPoint's Normal
+// editing view) if the part is present and declares one. A PPTX template's viewProps.xml records
+// whatever view was active when its author last saved the file — commonly "sldMasterView", left
+// behind by whoever was last in Slide Master editing a placeholder or master-level setting (e.g.
+// the "shrink text on overflow" default) — and PowerPoint faithfully reopens every file in that
+// same view. Render otherwise copies this part through unmodified, so every generated deck would
+// inherit whatever view the template's author happened to be in, rather than opening straight to
+// slide 1 like a normal presentation. A part with no lastView attribute at all, or no viewProps.xml
+// part, is left untouched.
+func resetLastView(parts map[string][]byte) {
+	const viewPropsPart = "ppt/viewProps.xml"
+	data, ok := parts[viewPropsPart]
+	if !ok {
+		return
+	}
+	parts[viewPropsPart] = reLastView.ReplaceAll(data, []byte(`lastView="sldView"`))
+}
+
 // Render reads a PPTX template file, validates it has Title/Agenda/Content slide layouts, fills
 // in the title slide (dc.ModuleName and courseName), the agenda bullets, and duplicates the
 // Content slide once per dc.Slides entry, executes Go text templates in the remaining XML/RELS
@@ -90,6 +109,7 @@ func Render(templatePath string, dc *distill.DistilledContext, courseName string
 	}
 
 	markLayoutPicturesDecorative(parts)
+	resetLastView(parts)
 
 	if err := applyDeck(parts, &order, dc, courseName); err != nil {
 		return err
