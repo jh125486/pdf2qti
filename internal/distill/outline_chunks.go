@@ -146,10 +146,15 @@ excerpt.
 ## This excerpt (part {{.Index}} of {{.Total}} of the chapter's text, in order)
 {{.ChunkText}}
 
-Ignore any "Participation Activity", "Animation content/captions", "Static figure" caption, or
-"Check"/"Show answer" text in the excerpt above — these are leftover interactive-widget artifacts,
-not real content, and must not become outline entries. A "Worked Example"/"WE#" with a complete
-solution is real content and should get its own entry.
+Ignore any "Participation Activity", "Animation content/captions", "Static figure" caption,
+"Check"/"Show answer" text, or "Additional Exercises"/"True/False Questions" end-of-section review
+content in the excerpt above — these are leftover interactive-widget or self-check artifacts, not
+real lecture content, and must not become outline entries. A "Worked Example"/"WE#" with a
+complete solution — actual numbers, a matrix, or worked steps shown — is real content and should
+get its own entry. But a reference that only describes what an example "involves" or "requires"
+without showing its actual numbers or steps (the real content wasn't captured in this excerpt) is
+NOT complete: do not plan a slide for it. The underlying concept it refers to, if independently
+defined elsewhere in the excerpt, can still get its own definition-only entry.
 
 Do NOT plan a slide for any "Lab", "Python Lab", or other hands-on coding-exercise section — labs
 are a separate hands-on assignment, not lecture content, even though they're real material in the
