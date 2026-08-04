@@ -80,7 +80,30 @@ func generateOutlineChunked(ctx context.Context, llm LLM, chapters []ProtoChapte
 	if len(reconciled) == 0 {
 		return nil, nil, errors.New("outline has no slide topics after reconciliation")
 	}
-	return reconciled, warnings, nil
+	return disambiguateDuplicateTitles(reconciled), warnings, nil
+}
+
+// disambiguateDuplicateTitles guarantees every entry's Title is unique, appending a numbered
+// suffix ("Vector Magnitude (2)") to every occurrence of a title after the first. Two identically
+// titled slides are an accessibility problem, not just a cosmetic one — a screen reader or a
+// PPTX's slide-navigation pane has no way to distinguish them. reconcileOutlinePromptTmpl already
+// asks the model to make a content-aware distinction between kept entries that happen to share a
+// title (e.g. "Vector Magnitude: Definition" vs "Vector Magnitude: Formula" — reads better than a
+// mechanical suffix), but that's advisory, not guaranteed; this runs unconditionally afterward so
+// no two slides in a generated deck ever share an exact title regardless of whether the model
+// followed it. Deliberately runs before generateAgenda, not after: agendaPromptTmpl's own
+// instructions say each agenda bullet should match the title of the slide it corresponds to, so
+// agenda has to see the final, already-disambiguated titles.
+func disambiguateDuplicateTitles(entries []outlineEntry) []outlineEntry {
+	seen := make(map[string]int, len(entries))
+	for i := range entries {
+		title := entries[i].Title
+		seen[title]++
+		if n := seen[title]; n > 1 {
+			entries[i].Title = fmt.Sprintf("%s (%d)", title, n)
+		}
+	}
+	return entries
 }
 
 // generateChunkOutline asks llm to plan slide topics for one fixed-size chunk of a chapter's text,
@@ -297,16 +320,21 @@ Produce a JSON object: {"outline": [{"tag": "...", "title": "...", "focus": "...
 
 - outline: the list above, with duplicate entries merged. EVERY object must include all four
   fields (tag, title, focus, chunk_indices) as four SEPARATE fields — never omit tag or leave it
-  blank, and never combine tag with the chunk number into one string. tag/title/focus are copied
+  blank, and never combine tag with the chunk number into one string. tag/focus are copied
   verbatim from the kept (or more complete) source entry — tag is ONLY the bracketed value (e.g.
-  "ch01"), never the "(chunk N)" annotation next to it. chunk_indices is that source entry's chunk
-  number (the N in "(chunk N)") as a one-element array when keeping an entry as-is, or the union
-  of both entries' chunk numbers as a two-element array when merging (e.g. merging an entry from
-  chunk 2 with one from chunk 3 produces chunk_indices: [2, 3]). Only merge two entries if they
-  describe the EXACT SAME specific content restated differently — the same formula, the same
-  definition, the same worked example. Do NOT merge entries that are merely related or in the same
-  topic area ("Matrix Addition" and "Matrix Subtraction" are DIFFERENT entries and must both be
-  kept). Preserve the original relative order of the entries you keep.
+  "ch01"), never the "(chunk N)" annotation next to it. title is normally copied verbatim too,
+  EXCEPT: every kept entry's title must be unique across the whole list — if two entries you keep
+  separate (because their content genuinely differs) happen to share the exact same title, make
+  both titles more specific so they're distinguishable (e.g. two "Vector Magnitude" entries, one
+  about the definition and one about the formula, become "Vector Magnitude: Definition" and
+  "Vector Magnitude: Formula") — never leave two kept entries with an identical title. chunk_indices
+  is that source entry's chunk number (the N in "(chunk N)") as a one-element array when keeping an
+  entry as-is, or the union of both entries' chunk numbers as a two-element array when merging
+  (e.g. merging an entry from chunk 2 with one from chunk 3 produces chunk_indices: [2, 3]). Only
+  merge two entries if they describe the EXACT SAME specific content restated differently — the
+  same formula, the same definition, the same worked example. Do NOT merge entries that are merely
+  related or in the same topic area ("Matrix Addition" and "Matrix Subtraction" are DIFFERENT
+  entries and must both be kept). Preserve the original relative order of the entries you keep.
 - warnings: array of short strings, one per case you weren't confident enough to resolve on your
   own (e.g. two entries that might be the same topic but you're not sure); empty array if none
 `))

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,11 +20,12 @@ import (
 func TestNew(t *testing.T) {
 	// Not t.Parallel(): subtests use t.Setenv, which forbids parallel ancestry.
 	tests := []struct {
-		name      string
-		cfg       config.Generation
-		setEnv    map[string]string
-		wantErr   string
-		wantModel string
+		name            string
+		cfg             config.Generation
+		setEnv          map[string]string
+		wantErr         string
+		wantModel       string
+		wantModelParams string
 	}{
 		{
 			name:    "unsupported provider",
@@ -45,7 +45,7 @@ func TestNew(t *testing.T) {
 		{
 			name:      "default model when unset",
 			cfg:       config.Generation{Provider: "openai"},
-			setEnv:    map[string]string{"OPENAI_API_KEY": "sk-test"},
+			setEnv:    map[string]string{defaultAPIKeyEnv: "sk-test"},
 			wantModel: "gpt-4o",
 		},
 		{
@@ -53,6 +53,13 @@ func TestNew(t *testing.T) {
 			cfg:       config.Generation{Provider: "openai", Model: "gpt-4-turbo", APIKeyEnv: "MY_KEY"},
 			setEnv:    map[string]string{"MY_KEY": "sk-test"},
 			wantModel: "gpt-4-turbo",
+		},
+		{
+			name:            "model params propagated from config",
+			cfg:             config.Generation{Provider: "openai", Model: "gpt-5.6-luna", ModelParams: json.RawMessage(`{"reasoning_effort":"high"}`)},
+			setEnv:          map[string]string{defaultAPIKeyEnv: "sk-test"},
+			wantModel:       "gpt-5.6-luna",
+			wantModelParams: `{"reasoning_effort":"high"}`,
 		},
 	}
 
@@ -79,6 +86,9 @@ func TestNew(t *testing.T) {
 			if c.baseURL != defaultBaseURL {
 				t.Fatalf("got baseURL %q, want %q", c.baseURL, defaultBaseURL)
 			}
+			if string(c.modelParams) != tt.wantModelParams {
+				t.Fatalf("got modelParams %q, want %q", c.modelParams, tt.wantModelParams)
+			}
 		})
 	}
 }
@@ -93,15 +103,15 @@ func TestClient_Complete(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		baseURL        string
-		roundTripFn    func(*http.Request) (*http.Response, error)
-		nanTemperature bool
-		serverBody     string
-		serverCode     int
-		schema         *distill.Schema
-		want           string
-		wantErr        string
+		name        string
+		baseURL     string
+		roundTripFn func(*http.Request) (*http.Response, error)
+		modelParams json.RawMessage
+		serverBody  string
+		serverCode  int
+		schema      *distill.Schema
+		want        string
+		wantErr     string
 	}{
 		{
 			name:       "success",
@@ -110,9 +120,11 @@ func TestClient_Complete(t *testing.T) {
 			want:       "hello world",
 		},
 		{
-			name:           "marshal request error from NaN temperature",
-			nanTemperature: true,
-			wantErr:        "marshal request",
+			name:        "marshal request error from malformed modelParams",
+			modelParams: json.RawMessage(`{not valid json`),
+			serverCode:  http.StatusOK,
+			serverBody:  `{"choices":[{"message":{"role":"assistant","content":"unused"}}]}`,
+			wantErr:     "marshal request",
 		},
 		{
 			name:       "success with json code fence stripped",
@@ -183,6 +195,21 @@ func TestClient_Complete(t *testing.T) {
 			serverBody: `{"choices":[{"message":{"role":"assistant","refusal":"I can't help with that"}}]}`,
 			wantErr:    "openai refused the request: I can't help with that",
 		},
+		{
+			name:        "reasoning_effort included in request body when set via modelParams",
+			modelParams: json.RawMessage(`{"reasoning_effort":"high"}`),
+			roundTripFn: assertReasoningEffortSentRoundTrip,
+			want:        "ok",
+		},
+		{
+			// c's modelParams is empty in every other case in this table too, but none of them
+			// inspect the request body — this is the one place that actually verifies an unset
+			// modelParams sends no extra fields at all, not just that the call happens to
+			// succeed regardless.
+			name:        "no extra fields in request body when modelParams unset",
+			roundTripFn: assertReasoningEffortOmittedRoundTrip,
+			want:        "ok",
+		},
 	}
 
 	for _, tt := range tests {
@@ -194,15 +221,10 @@ func TestClient_Complete(t *testing.T) {
 				baseURL:     defaultBaseURL,
 				apiKey:      "sk-test",
 				model:       "gpt-4o",
-				temperature: 0.5,
-			}
-			if tt.nanTemperature {
-				c.temperature = math.NaN()
+				modelParams: tt.modelParams,
 			}
 
 			switch {
-			case tt.nanTemperature:
-				// No transport needed: json.Marshal fails before any request is sent.
 			case tt.baseURL != "":
 				c.baseURL = tt.baseURL
 			case tt.roundTripFn != nil:
@@ -267,17 +289,56 @@ func assertResponseFormatRoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// assertReasoningEffortSentRoundTrip is TestClient_Complete's "reasoning_effort included in
+// request body when set" roundTripFn.
+func assertReasoningEffortSentRoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	var sent struct {
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(body, &sent); err != nil {
+		return nil, err
+	}
+	if sent.ReasoningEffort != "high" {
+		return nil, fmt.Errorf("request body missing expected reasoning_effort, got: %s", body)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// assertReasoningEffortOmittedRoundTrip is TestClient_Complete's "reasoning_effort omitted from
+// request body when unset" roundTripFn.
+func assertReasoningEffortOmittedRoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(string(body), "reasoning_effort") {
+		return nil, fmt.Errorf("request body should omit reasoning_effort when unset, got: %s", body)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
 // newTestClient returns a Client wired to roundTrip, for the two rate-limit retry tests below
 // (they can't share TestClient_Complete's table: retrying involves real backoff durations, which
 // only synctest.Test's virtualized clock can resolve instantly and deterministically — a
 // synctest bubble can't be one case among ordinarily-parallel table subtests).
 func newTestClient(roundTrip func(*http.Request) (*http.Response, error)) *Client {
 	return &Client{
-		httpClient:  &http.Client{Transport: roundTripperFunc(roundTrip)},
-		baseURL:     defaultBaseURL,
-		apiKey:      "sk-test",
-		model:       "gpt-4o",
-		temperature: 0.5,
+		httpClient: &http.Client{Transport: roundTripperFunc(roundTrip)},
+		baseURL:    defaultBaseURL,
+		apiKey:     "sk-test",
+		model:      "gpt-4o",
 	}
 }
 

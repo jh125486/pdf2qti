@@ -64,7 +64,10 @@
         "provider": { "type": "string" },
         "model": { "type": "string" },
         "apiKeyEnv": { "type": "string" },
-        "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
+        "modelParams": {
+          "type": "object",
+          "description": "Arbitrary provider-specific model parameters (e.g. temperature, reasoning_effort), merged directly into the provider's request body."
+        }
       }
     },
     "validation": {

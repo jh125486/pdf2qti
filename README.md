@@ -21,7 +21,7 @@ A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LL
 ## Features
 
 - Seven question types: **True/False (TF)**, **Multiple Answer (MA)**, **Multiple Choice (MC)**, **Short Answer (SA)**, **Essay (ES)**, **Matching (MT)**, **Numerical (NR)**
-- Configurable LLM provider, model, temperature, and API key
+- Configurable LLM provider, model, API key, and arbitrary provider-specific model parameters (temperature, reasoning effort, etc.)
 - Per-source and global-default configuration via a JSON config file (with JSON Schema)
 - Validation rules (unique options, sequential numbering, correct-answer density, etc.)
 - Audit logging for every operation
@@ -60,7 +60,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
       "provider": "openai",
       "model": "gpt-4o",
       "apiKeyEnv": "OPENAI_API_KEY",
-      "temperature": 0.7
+      "modelParams": { "temperature": 0.7 }
     },
     "workflow": {
       "outDir": "out"
