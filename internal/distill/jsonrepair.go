@@ -174,9 +174,11 @@ func unmarshalRepaired(raw string, v any) error {
 
 	repaired := reflect.New(direct.Elem().Type())
 	if err := decodeJSON(repairJSONEscapes(raw), repaired.Interface()); err != nil {
-		// The direct decode above already succeeded; keep it rather than discarding a working
-		// result just because the repair fallback itself couldn't parse.
-		return nil
+		// direct is already known untrustworthy (hasAmbiguousControlByte flagged it) and the
+		// repair fallback couldn't produce a replacement either — surface an error rather than
+		// silently returning success with a result some of whose leaves may hold raw control
+		// bytes instead of the LaTeX command they were meant to be.
+		return fmt.Errorf("repair fallback: %w", err)
 	}
 	mergeAmbiguousLeaves(direct, repaired)
 	return nil
