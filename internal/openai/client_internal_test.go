@@ -3,16 +3,19 @@
 package openai
 
 import (
-	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
 func TestNew(t *testing.T) {
@@ -96,6 +99,7 @@ func TestClient_Complete(t *testing.T) {
 		nanTemperature bool
 		serverBody     string
 		serverCode     int
+		schema         *distill.Schema
 		want           string
 		wantErr        string
 	}{
@@ -163,6 +167,22 @@ func TestClient_Complete(t *testing.T) {
 			},
 			wantErr: "read response",
 		},
+		{
+			// A non-nil schema must produce a response_format:{type:"json_schema",...} field in
+			// the request body — verified by inspecting the request the stub transport receives,
+			// not just that the call succeeds (which it would even if response_format were
+			// silently dropped).
+			name:        "structured output schema included in request body",
+			schema:      &distill.Schema{Name: "test_schema", Definition: map[string]any{"type": "object"}},
+			roundTripFn: assertResponseFormatRoundTrip,
+			want:        "ok",
+		},
+		{
+			name:       "refusal response is an error",
+			serverCode: http.StatusOK,
+			serverBody: `{"choices":[{"message":{"role":"assistant","refusal":"I can't help with that"}}]}`,
+			wantErr:    "openai refused the request: I can't help with that",
+		},
 	}
 
 	for _, tt := range tests {
@@ -196,7 +216,7 @@ func TestClient_Complete(t *testing.T) {
 				c.baseURL = srv.URL
 			}
 
-			got, err := c.Complete(context.Background(), "prompt")
+			got, err := c.Complete(t.Context(), "prompt", tt.schema)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("got err %v, want containing %q", err, tt.wantErr)
@@ -216,6 +236,106 @@ func TestClient_Complete(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// assertResponseFormatRoundTrip is TestClient_Complete's "structured output schema included in
+// request body" roundTripFn, pulled out to a named function (rather than an inline closure in the
+// table) to keep that test's own cyclomatic complexity under gocyclo's threshold.
+func assertResponseFormatRoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	var sent struct {
+		ResponseFormat struct {
+			Type       string `json:"type"`
+			JSONSchema struct {
+				Name   string `json:"name"`
+				Strict bool   `json:"strict"`
+			} `json:"json_schema"`
+		} `json:"response_format"`
+	}
+	if err := json.Unmarshal(body, &sent); err != nil {
+		return nil, err
+	}
+	if sent.ResponseFormat.Type != "json_schema" || sent.ResponseFormat.JSONSchema.Name != "test_schema" || !sent.ResponseFormat.JSONSchema.Strict {
+		return nil, fmt.Errorf("request body missing expected response_format, got: %s", body)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// newTestClient returns a Client wired to roundTrip, for the two rate-limit retry tests below
+// (they can't share TestClient_Complete's table: retrying involves real backoff durations, which
+// only synctest.Test's virtualized clock can resolve instantly and deterministically — a
+// synctest bubble can't be one case among ordinarily-parallel table subtests).
+func newTestClient(roundTrip func(*http.Request) (*http.Response, error)) *Client {
+	return &Client{
+		httpClient:  &http.Client{Transport: roundTripperFunc(roundTrip)},
+		baseURL:     defaultBaseURL,
+		apiKey:      "sk-test",
+		model:       "gpt-4o",
+		temperature: 0.5,
+	}
+}
+
+// TestClient_Complete_RateLimitedTwiceThenSucceeds: the first two calls are rate limited, the
+// third succeeds — Complete must retry with backoff rather than surfacing the 429 immediately.
+// Runs in a synctest bubble so the real rateLimitBackoff waits resolve instantly instead of
+// actually pausing the test.
+func TestClient_Complete_RateLimitedTwiceThenSucceeds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		c := newTestClient(func(*http.Request) (*http.Response, error) { //nolint:bodyclose // closed by Client.doComplete's defer resp.Body.Close(), not visible to this stub's own scope
+			calls++
+			if calls <= 2 {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limited"}}`)),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"hello world"}}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		})
+
+		got, err := c.Complete(t.Context(), "prompt", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "hello world" {
+			t.Fatalf("got %q, want %q", got, "hello world")
+		}
+		if calls != 3 {
+			t.Fatalf("got %d calls, want 3", calls)
+		}
+	})
+}
+
+// TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited: every call is rate limited —
+// Complete must give up after maxRateLimitRetries rather than retrying forever, and say so.
+// Runs in a synctest bubble for the same reason as the sibling test above.
+func TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestClient(func(*http.Request) (*http.Response, error) { //nolint:bodyclose // closed by Client.doComplete's defer resp.Body.Close(), not visible to this stub's own scope
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limited"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})
+
+		_, err := c.Complete(t.Context(), "prompt", nil)
+		if err == nil || !strings.Contains(err.Error(), "exceeded 5 retries") {
+			t.Fatalf("got err %v, want containing %q", err, "exceeded 5 retries")
+		}
+	})
+}
 
 func TestStripCodeFence(t *testing.T) {
 	t.Parallel()

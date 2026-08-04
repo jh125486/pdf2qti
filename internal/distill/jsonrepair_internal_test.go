@@ -254,6 +254,51 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 			raw:  `{"text":"\begin{bmatrix} 1 \end{bmatrix}"}`,
 			want: `\begin{bmatrix} 1 \end{bmatrix}`,
 		},
+		{
+			// Observed in practice against the real OpenAI API: a model occasionally prepends a
+			// preamble sentence to a JSON response despite being asked for "only JSON," making
+			// the whole response fail to parse (a distinct failure class from backslash
+			// escaping — see distill.go and outline_sections.go's callers, which all route
+			// through this function and hit this in production during expand-batch calls).
+			name: "leading prose before the JSON object is trimmed",
+			raw:  `Here is the requested JSON: {"text":"hello"}`,
+			want: `hello`,
+		},
+		{
+			name: "trailing prose after the JSON object is ignored",
+			raw:  `{"text":"hello"} Let me know if you need anything else!`,
+			want: `hello`,
+		},
+		{
+			// This package's prompts embed chapter source text full of LaTeX braces
+			// ("\begin{bmatrix}..."), so a preamble sentence quoting that source can contain a
+			// "decoy" '{' well before the real JSON object starts. Trimming to just the first
+			// '{' (a simpler fix that was tried and didn't hold up against the real API) would
+			// start parsing mid-LaTeX and fail; every '{' must be tried in turn.
+			name: "decoy brace from quoted LaTeX source before the real JSON object",
+			raw:  `Sure, using \begin{bmatrix} 1 & 2 \end{bmatrix} as reference: {"text":"hello"}`,
+			want: `hello`,
+		},
+		{
+			// Caught in PR review: a leading example/illustration of the requested shape is a
+			// COMPLETE, validly-decodable JSON object in its own right (unlike a LaTeX decoy
+			// brace, which never is) — decodeJSON must not stop at the first successful decode
+			// and silently keep this wrong-but-valid one; it must keep going and prefer the real
+			// answer that follows.
+			name: "leading example JSON object is superseded by the real one that follows",
+			raw:  `Here's an example of the format: {"text":"EXAMPLE, NOT THE ANSWER"} Now here's my answer: {"text":"hello"}`,
+			want: `hello`,
+		},
+		{
+			// Regression: a nested object under an unrelated key (e.g. "meta") is itself
+			// syntactically valid JSON when decoded starting at its own brace, and would wrongly
+			// decode into the target type too (unknown fields are ignored, not an error) —
+			// decodeJSON must skip past the whole outer match's consumed span so this inner
+			// brace is never probed as a separate candidate that could supersede it.
+			name: "nested object under a different key is not mistaken for a separate candidate",
+			raw:  `{"meta":{"text":"WRONG, NOT THE ANSWER"},"text":"hello"}`,
+			want: `hello`,
+		},
 	}
 
 	for _, tt := range tests {

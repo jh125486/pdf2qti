@@ -2,6 +2,9 @@ package distill
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -130,9 +133,78 @@ func hasAmbiguousControlEscape(s string) bool {
 // through repairJSONEscapes's structural rule, exactly as it did before this function existed.
 func unmarshalRepaired(raw string, v any) error {
 	if !hasAmbiguousControlEscape(raw) {
-		if err := json.Unmarshal([]byte(raw), v); err == nil {
+		if err := decodeJSON(raw, v); err == nil {
 			return nil
 		}
 	}
-	return json.Unmarshal([]byte(repairJSONEscapes(raw)), v)
+	return decodeJSON(repairJSONEscapes(raw), v)
+}
+
+// decodeJSON parses the JSON object in s into v, tolerating prose a model adds around it despite
+// being asked for "only JSON" — observed in practice against the real OpenAI API. Trailing prose
+// (after a complete, valid object) is handled by json.Decoder.Decode itself, which stops after
+// one value and ignores what follows. Leading prose needs more care than just trimming to the
+// first '{': this package's prompts embed chapter source text full of LaTeX
+// ("\begin{bmatrix}...\end{bmatrix}", "\text{...}", ...), so a preamble sentence that quotes or
+// references any of that source material can contain a "decoy" '{' well before the real JSON
+// object starts.
+//
+// decodeJSON scans s left to right for '{' candidates and keeps the LAST top-level one that
+// decodes successfully — not the first. A decoy brace from quoted LaTeX source essentially never
+// forms syntactically valid JSON on its own, so it just fails to decode and the next candidate is
+// tried either way; but a model asked to produce a specific JSON shape can also preface its real
+// answer with a complete, validly-decodable example or illustration of that shape ("Here's the
+// format: {...} Now here's my answer: {...}") before writing the real one — and
+// json.Decoder.Decode has no way to tell a structurally-valid-but-wrong object like that apart
+// from the real one (it can decode successfully into all zero/default values just as easily as a
+// populated one). Preferring the last candidate, not the first, means such a leading example gets
+// superseded by the real answer that follows it, rather than silently winning.
+//
+// After a candidate decodes successfully, the scan resumes only after the bytes that candidate's
+// Decoder actually consumed (via InputOffset), not at the next raw '{' — otherwise every brace
+// nested inside a successfully-decoded object (e.g. each entry of a real "outline": [{...}, {...}]
+// answer) would itself be probed as a separate top-level candidate. Such a nested fragment decoded
+// on its own is still syntactically valid JSON, just missing the outer field name(s) v's type
+// expects; encoding/json silently ignores unknown fields rather than erroring, so it "succeeds"
+// into a zero-value result and — under naive last-wins — would wrongly supersede the real answer
+// that contains it. Skipping past each match's full span means only genuinely separate top-level
+// objects are ever compared against each other.
+//
+// Each candidate decodes into a throwaway value of v's own type (via reflection) rather than v
+// itself, so a candidate that fails partway through can never leave v holding a mix of an earlier
+// successful decode's fields and a later failed attempt's partial ones; v is only ever assigned
+// from a candidate that decoded cleanly in full.
+func decodeJSON(s string, v any) error {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("decodeJSON: v must be a non-nil pointer, got %T", v)
+	}
+	target := rv.Elem()
+
+	err := errors.New("no '{' found in response")
+	pos := 0
+	for {
+		rel := strings.IndexByte(s[pos:], '{')
+		if rel < 0 {
+			break
+		}
+		start := pos + rel
+
+		candidate := reflect.New(target.Type())
+		dec := json.NewDecoder(strings.NewReader(s[start:]))
+		if decErr := dec.Decode(candidate.Interface()); decErr == nil {
+			target.Set(candidate.Elem())
+			err = nil
+			// Resume past this whole matched object so its own nested braces are never probed
+			// as separate candidates.
+			pos = start + int(dec.InputOffset())
+			continue
+		} else if err != nil {
+			// Only remember a failure's error while nothing has succeeded yet — once a real
+			// candidate has decoded, a later candidate's failure isn't worth reporting over it.
+			err = decErr
+		}
+		pos = start + 1
+	}
+	return err
 }

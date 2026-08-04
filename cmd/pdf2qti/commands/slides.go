@@ -48,7 +48,6 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 
 	chapters := make([]distill.ProtoChapterInput, len(srcs))
-	tags := make([]string, len(srcs))
 	for i, src := range srcs {
 		ctxFile := filepath.Join(cfg.OutDir(src), src.ID+"_context.json")
 		dc, err := distill.Load(ctxFile)
@@ -62,17 +61,20 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 			KeyConcepts:   dc.KeyConcepts,
 			TeachingNotes: dc.TeachingNotes,
 			Text:          dc.Text,
+			Sections:      []distill.Section(dc.Sections),
 		}
-		tags[i] = src.ID
 	}
 
 	minSlides, maxSlides := resolveSlideRange(s.MinSlides, s.MaxSlides, chapters)
 
-	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubSlidesLLM{chapterTags: tags})
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubSlidesLLM{})
 	logger.Info("generating slide deck", "sources", len(chapters), "minSlides", minSlides, "maxSlides", maxSlides)
-	deck, err := distill.GenerateProtoDeck(ctx, llm, chapters, minSlides, maxSlides)
+	deck, warnings, err := distill.GenerateProtoDeck(ctx, llm, chapters, minSlides, maxSlides)
 	if err != nil {
 		return fmt.Errorf("generate proto deck: %w", err)
+	}
+	for _, w := range warnings {
+		logger.Warn("proto deck warning", "detail", w)
 	}
 
 	if err := os.WriteFile(outFile, []byte(deck), 0o600); err != nil {
@@ -137,12 +139,11 @@ func (s *SlidesCmd) selectSources(cfg *config.Config) []*config.Source {
 }
 
 // stubSlidesLLM is a placeholder LLM for the slides command, used only when no real provider key
-// is configured (see selectLLM). SlidesCmd only ever issues GenerateProtoDeck's three prompt
-// shapes (see stubProtoDeckShape in llm.go), unlike ModuleCmd, which also issues a JSON-merge
-// prompt.
-type stubSlidesLLM struct{ chapterTags []string }
+// is configured (see selectLLM). SlidesCmd only ever issues GenerateProtoDeck's prompt shapes
+// (see stubProtoDeckShape in llm.go), unlike ModuleCmd, which also issues a JSON-merge prompt.
+type stubSlidesLLM struct{}
 
-func (s *stubSlidesLLM) Complete(_ context.Context, prompt string) (string, error) {
-	resp, _ := stubProtoDeckShape(prompt, s.chapterTags)
+func (s *stubSlidesLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
+	resp, _ := stubProtoDeckShape(prompt)
 	return resp, nil
 }

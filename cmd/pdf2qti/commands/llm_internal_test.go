@@ -12,11 +12,14 @@ import (
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
 type stubLLM struct{}
 
-func (stubLLM) Complete(_ context.Context, _ string) (string, error) { return "stub", nil }
+func (stubLLM) Complete(_ context.Context, _ string, _ *distill.Schema) (string, error) {
+	return "stub", nil
+}
 
 func TestSelectLLM(t *testing.T) {
 	//nolint:gosec // Fixture env var names/values are test data, not credentials.

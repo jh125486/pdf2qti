@@ -20,6 +20,7 @@ type ProtoChapterInput struct {
 	KeyConcepts   []string
 	TeachingNotes string
 	Text          string
+	Sections      []Section
 }
 
 // charsPerContentSlide is the calibration constant behind AutoSlideRange: the number of
@@ -39,21 +40,26 @@ const (
 	maxContentSlides = 120
 )
 
-// AutoSlideRange estimates a (minSlides, maxSlides) range for GenerateProtoDeck sized to the
-// combined condensed Text length of chapters, rather than a flat default — a short chapter and a
-// dense multi-section chapter both fed a fixed 8-30 range would either force padding on the short
-// one or force under-coverage on the long one (the failure this fixes: a 9-section, ~94-page
-// chapter landing on only 17 content slides because the deck's own length told the outline model
-// nothing about how much ground it needed to cover).
+// AutoSlideRange estimates a (minSlides, maxSlides) range sized to the combined condensed Text
+// length of chapters, rather than a flat default — a short chapter and a dense multi-section
+// chapter both fed a fixed 8-30 range would either force padding on the short one or force
+// under-coverage on the long one. It's used two ways: as the CLI's --min-slides/--max-slides
+// auto-scale default, and as the comparison baseline GenerateProtoDeck's validateProtoDeck warns
+// against when the actual generated count falls outside it — advisory only. This range itself is
+// never passed into outline planning as a target (see GenerateProtoDeck's doc comment for why: a
+// numeric target at whole-chapter scope is exactly the failure mode that made the old whole-
+// chapter design silently drop topics) — generateOutlineChunked instead derives its own much
+// smaller per-chunk targets from charsPerContentSlide directly (see outline_chunks.go), the same
+// calibration constant this function's estimate is built on, so the two stay in sync if either is
+// ever recalibrated.
 //
 // The range spans -15%/+25% around the point estimate rather than returning a single number,
-// since generateOutline plans better against a range it can exercise judgment within than a
-// single exact target (see GenerateProtoDeck's doc comment on why outline generation is a
-// bounded-enumeration task, not a precise one).
+// since it's a rough estimate from character count, not a precise measurement of how many
+// distinct topics a chapter actually contains.
 func AutoSlideRange(chapters []ProtoChapterInput) (minSlides, maxSlides int) {
 	var totalChars int
-	for _, ch := range chapters {
-		totalChars += len(ch.Text)
+	for i := range chapters {
+		totalChars += len(chapters[i].Text)
 	}
 
 	target := totalChars / charsPerContentSlide
@@ -82,68 +88,74 @@ func clamp(n, lo, hi int) int {
 var reProtoMeta = regexp.MustCompile(`(?m)^<!-- meta:\s*(\d+)\s+(\S+)\s*-->\s*$`)
 
 // GenerateProtoDeck asks llm to produce a single markdown proto-slide deck spanning all of
-// chapters (in order), targeting between minSlides and maxSlides total numbered slides (an
-// agenda slide, one or more content slides per chapter, and a closing summary slide). The
-// returned markdown is validated for the meta-marker slide count and numbering before it's
-// returned to the caller.
+// chapters (in order), plus any warnings worth surfacing to the caller (e.g. the deck's slide
+// count falling outside minSlides-maxSlides — advisory only, see below). The returned markdown is
+// validated for meta-marker numbering before it's returned to the caller.
 //
-// Generation is two-pass rather than one-shot: a single call asked to both plan AND write the
-// full content of a 30+ slide deck reliably undershoots the requested count — the same failure
-// mode DistilledContext.Text hit before its fix (models don't self-regulate a large numeric
-// target well while also generating prose, no matter how the instruction is worded). Instead,
-// generateOutline asks for a flat list of slide topics (a bounded enumeration task models hit
-// close to target on), and expandOutline writes each topic's bullets in small batches, grounded
-// in the chapter's condensed text.
-func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInput, minSlides, maxSlides int) (string, error) {
+// Generation is multi-pass rather than one-shot, on the principle that a single call asked to do
+// several different jobs at once (plan every topic across a whole chapter, hit a numeric slide-
+// count target, AND write full slide content) reliably does each of them worse than a call scoped
+// to just one job. generateOutlineChunked plans slide topics in fixed-size chunks of each
+// chapter's text, each chunk given a small explicit target slide count (see its doc comment for
+// why: a single whole-chapter planning call was empirically unreliable, and so — worse — was
+// asking one call per section with no numeric target at all; a small, bounded target per chunk is
+// what actually holds slide count consistent run to run), generateAgenda separately frames the
+// deck's title and agenda from the fully-planned topics, and expandOutline writes each topic's
+// bullets in small batches, grounded in the chapter's condensed text.
+//
+// minSlides/maxSlides are advisory, not enforced: they still size the CLI's --min-slides/
+// --max-slides default (see AutoSlideRange) and validateProtoDeck still warns when the actual
+// generated count falls outside them, but generation no longer fails over it — the reconciled
+// total is an emergent property of the chapter's actual length and each chunk's target, not
+// something planning is asked to hit directly.
+func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInput, minSlides, maxSlides int) (deck string, warnings []string, err error) {
 	if len(chapters) == 0 {
-		return "", errors.New("no chapters to build a proto deck from")
+		return "", nil, errors.New("no chapters to build a proto deck from")
 	}
 	if minSlides <= 0 || maxSlides <= 0 || minSlides > maxSlides {
-		return "", fmt.Errorf("invalid slide range %d-%d", minSlides, maxSlides)
+		return "", nil, fmt.Errorf("invalid slide range %d-%d", minSlides, maxSlides)
 	}
 
-	// minSlides/maxSlides count agenda + content + summary; the outline's budget is just the
-	// content slides, excluding those two fixed slides.
-	minContent := minSlides - 2
-	if minContent < 1 {
-		minContent = 1
-	}
-	maxContent := maxSlides - 2
-	if maxContent < minContent {
-		maxContent = minContent
-	}
-
-	outline, err := generateOutline(ctx, llm, chapters, minContent, maxContent)
+	entries, outlineWarnings, err := generateOutlineChunked(ctx, llm, chapters)
 	if err != nil {
-		return "", fmt.Errorf("generate outline: %w", err)
+		return "", nil, fmt.Errorf("generate outline: %w", err)
 	}
 
-	deck, err := expandOutline(ctx, llm, chapters, outline)
+	framing, err := generateAgenda(ctx, llm, chapters, entries)
 	if err != nil {
-		return "", fmt.Errorf("expand outline: %w", err)
+		return "", nil, fmt.Errorf("generate agenda: %w", err)
 	}
 
-	if err := validateProtoDeck(deck, minSlides, maxSlides); err != nil {
-		return "", fmt.Errorf("invalid proto deck: %w", err)
+	outline := &outlineResponse{DeckTitle: framing.DeckTitle, Agenda: framing.Agenda, Outline: entries}
+	deck, err = expandOutline(ctx, llm, chapters, outline)
+	if err != nil {
+		return "", nil, fmt.Errorf("expand outline: %w", err)
 	}
-	return deck, nil
+
+	validateWarnings, err := validateProtoDeck(deck, minSlides, maxSlides)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid proto deck: %w", err)
+	}
+	return deck, append(outlineWarnings, validateWarnings...), nil
 }
 
-// validateProtoDeck checks that deck has a slide count within [minSlides, maxSlides] and that
-// its <!-- meta: N tag --> markers are sequential starting at 1, with no gaps or repeats.
-func validateProtoDeck(deck string, minSlides, maxSlides int) error {
+// validateProtoDeck checks that deck's <!-- meta: N tag --> markers are sequential starting at 1,
+// with no gaps or repeats (a hard error — a numbering gap indicates broken generation, unrelated
+// to how much content was planned) and returns a warning, not an error, when the slide count
+// falls outside [minSlides, maxSlides] (advisory only — see GenerateProtoDeck's doc comment).
+func validateProtoDeck(deck string, minSlides, maxSlides int) (warnings []string, err error) {
 	matches := reProtoMeta.FindAllStringSubmatch(deck, -1)
 	if got := len(matches); got < minSlides || got > maxSlides {
-		return fmt.Errorf("expected between %d and %d slides, got %d", minSlides, maxSlides, got)
+		warnings = append(warnings, fmt.Sprintf("deck has %d slides, outside the requested %d-%d range", got, minSlides, maxSlides))
 	}
 	for i, m := range matches {
 		want := i + 1
-		got, err := strconv.Atoi(m[1])
-		if err != nil || got != want {
-			return fmt.Errorf("slide meta numbers must be sequential starting at 1: expected %d, got %q", want, m[1])
+		got, convErr := strconv.Atoi(m[1])
+		if convErr != nil || got != want {
+			return nil, fmt.Errorf("slide meta numbers must be sequential starting at 1: expected %d, got %q", want, m[1])
 		}
 	}
-	return nil
+	return warnings, nil
 }
 
 // reProtoSeparator matches a "---" slide-separator line, the format GenerateProtoDeck emits and

@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/jh125486/pdf2qti/internal/audit"
@@ -25,21 +24,32 @@ func selectLLM(gen config.Generation, logger *audit.Logger, stub distill.LLM) di
 }
 
 var (
-	reTargetContentRange = regexp.MustCompile(`TARGET_CONTENT_RANGE: min=(\d+) max=(\d+)`)
-	rePlannedSlideLine   = regexp.MustCompile(`(?m)^\d+\. \[`)
-	reChapterHeading     = regexp.MustCompile(`(?m)^### (\S+):`)
+	rePlannedSlideLine = regexp.MustCompile(`(?m)^\d+\. \[`)
+	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] (.*) — (.*)$`)
+	reChapterHeading   = regexp.MustCompile(`(?m)^### (\S+):`)
 )
 
-// stubProtoDeckShape answers the three prompt shapes distill.GenerateProtoDeck issues (outline
-// planning, batch bullet expansion, summary bullets) with a minimal but structurally valid
-// response, so stub LLMs (used only when no real provider key is configured) can drive the full
-// pipeline offline. Returns ok=false if prompt doesn't match any of the three shapes, so callers
-// with their own additional prompt shapes (e.g. stubModuleLLM's JSON-merge prompt) can fall
-// through to their own default.
-func stubProtoDeckShape(prompt string, chapterTags []string) (resp string, ok bool) {
+// stubChunkOutlineEntries is the fixed number of placeholder outline entries
+// stubChunkOutlineJSON returns per chunk-outline call — ignores the actual per-chunk target
+// embedded in the real prompt (see generateChunkOutline's doc comment) in favor of a small
+// constant, so a stub-driven test fixture's total content-entry count is fully predictable as
+// (chunks across all chapters) × this constant.
+const stubChunkOutlineEntries = 2
+
+// stubProtoDeckShape answers the prompt shapes distill.GenerateProtoDeck issues (per-chunk
+// outline planning, outline reconciliation, agenda/title framing, batch bullet expansion, summary
+// bullets) with a minimal but structurally valid response, so stub LLMs (used only when no real
+// provider key is configured) can drive the full pipeline offline. Returns ok=false if prompt
+// doesn't match any of the shapes, so callers with their own additional prompt shapes (e.g.
+// stubModuleLLM's JSON-merge prompt) can fall through to their own default.
+func stubProtoDeckShape(prompt string) (resp string, ok bool) {
 	switch {
-	case strings.Contains(prompt, "planning a prototype PowerPoint outline"):
-		return stubOutlineJSON(prompt, chapterTags), true
+	case strings.Contains(prompt, "## This excerpt (part "):
+		return stubChunkOutlineJSON(), true
+	case strings.Contains(prompt, "reviewing a slide outline that was planned in fixed-size chunks of chapter text"):
+		return stubReconcileOutlineJSON(prompt), true
+	case strings.Contains(prompt, "writing the overall title and agenda for a prototype PowerPoint deck"):
+		return stubAgendaJSON(), true
 	case strings.Contains(prompt, "writing the bullet content for"):
 		return stubExpandBatchJSON(prompt), true
 	case strings.Contains(prompt, "exactly one summary bullet per agenda item"):
@@ -49,21 +59,32 @@ func stubProtoDeckShape(prompt string, chapterTags []string) (resp string, ok bo
 	}
 }
 
-// stubOutlineJSON builds a minimal but valid outline response: one entry per chapter tag, cycled
-// to reach the TARGET_CONTENT_RANGE minimum embedded in the prompt.
-func stubOutlineJSON(prompt string, chapterTags []string) string {
-	n := 6
-	if m := reTargetContentRange.FindStringSubmatch(prompt); len(m) == 3 {
-		if v, err := strconv.Atoi(m[1]); err == nil && v > 0 {
-			n = v
-		}
-	}
-	entries := make([]string, n)
+// stubChunkOutlineJSON builds a minimal but valid per-chunk outline response: a fixed small
+// number of placeholder entries (see stubChunkOutlineEntries), no parsing of the prompt needed.
+func stubChunkOutlineJSON() string {
+	entries := make([]string, stubChunkOutlineEntries)
 	for i := range entries {
-		tag := chapterTags[i%len(chapterTags)]
-		entries[i] = fmt.Sprintf(`{"tag":%q,"title":"Slide %d","focus":"placeholder"}`, tag, i+1)
+		entries[i] = fmt.Sprintf(`{"title":"Slide %d","focus":"placeholder"}`, i+1)
 	}
-	return fmt.Sprintf(`{"deck_title":"Module Deck","agenda":["Topic 1","Topic 2","Topic 3"],"outline":[%s]}`, strings.Join(entries, ","))
+	return fmt.Sprintf(`{"outline":[%s]}`, strings.Join(entries, ","))
+}
+
+// stubReconcileOutlineJSON echoes back the joined outline entries the reconcile prompt renders
+// (one "N. [tag] Title — Focus" line per entry, the same shape buildExpandBatchPrompt's planned-
+// slides list uses), unmerged — a legitimately valid "no duplicates found" reconciliation
+// response, since a stub-driven test fixture's synthetic entries never actually duplicate.
+func stubReconcileOutlineJSON(prompt string) string {
+	matches := reReconcileLine.FindAllStringSubmatch(prompt, -1)
+	entries := make([]string, len(matches))
+	for i, m := range matches {
+		entries[i] = fmt.Sprintf(`{"tag":%q,"title":%q,"focus":%q}`, m[1], m[2], m[3])
+	}
+	return fmt.Sprintf(`{"outline":[%s],"warnings":[]}`, strings.Join(entries, ","))
+}
+
+// stubAgendaJSON builds a minimal but valid deck-framing response.
+func stubAgendaJSON() string {
+	return `{"deck_title":"Module Deck","agenda":["Topic 1","Topic 2","Topic 3"]}`
 }
 
 // stubExpandBatchJSON returns one placeholder bullet set per planned slide line in prompt.

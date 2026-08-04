@@ -92,6 +92,18 @@ func writeDistilledContextFile(t *testing.T, outDir string) {
 
 func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 	t.Helper()
+	writeDistilledContextFileWithSections(t, outDir, sourceID, []distill.Section{{Title: "Intro", Summary: "summary"}})
+}
+
+// writeDistilledContextFileWithSections is writeDistilledContextFileWithID but with a Sections
+// field of the caller's choosing (nil/empty, one entry, or several) — outline planning itself
+// doesn't consume Sections (it chunks Text by character count, see generateOutlineChunked's doc
+// comment), so this exercises the DistilledContext.Sections through to
+// ProtoChapterInput.Sections wiring at the command layer, not any outline-planning behavior.
+// Text is a small non-empty placeholder ("t") so generateOutlineChunked's chunking always has at
+// least one chunk to plan, regardless of how many Sections the caller passes.
+func writeDistilledContextFileWithSections(t *testing.T, outDir, sourceID string, sections []distill.Section) {
+	t.Helper()
 	dc := &distill.DistilledContext{
 		SourceID:         sourceID,
 		Book:             "Book",
@@ -100,7 +112,8 @@ func writeDistilledContextFileWithID(t *testing.T, outDir, sourceID string) {
 		Overview:         "<p>Overview</p>",
 		MaterialOverview: "Read this",
 		KeyConcepts:      []string{"pipes"},
-		Sections:         []distill.Section{{Title: "Intro", Summary: "summary"}},
+		Text:             "t",
+		Sections:         sections,
 		Agenda:           []string{"Topic A", "Topic B", "Topic C"},
 		Slides: []distill.Slide{
 			{Title: "Topic A", Content: "Point 1\nPoint 2"},
@@ -140,42 +153,21 @@ func writeDistilledContextFileWithText(t *testing.T, outDir, sourceID, text stri
 	}
 }
 
-// countSlideMetaMarkers returns the number of "<!-- meta: N ... -->" slide markers in a proto-deck
-// Markdown file at path, i.e. its total slide count including agenda and summary.
-func countSlideMetaMarkers(t *testing.T, path string) int {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Count(string(data), "<!-- meta:")
-}
-
-// assertSlideCount fails t unless the proto-deck Markdown file at path has exactly want slide
-// meta markers (see countSlideMetaMarkers). want <= 0 means "don't check" and is a no-op.
-func assertSlideCount(t *testing.T, path string, want int) {
-	t.Helper()
-	if want <= 0 {
-		return
-	}
-	if got := countSlideMetaMarkers(t, path); got != want {
-		t.Fatalf("slide count = %d, want %d", got, want)
-	}
-}
-
-// assertSlidesOutput fails t unless outputFile (relative to dir) exists and, if wantSlideCount >
-// 0, has exactly that many slide meta markers. A no-op when outputFile is empty or wantErr is
-// true — a command that errored isn't expected to have produced output.
-func assertSlidesOutput(t *testing.T, dir, outputFile string, wantErr bool, wantSlideCount int) {
+// assertSlidesOutput fails t unless outputFile (relative to dir) exists. A no-op when outputFile
+// is empty or wantErr is true — a command that errored isn't expected to have produced output.
+// Doesn't check slide count: the stub chunk-outline LLM returns a fixed entry count regardless of
+// any requested range or the real per-chunk target embedded in the actual prompt (see
+// generateChunkOutline's doc comment), so an exact count from these command-layer tests isn't a
+// meaningful signal — see internal/distill's TestAutoSlideRange for precise range-arithmetic
+// coverage instead.
+func assertSlidesOutput(t *testing.T, dir, outputFile string, wantErr bool) {
 	t.Helper()
 	if outputFile == "" || wantErr {
 		return
 	}
-	outPath := filepath.Join(dir, outputFile)
-	if _, statErr := os.Stat(outPath); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(dir, outputFile)); statErr != nil {
 		t.Fatalf("expected slides output %q: %v", outputFile, statErr)
 	}
-	assertSlideCount(t, outPath, wantSlideCount)
 }
 
 // slidesAutoScalingPrepare returns a TestSlidesCmdRun_Table prepare func for a single-source
@@ -210,6 +202,72 @@ func moduleAutoScalingPrepare(minSlides, maxSlides int) func(t *testing.T, dir s
 		writeDistilledContextFileWithText(t, dir, "src02", strings.Repeat("x", 4000))
 		return commands.ModuleCmd{ID: "mod1", MinSlides: minSlides, MaxSlides: maxSlides}, &commands.CLI{Config: cfgPath}
 	}
+}
+
+// slidesZeroSectionsPrepare is a TestSlidesCmdRun_Table prepare func for a single-source config
+// whose src01 context has no Sections at all, exercising generateOutlineChunked's pseudo-section
+// fallback end-to-end through the CLI rather than failing.
+func slidesZeroSectionsPrepare(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+	t.Helper()
+	pdfPath := filepath.Join(dir, "src.pdf")
+	if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeConfigFile(t, dir, pdfPath)
+	writeDistilledContextFileWithSections(t, dir, "src01", nil)
+	return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+}
+
+// slidesMultiSectionsPrepare is a TestSlidesCmdRun_Table prepare func for a single-source config
+// whose src01 context has 3 Sections, proving DistilledContext.Sections ->
+// ProtoChapterInput.Sections wiring at the command layer, not just inside the distill package's
+// own tests.
+func slidesMultiSectionsPrepare(t *testing.T, dir string) (commands.SlidesCmd, *commands.CLI) {
+	t.Helper()
+	pdfPath := filepath.Join(dir, "src.pdf")
+	if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeConfigFile(t, dir, pdfPath)
+	writeDistilledContextFileWithSections(t, dir, "src01", []distill.Section{
+		{Title: "Intro", Summary: "s1"},
+		{Title: "Middle", Summary: "s2"},
+		{Title: "End", Summary: "s3"},
+	})
+	return commands.SlidesCmd{IDs: []string{"src01"}, MinSlides: 3, MaxSlides: 20}, &commands.CLI{Config: cfgPath}
+}
+
+// moduleZeroSectionsPrepare is slidesZeroSectionsPrepare's ModuleCmd counterpart, spanning two
+// sources (src01 + src02) both with no Sections.
+func moduleZeroSectionsPrepare(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+	t.Helper()
+	pdfPath := filepath.Join(dir, "src.pdf")
+	if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+	writeDistilledContextFileWithSections(t, dir, "src01", nil)
+	writeDistilledContextFileWithSections(t, dir, "src02", nil)
+	return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 8}, &commands.CLI{Config: cfgPath}
+}
+
+// moduleMultiSectionsPrepare is slidesMultiSectionsPrepare's ModuleCmd counterpart, spanning two
+// sources (src01 with 2 Sections, src02 with 1) to also prove cross-chapter wiring.
+func moduleMultiSectionsPrepare(t *testing.T, dir string) (commands.ModuleCmd, *commands.CLI) {
+	t.Helper()
+	pdfPath := filepath.Join(dir, "src.pdf")
+	if err := os.WriteFile(pdfPath, []byte("fake pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeModuleConfigFile(t, dir, pdfPath)
+	writeDistilledContextFileWithSections(t, dir, "src01", []distill.Section{
+		{Title: "Intro", Summary: "s1"},
+		{Title: "Middle", Summary: "s2"},
+	})
+	writeDistilledContextFileWithSections(t, dir, "src02", []distill.Section{
+		{Title: "Advanced", Summary: "s3"},
+	})
+	return commands.ModuleCmd{ID: "mod1", MinSlides: 3, MaxSlides: 20}, &commands.CLI{Config: cfgPath}
 }
 
 // writeSlidesMarkdownFile writes a proto-deck slide Markdown file to <dir>/src01_slides.md whose

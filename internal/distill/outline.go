@@ -3,6 +3,7 @@ package distill
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,113 +19,38 @@ type outlineEntry struct {
 	Focus string `json:"focus"`
 }
 
-// outlineResponse is the shape of the LLM's JSON response to outlinePromptTmpl.
+// UnmarshalJSON accepts the normal {tag,title,focus} object shape, and also tolerates a bare
+// string in its place (treated as a title-only entry, Tag left empty) — observed in practice from
+// reconcileOutlinePromptTmpl's response, where the model occasionally echoes an entry back as a
+// plain string instead of the requested object. reconcileOutline's existing knownTags check then
+// safely drops a title-only entry (an empty Tag never matches a known chapter tag) with a
+// warning, instead of the whole reconcile response failing to parse over one malformed entry.
+func (e *outlineEntry) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var title string
+		if err := json.Unmarshal(data, &title); err != nil {
+			return fmt.Errorf("outline entry: expected object or string: %w", err)
+		}
+		e.Title = title
+		return nil
+	}
+	type alias outlineEntry
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*e = outlineEntry(a)
+	return nil
+}
+
+// outlineResponse is the shape GenerateProtoDeck assembles from generateOutlineChunked's and
+// generateAgenda's separate results, in the same shape the old single-call outline response used
+// to have — so expandOutline (below) doesn't need to know or care that planning is now chunked.
 type outlineResponse struct {
 	DeckTitle string         `json:"deck_title"`
 	Agenda    []string       `json:"agenda"`
 	Outline   []outlineEntry `json:"outline"`
-}
-
-// generateOutline asks llm to plan a proto-deck as a flat list of slide topics — a bounded
-// enumeration task LLMs reliably hit close to a numeric target on — rather than writing the full
-// content of a large deck in one shot, which they don't (see GenerateProtoDeck's doc comment).
-func generateOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput, minContent, maxContent int) (*outlineResponse, error) {
-	prompt, err := buildOutlinePrompt(chapters, minContent, maxContent)
-	if err != nil {
-		return nil, fmt.Errorf("build outline prompt: %w", err)
-	}
-	raw, err := llm.Complete(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("llm complete: %w", err)
-	}
-	var resp outlineResponse
-	if err := unmarshalRepaired(raw, &resp); err != nil {
-		return nil, fmt.Errorf("parse llm response: %w", err)
-	}
-	if len(resp.Outline) > maxContent {
-		resp.Outline = resp.Outline[:maxContent]
-	}
-	if len(resp.Outline) < minContent {
-		return nil, fmt.Errorf("outline has %d slide topics, need at least %d", len(resp.Outline), minContent)
-	}
-	if n := len(resp.Agenda); n < 3 || n > 8 {
-		return nil, fmt.Errorf("outline agenda has %d bullets, need 3-8", n)
-	}
-	return &resp, nil
-}
-
-// outlinePromptTmpl is the LLM prompt template for planning a proto-deck's slide topics, ahead
-// of writing their actual content.
-var outlinePromptTmpl = template.Must(template.New("outline").Parse(`You are planning a prototype PowerPoint outline spanning multiple textbook chapters. Do NOT
-write full slide content yet — just plan which slides should exist.
-
-## Chapters
-{{range .Chapters}}### {{.Tag}}: {{.ModuleName}}
-Overview: {{.Overview}}
-Key concepts: {{range .KeyConcepts}}{{.}}, {{end}}
-Teaching notes: {{.TeachingNotes}}
-
-Full chapter text (use this to find every distinct definition, formula, and worked example to
-plan a slide for — the fields above are only a high-level summary and omit most of this detail):
-{{.Text}}
-
-{{end}}
-Ignore any "Participation Activity", "Animation content/captions", "Static figure" caption, or
-"Check"/"Show answer" text in the chapter text above — these are leftover interactive-widget
-artifacts, not real content, and must not become outline entries. A "Worked Example"/"WE#" with a
-complete solution is real content and should get its own entry.
-
-Do NOT plan a slide for any "Lab", "Python Lab", or other hands-on coding-exercise section — labs
-are a separate hands-on assignment, not lecture content, even though they're real material in the
-chapter text.
-
-Every outline entry must cover NEW material not covered by any other entry — a specific
-definition, formula, rule, or worked example. Do NOT plan a slide whose purpose is to recap,
-review, or highlight material already covered elsewhere in the outline, under ANY title
-("Review", "Summary", "Recap", "Key Points", "Key Takeaways", "What We Learned", etc.) — a closing
-summary slide covering the whole deck is always appended automatically after your last outline
-entry, so any such slide in the outline itself would be redundant with it.
-
-## Task
-Produce a JSON object with these exact fields:
-- deck_title: short overall title for the deck
-- agenda: array of 3-8 short noun-phrase strings (2-6 words each), one per major cross-chapter
-  theme, each matching the title of the content slide it corresponds to — not a full sentence
-- outline: array of {tag, title, focus} objects, one per planned content slide, in chapter order,
-  where tag is one of the chapter tags above and focus is a 1-2 sentence description of exactly
-  what that slide should cover (referencing a specific definition, formula, or worked example) —
-  NOT the slide's actual bullet content, just what it should be about
-
-## Slide count
-First enumerate every distinct topic across all chapters above that needs its own slide — one per
-definition/concept, one per formula or rule, one per worked example — without looking at the
-range below or stopping once some count feels "enough." Only after that enumeration is complete,
-check the total against the range.
-
-{{.MaxContent}} is your target, not a cap to avoid: a thorough enumeration of a real chapter's
-distinct definitions, formulas, rules, and worked examples should land close to it.
-{{.MinContent}} is an absolute floor for "did I skip real content," not something to stop at once
-reached — if your enumeration lands at or just above {{.MinContent}}, that's a signal you combined
-topics or missed some, not that you're done; go back through the chapter text again instead of
-padding or accepting the low count. Never combine several distinct ideas into one entry just to
-land inside the range faster.
-
-TARGET_CONTENT_RANGE: min={{.MinContent}} max={{.MaxContent}}
-`))
-
-type outlinePromptData struct {
-	Chapters   []ProtoChapterInput
-	MinContent int
-	MaxContent int
-}
-
-// buildOutlinePrompt renders the LLM prompt for planning a proto-deck's slide topics.
-func buildOutlinePrompt(chapters []ProtoChapterInput, minContent, maxContent int) (string, error) {
-	var buf bytes.Buffer
-	if err := outlinePromptTmpl.Execute(&buf, outlinePromptData{Chapters: chapters, MinContent: minContent, MaxContent: maxContent}); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
 }
 
 // expandBatchSize is how many outline entries are expanded into full bullets per LLM call —
@@ -138,8 +64,8 @@ const expandBatchSize = 6
 // code, not a second LLM guess at reproducing them.
 func expandOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput, outline *outlineResponse) (string, error) {
 	chapterByTag := make(map[string]ProtoChapterInput, len(chapters))
-	for _, c := range chapters {
-		chapterByTag[c.Tag] = c
+	for i := range chapters {
+		chapterByTag[chapters[i].Tag] = chapters[i]
 	}
 
 	var b strings.Builder
@@ -200,24 +126,65 @@ type expandBatchResponse struct {
 	Slides []expandSlide `json:"slides"`
 }
 
+// expandBatchSchema is expandBatchResponse's JSON Schema, enforced server-side for providers that
+// support it (see Schema's doc comment) — this is one of the call sites that was, in practice
+// against the real OpenAI API, unreliable without it: the model would occasionally prepend prose
+// to the JSON or otherwise deviate from the requested shape despite the prompt's instructions.
+var expandBatchSchema = &Schema{
+	Name: "slide_bullets_batch",
+	Definition: jsonSchemaObject(map[string]any{
+		"slides": jsonSchemaArray(jsonSchemaObject(map[string]any{
+			"bullets": jsonSchemaArray(jsonSchemaString),
+		})),
+	}),
+}
+
+// expandBatchMaxAttempts bounds expandBatch's retry loop, for two distinct failure modes
+// observed in practice against the real OpenAI API: (1) expandBatchSchema requires a "slides"
+// array but (schema strictness doesn't extend to array length) doesn't require it be non-empty,
+// so a model can occasionally return a structurally valid but empty response for a batch it
+// should have populated; (2) the model's completion content can be truncated mid-JSON (a genuine
+// parse failure, not a schema violation — the outer HTTP response is complete and valid, but the
+// inner content string itself cuts off, most likely a token-limit truncation on an unusually
+// dense batch). Retrying the exact same prompt once resolves both in every real-API case seen so
+// far, so this stays small; if it's ever exhausted, that's treated as a real error rather than
+// retried indefinitely.
+const expandBatchMaxAttempts = 2
+
 // expandBatch writes bullet content for batch's outline entries in one LLM call, grounded in the
-// source text of every chapter tag referenced in batch.
+// source text of every chapter tag referenced in batch. Retries (see expandBatchMaxAttempts) if
+// the response doesn't parse at all, or parses but returns fewer slide entries than batch has,
+// since both are otherwise indistinguishable from a real content failure to expandOutline's
+// caller.
 func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) ([][]string, error) {
 	prompt, err := buildExpandBatchPrompt(chapterByTag, batch)
 	if err != nil {
 		return nil, fmt.Errorf("build expand prompt: %w", err)
 	}
-	raw, err := llm.Complete(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("llm complete: %w", err)
+
+	var out [][]string
+	var lastErr error
+	for attempt := 1; attempt <= expandBatchMaxAttempts; attempt++ {
+		raw, err := llm.Complete(ctx, prompt, expandBatchSchema)
+		if err != nil {
+			return nil, fmt.Errorf("llm complete: %w", err)
+		}
+		var resp expandBatchResponse
+		if err := unmarshalRepaired(raw, &resp); err != nil {
+			lastErr = fmt.Errorf("parse llm response: %w", err)
+			continue
+		}
+		lastErr = nil
+		out = make([][]string, len(resp.Slides))
+		for i, s := range resp.Slides {
+			out[i] = s.Bullets
+		}
+		if len(out) == len(batch) {
+			return out, nil
+		}
 	}
-	var resp expandBatchResponse
-	if err := unmarshalRepaired(raw, &resp); err != nil {
-		return nil, fmt.Errorf("parse llm response: %w", err)
-	}
-	out := make([][]string, len(resp.Slides))
-	for i, s := range resp.Slides {
-		out[i] = s.Bullets
+	if lastErr != nil {
+		return nil, lastErr
 	}
 	return out, nil
 }
@@ -286,7 +253,7 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 	if err != nil {
 		return nil, fmt.Errorf("build summary prompt: %w", err)
 	}
-	raw, err := llm.Complete(ctx, prompt)
+	raw, err := llm.Complete(ctx, prompt, summaryBulletsSchema)
 	if err != nil {
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
@@ -300,6 +267,15 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 		return nil, errors.New("summary has no bullets")
 	}
 	return resp.Bullets, nil
+}
+
+// summaryBulletsSchema is expandSummary's response JSON Schema, enforced server-side for
+// providers that support it (see Schema's doc comment and expandBatchSchema).
+var summaryBulletsSchema = &Schema{
+	Name: "summary_bullets",
+	Definition: jsonSchemaObject(map[string]any{
+		"bullets": jsonSchemaArray(jsonSchemaString),
+	}),
 }
 
 // summaryPromptTmpl is the LLM prompt template for the deck's closing summary bullets.

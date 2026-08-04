@@ -187,11 +187,15 @@ Calls the configured LLM to turn `<outDir>/<id>_context.json` into a proto-deck:
 `<!-- meta -->`-tagged section with a `#` heading and bullet points, `---` between slides.
 LaTeX math is written inline as `\(...\)` and `\begin{bmatrix}...\end{bmatrix}` — these are hand
 -editable Markdown, so review/tweak content before rendering to PPTX. Writes
-`<outDir>/<id>_slides.md` unless `--output` is given. `--min-slides`/`--max-slides` bound the
-deck length; left unset (or `0`), each bound auto-scales to the combined length of the sources'
-distilled `text` (roughly one content slide per 400 chars, ±15%/+25%), so a short chapter and a
-dense multi-section one aren't forced into the same fixed range. Use `--force` to overwrite an
-existing slide file.
+`<outDir>/<id>_slides.md` unless `--output` is given.
+
+Slide topics are planned one textbook section at a time (from the context's `sections`), not in a
+single whole-chapter pass, so a dense multi-section chapter's coverage doesn't depend on the model
+hitting a numeric target across all of it at once. `--min-slides`/`--max-slides` are therefore
+advisory, not enforced: left unset (or `0`), each auto-scales to the combined length of the
+sources' distilled `text` (roughly one content slide per 400 chars, ±15%/+25%) as a rough sizing
+default; if the actual generated deck falls outside the resolved range, generation still succeeds
+and a warning is logged rather than failing. Use `--force` to overwrite an existing slide file.
 
 ### `pptx` — Render PPTX from slide Markdown and a template
 

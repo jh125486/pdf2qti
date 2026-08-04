@@ -20,7 +20,7 @@ func verifyConsistency(ctx context.Context, llm LLM, dc *DistilledContext) ([]st
 		return nil, fmt.Errorf("build verify prompt: %w", err)
 	}
 
-	raw, err := llm.Complete(ctx, prompt)
+	raw, err := llm.Complete(ctx, prompt, nil)
 	if err != nil {
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
