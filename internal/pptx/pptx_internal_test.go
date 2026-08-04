@@ -22,9 +22,16 @@ func TestEnsureNormAutofit_Table(t *testing.T) {
 			want:  `<p:sp><p:txBody><a:bodyPr anchor="ctr" wrap="square"><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 		},
 		{
-			name:  "open/close bodyPr with an unrelated child and no autofit child gets normAutofit inserted",
+			// CT_TextBodyProperties's schema requires prstTxWarp, when present, to precede the
+			// autofit choice — normAutofit must be inserted after it, not as bodyPr's first child.
+			name:  "open/close bodyPr with a prstTxWarp child keeps prstTxWarp before the inserted normAutofit",
 			block: `<p:sp><p:txBody><a:bodyPr anchor="ctr"><a:prstTxWarp prst="textNoShape"/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
-			want:  `<p:sp><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit/><a:prstTxWarp prst="textNoShape"/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+			want:  `<p:sp><p:txBody><a:bodyPr anchor="ctr"><a:prstTxWarp prst="textNoShape"/><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+		},
+		{
+			name:  "open/close bodyPr with a prstTxWarp that has children keeps it intact before normAutofit",
+			block: `<p:sp><p:txBody><a:bodyPr><a:prstTxWarp prst="textArchUp"><a:avLst><a:gd name="adj" fmla="val 5400000"/></a:avLst></a:prstTxWarp></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+			want:  `<p:sp><p:txBody><a:bodyPr><a:prstTxWarp prst="textArchUp"><a:avLst><a:gd name="adj" fmla="val 5400000"/></a:avLst></a:prstTxWarp><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 		},
 		{
 			name:  "bodyPr already declaring normAutofit is left untouched",

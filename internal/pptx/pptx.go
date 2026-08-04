@@ -542,6 +542,12 @@ func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 // ("resize shape to fit text").
 var reAutofitChild = regexp.MustCompile(`<a:(?:normAutofit|noAutofit|spAutoFit)\b`)
 
+// rePrstTxWarp matches a complete <a:prstTxWarp> element, self-closing or with children (e.g. an
+// <a:avLst> of adjustment values) — CT_TextBodyProperties's schema requires prstTxWarp, when
+// present, to precede the autofit choice, so ensureNormAutofit must insert normAutofit after it
+// rather than as bodyPr's first child.
+var rePrstTxWarp = regexp.MustCompile(`(?s)^<a:prstTxWarp\b(?:[^>]*/>|[^>]*>.*?</a:prstTxWarp>)`)
+
 // ensureNormAutofit guarantees shape's <a:bodyPr> declares <a:normAutofit/> ("shrink text on
 // overflow") when it has no autofit child at all, leaving a bodyPr that already declares one
 // (normAutofit, noAutofit, or spAutoFit) untouched — that's a deliberate choice on this specific
@@ -580,13 +586,20 @@ func ensureNormAutofit(block []byte) []byte {
 	if closeRel == -1 {
 		return block // malformed/unclosed bodyPr; leave as-is rather than guess
 	}
-	if reAutofitChild.Match(block[tagEnd : tagEnd+closeRel]) {
+	content := block[tagEnd+1 : tagEnd+closeRel]
+	if reAutofitChild.Match(content) {
 		return block // already has an explicit autofit choice
 	}
+
+	insertAt := tagEnd + 1 // default: bodyPr's first child
+	if warp := rePrstTxWarp.Find(content); warp != nil {
+		insertAt += len(warp) // schema requires prstTxWarp, when present, before the autofit choice
+	}
+
 	out := make([]byte, 0, len(block)+len("<a:normAutofit/>"))
-	out = append(out, block[:tagEnd+1]...)
+	out = append(out, block[:insertAt]...)
 	out = append(out, []byte("<a:normAutofit/>")...)
-	out = append(out, block[tagEnd+1:]...)
+	out = append(out, block[insertAt:]...)
 	return out
 }
 
