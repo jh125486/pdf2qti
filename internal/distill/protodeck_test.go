@@ -22,7 +22,7 @@ func validDeck(n int) string {
 
 var (
 	rePlannedSlideLine = regexp.MustCompile(`(?m)^\d+\. \[`)
-	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] (.*) — (.*)$`)
+	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] \(chunk (\d+)\) (.*) — (.*)$`)
 	reChapterHeading   = regexp.MustCompile(`(?m)^### (\S+):`)
 )
 
@@ -56,6 +56,7 @@ type protoDeckStubLLM struct {
 	expandEmptyFirstCall        bool
 	expandTruncatedFirstCall    bool
 	expandCalls                 int
+	expandPrompts               []string // every expand-batch prompt seen, in order
 	calls                       []string // records which shape each call was, in order
 }
 
@@ -75,6 +76,7 @@ func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string, _ *distill
 		return s.stubAgenda(), nil
 	case strings.Contains(prompt, "writing the bullet content for"):
 		s.calls = append(s.calls, "expand")
+		s.expandPrompts = append(s.expandPrompts, prompt)
 		return s.stubExpandBatch(prompt), nil
 	case strings.Contains(prompt, "exactly one summary bullet per agenda item"):
 		s.calls = append(s.calls, "summary")
@@ -94,20 +96,22 @@ func (s *protoDeckStubLLM) stubChunkOutline() string {
 }
 
 // stubReconcileOutline echoes back the joined outline entries the reconcile prompt renders
-// (one "N. [tag] Title — Focus" line per entry), unmerged — a legitimately valid "no duplicates
-// found" response, since these stub-driven entries never actually duplicate each other. Echoes
-// the tag back WITH its surrounding brackets ("[ch01]" rather than "ch01"), matching real
-// observed behavior from the OpenAI API — this exercises reconcileOutline's defensive
-// bracket-stripping on every table case using this stub, not just a dedicated one, guarding
-// against a regression of the bug it fixed (every real-API run failing "no slide topics after
-// reconciliation" because no returned tag matched knownTags until brackets were stripped). When
-// injectUnknownTagInReconcile is set, appends one extra entry tagged with a chapter tag that
+// (one "N. [tag#chunkIndex] Title — Focus" line per entry), unmerged — a legitimately valid "no
+// duplicates found" response, since these stub-driven entries never actually duplicate each
+// other. Echoes the tag back WITH its surrounding brackets ("[ch01]" rather than "ch01"),
+// matching real observed behavior from the OpenAI API — this exercises reconcileOutline's
+// defensive bracket-stripping on every table case using this stub, not just a dedicated one,
+// guarding against a regression of the bug it fixed (every real-API run failing "no slide topics
+// after reconciliation" because no returned tag matched knownTags until brackets were stripped).
+// Also echoes the parsed chunk index back as chunk_indices, exercising the real scoped-grounding
+// path (see groundingText in outline.go) rather than always falling back to full chapter text.
+// When injectUnknownTagInReconcile is set, appends one extra entry tagged with a chapter tag that
 // doesn't exist even after stripping, to test reconcileOutline's drop-and-warn path.
 func (s *protoDeckStubLLM) stubReconcileOutline(prompt string) string {
 	matches := reReconcileLine.FindAllStringSubmatch(prompt, -1)
 	entries := make([]string, 0, len(matches)+1)
 	for _, m := range matches {
-		entries = append(entries, fmt.Sprintf(`{"tag":"[%s]","title":%q,"focus":%q}`, m[1], m[2], m[3]))
+		entries = append(entries, fmt.Sprintf(`{"tag":"[%s]","title":%q,"focus":%q,"chunk_indices":[%s]}`, m[1], m[3], m[4], m[2]))
 	}
 	if s.injectUnknownTagInReconcile {
 		entries = append(entries, `{"tag":"bogus-tag","title":"Ghost","focus":"f"}`)
@@ -313,6 +317,38 @@ func TestGenerateProtoDeck_CallSequence(t *testing.T) {
 		if c != "expand" {
 			t.Fatalf("expected all calls between agenda and summary to be expand, got %v", llm.calls)
 		}
+	}
+}
+
+// TestGenerateProtoDeck_ExpandBatchGroundingScopedToOwnChunk proves expandBatch's grounding text
+// is actually restricted to the chunk(s) a batch's entries were planned from, not the whole
+// chapter — not just that the plumbing compiles and runs, but that cross-chunk content leakage
+// doesn't happen. Uses the same 2-chunk char-length fixture technique as
+// TestGenerateProtoDeck_CallSequence, with each chunk's text carrying a unique marker string
+// nowhere else in the chapter, and chunkOutlineCount set to exactly expandBatchSize so
+// expandOutline's batching aligns precisely on chunk boundaries (batch 1 = chunk 1's entries,
+// batch 2 = chunk 2's).
+func TestGenerateProtoDeck_ExpandBatchGroundingScopedToOwnChunk(t *testing.T) {
+	t.Parallel()
+
+	chunk1 := "MARKER_CHUNK_ONE " + strings.Repeat("a", 3000)
+	chunk2 := "MARKER_CHUNK_TWO " + strings.Repeat("b", 3000)
+	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: chunk1 + "\n\n" + chunk2}}
+	llm := &protoDeckStubLLM{chunkOutlineCount: 6}
+	_, _, err := distill.GenerateProtoDeck(t.Context(), llm, chapters, 3, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(llm.expandPrompts) != 2 {
+		t.Fatalf("expected 2 expand-batch calls (one per chunk), got %d: %v", len(llm.expandPrompts), llm.expandPrompts)
+	}
+	batch1, batch2 := llm.expandPrompts[0], llm.expandPrompts[1]
+	if !strings.Contains(batch1, "MARKER_CHUNK_ONE") || strings.Contains(batch1, "MARKER_CHUNK_TWO") {
+		t.Fatalf("batch 1 should ground on chunk 1 only, got: %s", batch1)
+	}
+	if !strings.Contains(batch2, "MARKER_CHUNK_TWO") || strings.Contains(batch2, "MARKER_CHUNK_ONE") {
+		t.Fatalf("batch 2 should ground on chunk 2 only, got: %s", batch2)
 	}
 }
 

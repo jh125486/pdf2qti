@@ -38,6 +38,10 @@ const jsonSchemaTypeKey = "type"
 // with the helpers below rather than repeating the {"type": "string"} literal at every leaf.
 var jsonSchemaString = map[string]any{jsonSchemaTypeKey: "string"}
 
+// jsonSchemaInteger is the JSON Schema node for a plain integer value, shared the same way as
+// jsonSchemaString above.
+var jsonSchemaInteger = map[string]any{jsonSchemaTypeKey: "integer"}
+
 // jsonSchemaArray builds a JSON Schema "array" node whose elements each match itemSchema.
 func jsonSchemaArray(itemSchema map[string]any) map[string]any {
 	return map[string]any{
