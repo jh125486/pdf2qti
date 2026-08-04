@@ -75,3 +75,31 @@ func fixRowSeparators(block string) string {
 		return "\\" + m // "\" + whitespace: bare, needs doubling
 	})
 }
+
+// nulByte is the literal NUL character (U+0000) repairNulBytes looks for, spelled out via
+// rune conversion rather than an embedded raw control byte in this file's own source text.
+var nulByte = string(rune(0))
+
+// repairNulBytes replaces an embedded NUL byte with a literal backslash — observed in practice
+// against the real OpenAI API (gpt-5.6-luna and gpt-5.6-terra specifically): a NUL byte appears
+// exactly where a LaTeX command's leading backslash should be, with the command's letters intact
+// right after (e.g. a NUL directly before "mathbf{v}", or a NUL on both sides of "(0,0)").
+// jsonrepair.go's decodeJSON/repairJSONEscapes were traced and are not the source — both
+// correctly double an arbitrary unrecognized backslash escape like "\(" or "\m" rather than
+// losing it, so this is consistent with the model itself emitting a literal backslash-u-0000
+// unicode escape as a spurious artifact (a syntactically valid JSON escape our pipeline has no
+// reason to distrust on its own, unlike a LaTeX-command-shaped "\uXXXX" — see
+// isValidUnicodeEscape's doc comment in jsonrepair.go on that legitimate case).
+//
+// Fixed here, after decoding, rather than by teaching jsonrepair.go to treat backslash-u-0000 as
+// suspicious: that file's unicode-escape handling exists specifically to preserve genuine
+// non-ASCII math symbols models sometimes emit that way (e.g. an escaped "not equal" sign), and
+// narrowing it risks regressing that legitimate case. A NUL byte, unlike those, has no legitimate
+// use in slide content under any circumstance, so replacing it unconditionally here — regardless
+// of exactly how it got there — is safe.
+func repairNulBytes(s string) string {
+	if !strings.Contains(s, nulByte) {
+		return s
+	}
+	return strings.ReplaceAll(s, nulByte, `\`)
+}

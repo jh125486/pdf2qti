@@ -185,7 +185,7 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 		for i, s := range resp.Slides {
 			bullets := make([]string, len(s.Bullets))
 			for j, bullet := range s.Bullets {
-				bullets[j] = repairMatrixRowSeparators(bullet)
+				bullets[j] = repairMatrixRowSeparators(repairNulBytes(bullet))
 			}
 			out[i] = bullets
 		}
@@ -331,7 +331,7 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 	}
 	bullets := make([]string, len(resp.Bullets))
 	for i, bullet := range resp.Bullets {
-		bullets[i] = repairMatrixRowSeparators(bullet)
+		bullets[i] = repairMatrixRowSeparators(repairNulBytes(bullet))
 	}
 	return bullets, nil
 }

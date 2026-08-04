@@ -61,3 +61,47 @@ func TestRepairMatrixRowSeparators_Table(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairNulBytes_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "no NUL byte, unchanged",
+			in:   `Just a plain bullet, no LaTeX at all.`,
+			want: `Just a plain bullet, no LaTeX at all.`,
+		},
+		{
+			// Observed in practice against the real OpenAI API (gpt-5.6-luna, gpt-5.6-terra): a
+			// NUL byte appears exactly where a LaTeX command's leading backslash should be, with
+			// the command's letters intact right after.
+			name: "NUL before a LaTeX command is replaced with a backslash",
+			in:   nulByte + "mathbf{v}",
+			want: `\mathbf{v}`,
+		},
+		{
+			name: "NUL on both sides of a math delimiter is replaced with backslashes",
+			in:   "The origin is " + nulByte + "(0,0" + nulByte + ") in two dimensions.",
+			want: `The origin is \(0,0\) in two dimensions.`,
+		},
+		{
+			name: "multiple NUL bytes across a bullet are all replaced",
+			in:   nulByte + "mathbb{R}^n uses " + nulByte + "text{n-tuples}.",
+			want: `\mathbb{R}^n uses \text{n-tuples}.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := repairNulBytes(tt.in)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
