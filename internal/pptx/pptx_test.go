@@ -193,10 +193,7 @@ func renderTestCases() []renderTestCase {
 			},
 		},
 		{
-			// Plain "**bold**" with no adjacent math span at all — reMathSpan's own
-			// bold-wrapped-math alternatives never match, so this is the only way to reach
-			// boldRunsXML's own bold-run branch (as opposed to a bold marker consumed as part of
-			// a math match).
+			// Plain "**bold**" with no adjacent math span at all.
 			name:    "plain bold text renders a bold run",
 			entries: baseTemplateEntries,
 			dc:      renderFirstContentSlideDC("Point 1\nThis is **important** text"),
@@ -205,6 +202,26 @@ func renderTestCases() []renderTestCase {
 				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
 				mustContainAll(t, "bold run", contentSlide, `<a:rPr lang="en-US" b="1" dirty="0"/><a:t>important</a:t>`)
 				mustContainAll(t, "surrounding plain runs", contentSlide, "This is ", " text")
+			},
+		},
+		{
+			// Regression: a bold span that mixes math and plain text ("**\(n\)-tuple**", as
+			// opposed to a formula bolded entirely on its own) used to leak both "**" markers
+			// through as literal asterisks and leave "-tuple" unbolded — see runsXML's doc
+			// comment for why (math extraction ran across the whole string before bold-splitting,
+			// so the bold span's opening and closing "**" landed in two separate calls that each
+			// only ever saw one of the two markers).
+			name:    "bold span mixing math and plain text bolds the plain-text portion, not just the math",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nAn **\\(n\\)-tuple** is an ordered list."),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				if strings.Contains(contentSlide, "**") {
+					t.Fatalf("literal \"**\" leaked into output: %s", contentSlide)
+				}
+				mustContainAll(t, "bold plain-text portion of the mixed span", contentSlide, `<a:rPr lang="en-US" b="1" dirty="0"/><a:t>-tuple</a:t>`)
+				mustContainAll(t, "unbolded text before and after the bold span", contentSlide, "<a:t>An </a:t>", "is an ordered list.")
 			},
 		},
 		{
