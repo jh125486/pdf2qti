@@ -48,7 +48,10 @@ var (
 // response case above — to test expandBatch retries a genuine parse failure too, not just a
 // successful-but-short response. reviewFails makes the automated post-generation review call
 // fail, to test that GenerateProtoDeck treats it as advisory (a warning, not a returned error)
-// rather than throwing away an otherwise-successful generation.
+// rather than throwing away an otherwise-successful generation. reviewMalformed makes the review
+// call return unparseable content, to test reviewDeck's own parse-error wrapping (still advisory,
+// same as reviewFails). reviewIssues makes the review call return one populated issue, to test
+// reviewDeck's issues-to-warnings formatting path.
 type protoDeckStubLLM struct {
 	err                         error
 	chunkOutlineCount           int
@@ -59,6 +62,8 @@ type protoDeckStubLLM struct {
 	expandEmptyFirstCall        bool
 	expandTruncatedFirstCall    bool
 	reviewFails                 bool
+	reviewMalformed             bool
+	reviewIssues                bool
 	expandCalls                 int
 	expandPrompts               []string // every expand-batch prompt seen, in order
 	calls                       []string // records which shape each call was, in order
@@ -89,6 +94,12 @@ func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string, _ *distill
 		s.calls = append(s.calls, "review")
 		if s.reviewFails {
 			return "", errors.New("review boom")
+		}
+		if s.reviewMalformed {
+			return "not json", nil
+		}
+		if s.reviewIssues {
+			return `{"issues":[{"severity":"high","slide_title":"Vector Magnitude","description":"formula is wrong"}]}`, nil
 		}
 		return `{"issues":[]}`, nil
 	default:
@@ -266,6 +277,19 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			// pipeline (whose output is literally part of the deck).
 			name: "review failure is a warning, not an error", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewFails: true}, chapters: chapters,
 			minSlides: 3, maxSlides: 8, wantWarnLike: "automated deck review could not complete",
+		},
+		{
+			// A review response reviewDeck can't parse (distinct from an outright Complete error
+			// above) must be just as advisory — same non-fatal treatment, different failure point
+			// inside reviewDeck itself.
+			name: "review response that fails to parse is a warning, not an error", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewMalformed: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "automated deck review could not complete",
+		},
+		{
+			// When the review call finds a real issue, it must come back as a warning formatted
+			// "[severity] slide_title: description", not be silently dropped.
+			name: "review issue is surfaced as a formatted warning", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewIssues: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "[high] Vector Magnitude: formula is wrong",
 		},
 	}
 
