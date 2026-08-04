@@ -183,7 +183,11 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 		lastErr = nil
 		out = make([][]string, len(resp.Slides))
 		for i, s := range resp.Slides {
-			out[i] = s.Bullets
+			bullets := make([]string, len(s.Bullets))
+			for j, bullet := range s.Bullets {
+				bullets[j] = repairMatrixRowSeparators(bullet)
+			}
+			out[i] = bullets
 		}
 		if len(out) == len(batch) {
 			return out, nil
@@ -223,6 +227,9 @@ inline where they first appear — never bold a whole bullet.
 Each bullet is a short phrase or fragment, NOT a full flowing sentence — 11 words or fewer
 (formulas don't count toward this). Long sentences don't work on slides; cut to the essential
 words, the way a real lecture slide would, not the way a paragraph would.
+
+A variable referenced inline (like x_1, x_2) must use the same LaTeX math delimiters as every
+other formula in your bullets, never bare underscore notation outside math mode.
 `))
 
 type expandBatchPromptData struct {
@@ -322,7 +329,11 @@ func expandSummary(ctx context.Context, llm LLM, chapters []ProtoChapterInput, a
 	if len(resp.Bullets) == 0 {
 		return nil, errors.New("summary has no bullets")
 	}
-	return resp.Bullets, nil
+	bullets := make([]string, len(resp.Bullets))
+	for i, bullet := range resp.Bullets {
+		bullets[i] = repairMatrixRowSeparators(bullet)
+	}
+	return bullets, nil
 }
 
 // summaryBulletsSchema is expandSummary's response JSON Schema, enforced server-side for
