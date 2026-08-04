@@ -25,7 +25,7 @@ func selectLLM(gen config.Generation, logger *audit.Logger, stub distill.LLM) di
 
 var (
 	rePlannedSlideLine = regexp.MustCompile(`(?m)^\d+\. \[`)
-	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] (.*) — (.*)$`)
+	reReconcileLine    = regexp.MustCompile(`(?m)^\d+\. \[([^\]]*)\] \(chunk (\d+)\) (.*) — (.*)$`)
 	reChapterHeading   = regexp.MustCompile(`(?m)^### (\S+):`)
 )
 
@@ -70,14 +70,16 @@ func stubChunkOutlineJSON() string {
 }
 
 // stubReconcileOutlineJSON echoes back the joined outline entries the reconcile prompt renders
-// (one "N. [tag] Title — Focus" line per entry, the same shape buildExpandBatchPrompt's planned-
-// slides list uses), unmerged — a legitimately valid "no duplicates found" reconciliation
-// response, since a stub-driven test fixture's synthetic entries never actually duplicate.
+// (one "N. [tag] (chunk N) Title — Focus" line per entry), unmerged — a legitimately valid "no
+// duplicates found" reconciliation response, since a stub-driven test fixture's synthetic entries
+// never actually duplicate. Echoes the parsed chunk index back as chunk_indices, so this stub
+// exercises the real scoped-grounding path (see groundingText in internal/distill/outline.go)
+// rather than always falling back to full chapter text.
 func stubReconcileOutlineJSON(prompt string) string {
 	matches := reReconcileLine.FindAllStringSubmatch(prompt, -1)
 	entries := make([]string, len(matches))
 	for i, m := range matches {
-		entries[i] = fmt.Sprintf(`{"tag":%q,"title":%q,"focus":%q}`, m[1], m[2], m[3])
+		entries[i] = fmt.Sprintf(`{"tag":%q,"title":%q,"focus":%q,"chunk_indices":[%s]}`, m[1], m[3], m[4], m[2])
 	}
 	return fmt.Sprintf(`{"outline":[%s],"warnings":[]}`, strings.Join(entries, ","))
 }

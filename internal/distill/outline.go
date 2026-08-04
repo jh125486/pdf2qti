@@ -6,17 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"text/template"
 )
 
-// outlineEntry is one planned content slide: which chapter it belongs to, its title, and a short
-// description of what it should cover — grounded enough for expandBatch to write real bullets
-// from, without needing each chapter's full text repeated in the outline call itself.
+// outlineEntry is one planned content slide: which chapter it belongs to, its title, a short
+// description of what it should cover, and which of that chapter's chunks (see outlineChunkChars
+// in outline_chunks.go) it was planned from. ChunkIndices lets expandBatch (below) ground each
+// batch's prompt on just the source text those specific entries came from, instead of a whole
+// chapter's text resent on every batch call — see groundingText. It's a slice, not a single index,
+// because reconcileOutline can merge two entries from different chunks into one; every entry
+// generateChunkOutline creates directly has exactly one.
 type outlineEntry struct {
-	Tag   string `json:"tag"`
-	Title string `json:"title"`
-	Focus string `json:"focus"`
+	Tag          string `json:"tag"`
+	Title        string `json:"title"`
+	Focus        string `json:"focus"`
+	ChunkIndices []int  `json:"chunk_indices"`
 }
 
 // UnmarshalJSON accepts the normal {tag,title,focus} object shape, and also tolerates a bare
@@ -225,7 +231,11 @@ type expandBatchPromptData struct {
 }
 
 // buildExpandBatchPrompt renders the LLM prompt for writing a batch of planned slides' content,
-// including only the chapters actually referenced by batch (not every chapter in the module).
+// including only the chapters actually referenced by batch (not every chapter in the module), and
+// only each of those chapters' text that this batch's own entries were actually planned from (see
+// groundingText) rather than the chapter's full text — the latter, resent on every one of a
+// chapter's several expand-batch calls, was a substantial source of redundant, wasted input
+// tokens across a full generation.
 func buildExpandBatchPrompt(chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) (string, error) {
 	seen := make(map[string]bool, len(batch))
 	var chapters []ProtoChapterInput
@@ -234,15 +244,61 @@ func buildExpandBatchPrompt(chapterByTag map[string]ProtoChapterInput, batch []o
 			continue
 		}
 		seen[e.Tag] = true
-		if c, ok := chapterByTag[e.Tag]; ok {
-			chapters = append(chapters, c)
+		c, ok := chapterByTag[e.Tag]
+		if !ok {
+			continue
 		}
+		var tagEntries []outlineEntry
+		for _, be := range batch {
+			if be.Tag == e.Tag {
+				tagEntries = append(tagEntries, be)
+			}
+		}
+		c.Text = groundingText(c.Text, tagEntries)
+		chapters = append(chapters, c)
 	}
 	var buf bytes.Buffer
 	if err := expandBatchPromptTmpl.Execute(&buf, expandBatchPromptData{Chapters: chapters, Batch: batch}); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// groundingText returns just the chunks of text that entries were actually planned from (the
+// union of their ChunkIndices, deduped and in ascending order), instead of text in full — chunks
+// are recomputed via splitIntoChunks rather than stored separately, since outlineChunkChars is a
+// package constant and a chapter's Text doesn't change within one GenerateProtoDeck call, so
+// recomputing always reproduces the exact chunks entries were planned against.
+//
+// Falls back to text unchanged if any entry has no recorded ChunkIndices, or references an index
+// outside the recomputed chunks — both should never happen in practice, but grounding on too much
+// text is a far safer failure mode than silently grounding on too little (or none), which risks
+// empty or hallucinated bullet content.
+func groundingText(text string, entries []outlineEntry) string {
+	chunks := splitIntoChunks(text, outlineChunkChars)
+	indexSet := make(map[int]bool)
+	for _, e := range entries {
+		if len(e.ChunkIndices) == 0 {
+			return text
+		}
+		for _, idx := range e.ChunkIndices {
+			indexSet[idx] = true
+		}
+	}
+	sorted := make([]int, 0, len(indexSet))
+	for idx := range indexSet {
+		sorted = append(sorted, idx)
+	}
+	sort.Ints(sorted)
+
+	parts := make([]string, 0, len(sorted))
+	for _, idx := range sorted {
+		if idx < 1 || idx > len(chunks) {
+			return text
+		}
+		parts = append(parts, chunks[idx-1])
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // expandSummary writes the deck's closing summary bullets: one fuller recap per agenda item,
