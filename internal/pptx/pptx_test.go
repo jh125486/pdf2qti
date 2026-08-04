@@ -753,6 +753,19 @@ func TestRender_RealTemplate(t *testing.T) {
 			t.Fatalf("%s: %d pictures but only %d marked decorative", name, picCount, descrCount)
 		}
 	}
+
+	// Every placeholder setPlaceholderBullets populated with generated text must declare
+	// <a:normAutofit/> on its own bodyPr — this template's layouts don't declare it themselves
+	// (see ensureNormAutofit's doc comment for why relying on layout inheritance isn't enough),
+	// so its presence here can only have come from the generator itself.
+	for _, name := range []string{"ppt/slides/slide3.xml", "ppt/slides/slide4.xml", "ppt/slides/slide5.xml"} {
+		slide := string(outEntries[name])
+		bodyPrCount := strings.Count(slide, "<a:bodyPr")
+		autofitCount := strings.Count(slide, "<a:normAutofit/>")
+		if autofitCount != bodyPrCount {
+			t.Fatalf("%s: %d bodyPr but only %d with normAutofit", name, bodyPrCount, autofitCount)
+		}
+	}
 }
 
 func writeZip(path string, entries map[string][]byte) error {

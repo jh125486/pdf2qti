@@ -537,6 +537,59 @@ func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 	return out
 }
 
+// reAutofitChild matches any of the three mutually-exclusive OOXML text-autofit child elements a
+// <a:bodyPr> can declare: normAutofit ("shrink text on overflow"), noAutofit, or spAutoFit
+// ("resize shape to fit text").
+var reAutofitChild = regexp.MustCompile(`<a:(?:normAutofit|noAutofit|spAutoFit)\b`)
+
+// ensureNormAutofit guarantees shape's <a:bodyPr> declares <a:normAutofit/> ("shrink text on
+// overflow") when it has no autofit child at all, leaving a bodyPr that already declares one
+// (normAutofit, noAutofit, or spAutoFit) untouched — that's a deliberate choice on this specific
+// shape, not the gap this works around.
+//
+// PowerPoint's own placeholder inheritance for autofit is unreliable in practice: this package's
+// template ships every placeholder's slide-level bodyPr empty ("<a:bodyPr/>", no autofit child at
+// all) even though the corresponding slide layout declares "<a:normAutofit/>" — and PowerPoint
+// does not reliably apply that inherited setting to generated slides until a user manually clicks
+// Home > Reset on each one (observed against real generated decks: the layout's autofit is
+// correctly configured, but slides opened fresh still overflow their placeholder box). Explicitly
+// writing normAutofit onto every generated slide's own bodyPr, rather than relying on it being
+// inherited from the layout, guarantees "shrink text on overflow" applies without that manual
+// per-slide step.
+func ensureNormAutofit(block []byte) []byte {
+	start := bytes.Index(block, []byte("<a:bodyPr"))
+	if start == -1 {
+		return block
+	}
+	tagEndRel := bytes.IndexByte(block[start:], '>')
+	if tagEndRel == -1 {
+		return block
+	}
+	tagEnd := start + tagEndRel // index of the opening tag's '>'
+
+	if block[tagEnd-1] == '/' {
+		// Self-closing "<a:bodyPr.../>": splice in an explicit close and normAutofit child.
+		out := make([]byte, 0, len(block)+len("><a:normAutofit/></a:bodyPr>"))
+		out = append(out, block[:tagEnd-1]...)
+		out = append(out, []byte("><a:normAutofit/></a:bodyPr>")...)
+		out = append(out, block[tagEnd+1:]...)
+		return out
+	}
+
+	closeRel := bytes.Index(block[tagEnd:], []byte("</a:bodyPr>"))
+	if closeRel == -1 {
+		return block // malformed/unclosed bodyPr; leave as-is rather than guess
+	}
+	if reAutofitChild.Match(block[tagEnd : tagEnd+closeRel]) {
+		return block // already has an explicit autofit choice
+	}
+	out := make([]byte, 0, len(block)+len("<a:normAutofit/>"))
+	out = append(out, block[:tagEnd+1]...)
+	out = append(out, []byte("<a:normAutofit/>")...)
+	out = append(out, block[tagEnd+1:]...)
+	return out
+}
+
 // setPlaceholderBullets locates the <p:sp> shape containing a <p:ph type="phType" .../> and
 // replaces its text body with one <a:p> paragraph per bullet.
 func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]byte, error) {
@@ -556,7 +609,7 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]
 	}
 	spEnd := phIdx + spEndRel + len("</p:sp>")
 
-	block := slideXML[spStart:spEnd]
+	block := ensureNormAutofit(slideXML[spStart:spEnd])
 
 	lstIdx := bytes.Index(block, []byte("<a:lstStyle/>"))
 	if lstIdx == -1 {
