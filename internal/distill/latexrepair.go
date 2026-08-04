@@ -18,9 +18,9 @@ var (
 
 // reRowSeparator matches a run of one or two backslashes immediately followed by whitespace — a
 // LaTeX row separator, correct only when doubled ("\\\\" in Go source, two literal backslash
-// characters). The optional second backslash is captured so repairMatrixRowSeparators's callback
-// can tell an already-correct separator (leave alone) from a bare one (needs doubling) without
-// lookaround, which RE2 doesn't support.
+// characters). The optional second backslash lets fixRowSeparators distinguish an already-correct
+// separator (leave alone) from a bare one (needs doubling) without lookaround, which RE2 doesn't
+// support; the callback uses the match length to decide.
 var reRowSeparator = regexp.MustCompile(`\\\\?[ \t\n]`)
 
 // repairMatrixRowSeparators fixes a LaTeX matrix row separator that's missing its second
