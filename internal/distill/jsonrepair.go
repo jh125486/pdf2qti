@@ -90,31 +90,50 @@ func repairJSONEscapes(s string) string {
 	return b.String()
 }
 
-// ambiguousControlEscapeLetters are the RFC 8259 single-letter escapes (backspace, form feed,
-// newline, carriage return, tab) that also start common LaTeX commands ("\begin", "\frac",
-// "\nabla"/"\neq"/"\notin", "\right"/"\rangle", "\times"/"\theta"/"\tan"). A raw "\n" (etc.) in
-// this position parses as syntactically valid JSON — decoding into a genuine control byte plus
-// the command's remaining letters — while still being semantically wrong: this domain never
-// legitimately wants a literal control byte (see repairJSONEscapes's doc comment), only a LaTeX
-// command. Successful parsing is therefore not sufficient evidence of correctness whenever one of
-// these five letters follows a backslash; see hasAmbiguousControlEscape.
-const ambiguousControlEscapeLetters = "bfnrt"
+// ambiguousControlBytes are the actual RFC 8259 control bytes (backspace, form feed, newline,
+// carriage return, tab) that a raw, unescaped LaTeX command starting with the same letter
+// ("\begin", "\frac", "\nabla"/"\neq"/"\notin", "\right"/"\rangle", "\times"/"\theta"/"\tan")
+// decodes into if json.Unmarshal is trusted at face value: syntactically valid JSON, semantically
+// wrong, since this domain never legitimately wants a literal control byte in decoded content
+// (see repairJSONEscapes's doc comment) — only the LaTeX command that byte-plus-remaining-letters
+// was actually meant to be.
+const ambiguousControlBytes = "\b\f\n\r\t"
 
-// hasAmbiguousControlEscape reports whether s contains a backslash immediately followed by one of
-// ambiguousControlEscapeLetters — signaling that a successful json.Unmarshal(s, ...) can't be
-// trusted as evidence s was already correctly escaped (see unmarshalRepaired).
-func hasAmbiguousControlEscape(s string) bool {
-	for i := 0; i < len(s)-1; i++ {
-		if s[i] == '\\' && strings.IndexByte(ambiguousControlEscapeLetters, s[i+1]) >= 0 {
-			return true
+// hasAmbiguousControlByte reports whether v — a value just populated by a successful
+// decodeJSON(raw, v) — contains any ambiguousControlBytes anywhere in its string data (walking
+// structs, slices, and maps via reflection). See unmarshalRepaired for why this checks the
+// *decoded result* rather than scanning raw for a "\b"/"\f"/"\n"/"\r"/"\t" substring.
+func hasAmbiguousControlByte(v reflect.Value) bool {
+	switch v.Kind() { //nolint:exhaustive // only the kinds this package's response structs actually use need walking; every other Kind falls through to `return false` below, which is correct for them (nothing to scan)
+	case reflect.Pointer, reflect.Interface:
+		return !v.IsNil() && hasAmbiguousControlByte(v.Elem())
+	case reflect.String:
+		return strings.ContainsAny(v.String(), ambiguousControlBytes)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if hasAmbiguousControlByte(v.Field(i)) {
+				return true
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		for i := range v.Len() {
+			if hasAmbiguousControlByte(v.Index(i)) {
+				return true
+			}
+		}
+	case reflect.Map:
+		for _, k := range v.MapKeys() {
+			if hasAmbiguousControlByte(v.MapIndex(k)) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
 // unmarshalRepaired parses raw LLM JSON output into v, applying repairJSONEscapes only when
-// needed: when raw contains no ambiguousControlEscapeLetters sequence, a direct parse is tried
-// first and used as-is if it succeeds; repair is used otherwise.
+// needed: a direct parse is tried first and used as-is if it succeeds AND the result contains no
+// ambiguousControlBytes; repair is used otherwise.
 //
 // repairJSONEscapes's doubling heuristic assumes the model never emits a correctly-escaped
 // backslash on its own — true for the common case (raw, unescaped LaTeX) but not always: a model
@@ -128,16 +147,74 @@ func hasAmbiguousControlEscape(s string) bool {
 // But trusting *any* successful direct parse is unsafe on its own: raw "\nabla" (etc.) parses
 // successfully too, decoding into a newline byte plus "abla" — silently wrong, and exactly the
 // bug class repairJSONEscapes exists to catch (see TestRepairJSONEscapes_LatexNablaNotNewline and
-// siblings). hasAmbiguousControlEscape gates the fast path so it's only taken when nothing in raw
-// could parse successfully-but-wrongly; anything with a b/f/n/r/t-prefixed escape always goes
-// through repairJSONEscapes's structural rule, exactly as it did before this function existed.
+// siblings). Checking the decoded result for ambiguousControlBytes catches that case exactly as
+// reliably as scanning raw text for a "\b"/"\f"/"\n"/"\r"/"\t" substring would — but scoped to
+// what the parse actually produced, not merely what raw happens to contain anywhere in it.
+//
+// But re-decoding the *entire* raw response through repairJSONEscapes whenever any field looks
+// suspicious has its own collateral-damage problem, observed in practice: gpt-5.6-luna properly
+// JSON-escapes its own backslashes (e.g. "\\(" for a slide's inline math) far more consistently
+// than earlier models did, but a single multi-bullet response routinely mixes an already-correct
+// field like that with an unrelated, genuinely-raw command in a different bullet of the very same
+// response (e.g. "\frac" — routine in math-heavy content). Discarding the whole direct decode over
+// one bad field mangled every already-correct field as collateral damage too — 100% of a real
+// generated deck's inline math delimiters ended up doubled this way. So the fallback below is
+// applied per leaf, not per response: only the specific string fields hasAmbiguousControlByte
+// actually flags are replaced with their repaired counterpart; every other field keeps whatever
+// the direct, unrepaired decode produced.
 func unmarshalRepaired(raw string, v any) error {
-	if !hasAmbiguousControlEscape(raw) {
-		if err := decodeJSON(raw, v); err == nil {
-			return nil
+	if err := decodeJSON(raw, v); err != nil {
+		return decodeJSON(repairJSONEscapes(raw), v)
+	}
+
+	direct := reflect.ValueOf(v)
+	if !hasAmbiguousControlByte(direct) {
+		return nil
+	}
+
+	repaired := reflect.New(direct.Elem().Type())
+	if err := decodeJSON(repairJSONEscapes(raw), repaired.Interface()); err != nil {
+		// direct is already known untrustworthy (hasAmbiguousControlByte flagged it) and the
+		// repair fallback couldn't produce a replacement either — surface an error rather than
+		// silently returning success with a result some of whose leaves may hold raw control
+		// bytes instead of the LaTeX command they were meant to be.
+		return fmt.Errorf("repair fallback: %w", err)
+	}
+	mergeAmbiguousLeaves(direct, repaired)
+	return nil
+}
+
+// mergeAmbiguousLeaves overwrites direct's string leaves with repaired's corresponding leaves
+// wherever direct's own leaf contains an ambiguousControlByte — i.e. wherever that specific leaf's
+// direct decode was untrustworthy — leaving every other leaf (the overwhelming majority, in
+// practice) as whatever the direct, unrepaired decode already produced. direct and repaired must
+// be reflect.Values of identical type, both already populated by a successful decodeJSON call.
+func mergeAmbiguousLeaves(direct, repaired reflect.Value) {
+	switch direct.Kind() { //nolint:exhaustive // only the kinds this package's response structs actually use need walking; every other Kind has nothing to merge
+	case reflect.Pointer, reflect.Interface:
+		if !direct.IsNil() {
+			mergeAmbiguousLeaves(direct.Elem(), repaired.Elem())
+		}
+	case reflect.String:
+		if direct.CanSet() && strings.ContainsAny(direct.String(), ambiguousControlBytes) {
+			direct.SetString(repaired.String())
+		}
+	case reflect.Struct:
+		for i := range direct.NumField() {
+			mergeAmbiguousLeaves(direct.Field(i), repaired.Field(i))
+		}
+	case reflect.Slice, reflect.Array:
+		for i := range direct.Len() {
+			mergeAmbiguousLeaves(direct.Index(i), repaired.Index(i))
+		}
+	case reflect.Map:
+		for _, k := range direct.MapKeys() {
+			mv := direct.MapIndex(k)
+			if mv.Kind() == reflect.String && strings.ContainsAny(mv.String(), ambiguousControlBytes) {
+				direct.SetMapIndex(k, repaired.MapIndex(k))
+			}
 		}
 	}
-	return decodeJSON(repairJSONEscapes(raw), v)
 }
 
 // decodeJSON parses the JSON object in s into v, tolerating prose a model adds around it despite

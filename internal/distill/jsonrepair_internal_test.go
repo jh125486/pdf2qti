@@ -3,6 +3,7 @@ package distill
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -314,5 +315,64 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 				t.Fatalf("got %q, want %q", out.Text, tt.want)
 			}
 		})
+	}
+}
+
+// TestUnmarshalRepaired_MixedLeavesInSameResponse is the ch01_slides.md regression: a single
+// response with one bullet already correctly JSON-escaped ("\\(x\\)", observed from gpt-5.6-luna)
+// and a separate, unrelated bullet containing a raw, ambiguous LaTeX command ("\frac", the common
+// case from earlier models). Both bullets must come out correct — the already-valid one must not
+// be mangled as collateral damage from repairing the other. See mergeAmbiguousLeaves: unlike a
+// single string value mixing both patterns (which no leaf-level fix can help — you can't cherry-
+// pick within one string), this is the realistic shape an expand-batch response actually has:
+// several independent bullet strings in one JSON array.
+func TestUnmarshalRepaired_MixedLeavesInSameResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"bullets":["inline math \\(x\\) here","separately \frac{1}{2} elsewhere"]}`
+	var out struct {
+		Bullets []string `json:"bullets"`
+	}
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := []string{`inline math \(x\) here`, `separately \frac{1}{2} elsewhere`}
+	if len(out.Bullets) != 2 || out.Bullets[0] != want[0] || out.Bullets[1] != want[1] {
+		t.Fatalf("got %q, want %q", out.Bullets, want)
+	}
+}
+
+// TestHasAmbiguousControlByte_Map and TestMergeAmbiguousLeaves_Map cover the map-valued branches
+// of hasAmbiguousControlByte/mergeAmbiguousLeaves directly via reflection, since no current
+// response struct in this package actually has a map-typed field to exercise them through
+// unmarshalRepaired end-to-end — both functions are written generically to walk any of this
+// package's response shapes, not just the ones in use today, so the branch is real and worth
+// covering on its own rather than only through the shapes that happen to exist right now.
+func TestHasAmbiguousControlByte_Map(t *testing.T) {
+	t.Parallel()
+
+	clean := map[string]string{"a": `\(x\)`}
+	if hasAmbiguousControlByte(reflect.ValueOf(clean)) {
+		t.Fatal("clean map value flagged as ambiguous")
+	}
+
+	dirty := map[string]string{"a": "gradient \nabla f"}
+	if !hasAmbiguousControlByte(reflect.ValueOf(dirty)) {
+		t.Fatal("map value containing a literal newline not flagged as ambiguous")
+	}
+}
+
+func TestMergeAmbiguousLeaves_Map(t *testing.T) {
+	t.Parallel()
+
+	direct := map[string]string{"clean": `\(x\)`, "dirty": "gradient \nabla f"}
+	repaired := map[string]string{"clean": `\\(x\\)`, "dirty": `gradient \nabla f`}
+	mergeAmbiguousLeaves(reflect.ValueOf(direct), reflect.ValueOf(repaired))
+
+	if direct["clean"] != `\(x\)` {
+		t.Fatalf(`clean leaf changed: got %q, want %q`, direct["clean"], `\(x\)`)
+	}
+	if direct["dirty"] != `gradient \nabla f` {
+		t.Fatalf(`dirty leaf not repaired: got %q, want %q`, direct["dirty"], `gradient \nabla f`)
 	}
 }
