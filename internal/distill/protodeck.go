@@ -132,11 +132,21 @@ func GenerateProtoDeck(ctx context.Context, llm LLM, chapters []ProtoChapterInpu
 		return "", nil, fmt.Errorf("expand outline: %w", err)
 	}
 
+	// Advisory only: a failure here must not throw away an otherwise-successful, already-expensive
+	// generation (see reviewDeck's doc comment) — surfaced as a warning, not a returned error.
+	reviewWarnings, reviewErr := reviewDeck(ctx, llm, deck)
+	if reviewErr != nil {
+		reviewWarnings = []string{fmt.Sprintf("automated deck review could not complete: %v", reviewErr)}
+	}
+
 	validateWarnings, err := validateProtoDeck(deck, minSlides, maxSlides)
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid proto deck: %w", err)
 	}
-	return deck, append(outlineWarnings, validateWarnings...), nil
+	warnings = append(warnings, outlineWarnings...)
+	warnings = append(warnings, reviewWarnings...)
+	warnings = append(warnings, validateWarnings...)
+	return deck, warnings, nil
 }
 
 // validateProtoDeck checks that deck's <!-- meta: N tag --> markers are sequential starting at 1,

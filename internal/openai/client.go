@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.openai.com/v1"
-	providerOpenAI = "openai"
-	defaultModel   = "gpt-4o"
+	defaultBaseURL   = "https://api.openai.com/v1"
+	providerOpenAI   = "openai"
+	defaultModel     = "gpt-4o"
+	defaultAPIKeyEnv = "OPENAI_API_KEY" //nolint:gosec // this is an env var *name*, not a credential value
 )
 
 // maxRateLimitRetries and rateLimitBackoff bound Complete's retry behavior when OpenAI responds
@@ -34,13 +35,16 @@ const (
 	rateLimitBackoff    = 2 * time.Second
 )
 
-// Client calls the OpenAI chat completions API.
+// Client calls the OpenAI chat completions API. modelParams, when set, is a raw JSON object
+// merged directly into every request body (e.g. {"temperature": 0.7} or {"reasoning_effort":
+// "high"}) — see config.Generation's doc comment for why this is a raw blob rather than typed Go
+// fields per parameter.
 type Client struct {
 	httpClient  *http.Client
 	baseURL     string
 	apiKey      string
 	model       string
-	temperature float64
+	modelParams json.RawMessage
 }
 
 // New builds a Client from a resolved Generation config, reading the API key from the
@@ -52,7 +56,7 @@ func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches 
 	}
 	keyEnv := cfg.APIKeyEnv
 	if keyEnv == "" {
-		keyEnv = "OPENAI_API_KEY"
+		keyEnv = defaultAPIKeyEnv
 	}
 	key := os.Getenv(keyEnv)
 	if key == "" {
@@ -67,7 +71,7 @@ func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches 
 		baseURL:     defaultBaseURL,
 		apiKey:      key,
 		model:       model,
-		temperature: cfg.Temperature,
+		modelParams: cfg.ModelParams,
 	}, nil
 }
 
@@ -86,7 +90,6 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
-	Temperature    float64         `json:"temperature,omitempty"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 }
 
@@ -126,6 +129,36 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
+// mergeModelParams marshals req, then merges extra's top-level keys on top — extra's keys win on
+// collision — letting arbitrary provider-specific parameters (temperature, reasoning_effort,
+// top_p, whatever a model adds next) be sent without Client needing a typed Go field for each one
+// (see config.Generation.ModelParams's doc comment for why). Uses map[string]json.RawMessage
+// rather than map[string]any for both req's own marshaled JSON and extra, so every value's
+// original byte representation is preserved exactly rather than round-tripped through Go's
+// float64-by-default JSON number decoding. extra may be nil/empty (no merge needed).
+func mergeModelParams(req chatRequest, extra json.RawMessage) ([]byte, error) {
+	base, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if len(extra) == 0 {
+		return base, nil
+	}
+
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	var extraFields map[string]json.RawMessage
+	if err := json.Unmarshal(extra, &extraFields); err != nil {
+		return nil, fmt.Errorf("invalid modelParams: %w", err)
+	}
+	for k, v := range extraFields {
+		merged[k] = v
+	}
+	return json.Marshal(merged)
+}
+
 // Complete sends prompt as a single user message and returns the model's reply, with any
 // surrounding Markdown code-fence stripped (models occasionally wrap JSON responses in
 // ```json ... ``` even when told not to). When schema is non-nil, the request enforces it
@@ -135,9 +168,8 @@ type chatResponse struct {
 // without retrying.
 func (c *Client) Complete(ctx context.Context, prompt string, schema *distill.Schema) (string, error) {
 	reqBody := chatRequest{
-		Model:       c.model,
-		Messages:    []chatMessage{{Role: "user", Content: prompt}},
-		Temperature: c.temperature,
+		Model:    c.model,
+		Messages: []chatMessage{{Role: "user", Content: prompt}},
 	}
 	if schema != nil {
 		reqBody.ResponseFormat = &responseFormat{
@@ -149,7 +181,7 @@ func (c *Client) Complete(ctx context.Context, prompt string, schema *distill.Sc
 			},
 		}
 	}
-	body, err := json.Marshal(reqBody)
+	body, err := mergeModelParams(reqBody, c.modelParams)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}

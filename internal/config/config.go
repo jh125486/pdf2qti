@@ -53,14 +53,21 @@ type Quiz struct {
 	MAOptions           OptionRange `json:"maOptions"`
 }
 
-// Generation holds LLM generation parameters.
+// Generation holds LLM generation parameters. ModelParams is a raw JSON object merged directly
+// into the provider's request body (e.g. {"temperature": 0.7, "reasoning_effort": "high"}) rather
+// than a fixed set of typed Go fields — provider APIs add and change tunable parameters
+// frequently enough (and support them inconsistently across models — a reasoning-family model may
+// reject "temperature" outright while requiring "reasoning_effort", an older model the reverse)
+// that hardcoding each one here means a Go code change for every new or per-model parameter. An
+// invalid or unrecognized key inside it surfaces as a normal API error from the provider, not a
+// client-side one.
 type Generation struct {
-	Stages      []Stage `json:"stages"`
-	Seed        int     `json:"seed"`
-	Provider    string  `json:"provider"`
-	Model       string  `json:"model"`
-	APIKeyEnv   string  `json:"apiKeyEnv"`
-	Temperature float64 `json:"temperature,omitempty"`
+	Stages      []Stage         `json:"stages"`
+	Seed        int             `json:"seed"`
+	Provider    string          `json:"provider"`
+	Model       string          `json:"model"`
+	APIKeyEnv   string          `json:"apiKeyEnv"`
+	ModelParams json.RawMessage `json:"modelParams,omitempty"`
 }
 
 // Validation holds quiz validation rules.
@@ -302,8 +309,8 @@ func (c *Config) EffectiveGeneration(s *Source) Generation {
 	if sg.APIKeyEnv != "" {
 		g.APIKeyEnv = sg.APIKeyEnv
 	}
-	if sg.Temperature != 0 {
-		g.Temperature = sg.Temperature
+	if len(sg.ModelParams) > 0 {
+		g.ModelParams = sg.ModelParams
 	}
 	return g
 }

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -328,12 +329,13 @@ func TestEffectiveGeneration_Table(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		cfg          config.Config
-		wantModel    string
-		wantProvider string
-		wantSeed     int
-		wantStages   []config.Stage
+		name            string
+		cfg             config.Config
+		wantModel       string
+		wantProvider    string
+		wantSeed        int
+		wantStages      []config.Stage
+		wantModelParams string
 	}{
 		{
 			name: "no source override",
@@ -377,14 +379,15 @@ func TestEffectiveGeneration_Table(t *testing.T) {
 							Seed:        99,
 							Provider:    "anthropic",
 							APIKeyEnv:   "MY_KEY",
-							Temperature: 0.9,
+							ModelParams: json.RawMessage(`{"temperature":0.9}`),
 						},
 					},
 				},
 			},
-			wantProvider: "anthropic",
-			wantSeed:     99,
-			wantStages:   []config.Stage{config.StageTF, config.StageMC},
+			wantProvider:    "anthropic",
+			wantSeed:        99,
+			wantStages:      []config.Stage{config.StageTF, config.StageMC},
+			wantModelParams: `{"temperature":0.9}`,
 		},
 	}
 
@@ -404,6 +407,9 @@ func TestEffectiveGeneration_Table(t *testing.T) {
 			}
 			if len(tt.wantStages) > 0 && len(got.Stages) != len(tt.wantStages) {
 				t.Errorf("Stages=%v want=%v", got.Stages, tt.wantStages)
+			}
+			if tt.wantModelParams != "" && string(got.ModelParams) != tt.wantModelParams {
+				t.Errorf("ModelParams=%s want=%s", got.ModelParams, tt.wantModelParams)
 			}
 		})
 	}

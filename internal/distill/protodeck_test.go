@@ -2,6 +2,7 @@ package distill_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -45,7 +46,12 @@ var (
 // expandTruncatedFirstCall makes the first expand-batch call return truncated (invalid) JSON —
 // observed in practice against the real OpenAI API as a distinct failure mode from the empty-
 // response case above — to test expandBatch retries a genuine parse failure too, not just a
-// successful-but-short response.
+// successful-but-short response. reviewFails makes the automated post-generation review call
+// fail, to test that GenerateProtoDeck treats it as advisory (a warning, not a returned error)
+// rather than throwing away an otherwise-successful generation. reviewMalformed makes the review
+// call return unparseable content, to test reviewDeck's own parse-error wrapping (still advisory,
+// same as reviewFails). reviewIssues makes the review call return one populated issue, to test
+// reviewDeck's issues-to-warnings formatting path.
 type protoDeckStubLLM struct {
 	err                         error
 	chunkOutlineCount           int
@@ -55,6 +61,9 @@ type protoDeckStubLLM struct {
 	summaryEmpty                bool
 	expandEmptyFirstCall        bool
 	expandTruncatedFirstCall    bool
+	reviewFails                 bool
+	reviewMalformed             bool
+	reviewIssues                bool
 	expandCalls                 int
 	expandPrompts               []string // every expand-batch prompt seen, in order
 	calls                       []string // records which shape each call was, in order
@@ -81,6 +90,18 @@ func (s *protoDeckStubLLM) Complete(_ context.Context, prompt string, _ *distill
 	case strings.Contains(prompt, "exactly one summary bullet per agenda item"):
 		s.calls = append(s.calls, "summary")
 		return s.stubSummary(prompt), nil
+	case strings.Contains(prompt, "reviewing a finished prototype PowerPoint deck"):
+		s.calls = append(s.calls, "review")
+		if s.reviewFails {
+			return "", errors.New("review boom")
+		}
+		if s.reviewMalformed {
+			return "not json", nil
+		}
+		if s.reviewIssues {
+			return `{"issues":[{"severity":"high","slide_title":"Vector Magnitude","description":"formula is wrong"}]}`, nil
+		}
+		return `{"issues":[]}`, nil
 	default:
 		s.calls = append(s.calls, "merge")
 		return `{"overview":"","objectives":[],"vocabulary":[],"theorems":[]}`, nil
@@ -250,6 +271,26 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 			name: "expand batch retries once on truncated response", llm: &protoDeckStubLLM{chunkOutlineCount: 1, expandTruncatedFirstCall: true}, chapters: chapters,
 			minSlides: 3, maxSlides: 8,
 		},
+		{
+			// The automated post-generation review is advisory: a failure there must not throw
+			// away an otherwise-successful generation, unlike every other LLM call in this
+			// pipeline (whose output is literally part of the deck).
+			name: "review failure is a warning, not an error", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewFails: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "automated deck review could not complete",
+		},
+		{
+			// A review response reviewDeck can't parse (distinct from an outright Complete error
+			// above) must be just as advisory — same non-fatal treatment, different failure point
+			// inside reviewDeck itself.
+			name: "review response that fails to parse is a warning, not an error", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewMalformed: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "automated deck review could not complete",
+		},
+		{
+			// When the review call finds a real issue, it must come back as a warning formatted
+			// "[severity] slide_title: description", not be silently dropped.
+			name: "review issue is surfaced as a formatted warning", llm: &protoDeckStubLLM{chunkOutlineCount: 1, reviewIssues: true}, chapters: chapters,
+			minSlides: 3, maxSlides: 8, wantWarnLike: "[high] Vector Magnitude: formula is wrong",
+		},
 	}
 
 	for _, tt := range tests {
@@ -284,9 +325,10 @@ func TestGenerateProtoDeck_Table(t *testing.T) {
 
 // TestGenerateProtoDeck_CallSequence asserts the exact call sequence for a chapter whose Text
 // splits into 3 chunks (one chunk-outline call each, in order, then one reconcile call, one
-// agenda call, then expand batches, then summary) — a structurally different assertion (call
-// order, not error/warning shape) from TestGenerateProtoDeck_Table, so it's kept as its own
-// function rather than folded into that table.
+// agenda call, then expand batches, then summary, then the final automated review pass) — a
+// structurally different assertion (call order, not error/warning shape) from
+// TestGenerateProtoDeck_Table, so it's kept as its own function rather than folded into that
+// table.
 func TestGenerateProtoDeck_CallSequence(t *testing.T) {
 	t.Parallel()
 
@@ -302,21 +344,65 @@ func TestGenerateProtoDeck_CallSequence(t *testing.T) {
 	}
 
 	wantPrefix := []string{"chunk-outline", "chunk-outline", "chunk-outline", "reconcile", "agenda"}
-	if len(llm.calls) < len(wantPrefix)+1 {
-		t.Fatalf("expected at least %d calls, got %v", len(wantPrefix)+1, llm.calls)
+	if len(llm.calls) < len(wantPrefix)+2 {
+		t.Fatalf("expected at least %d calls, got %v", len(wantPrefix)+2, llm.calls)
 	}
 	for i, want := range wantPrefix {
 		if llm.calls[i] != want {
 			t.Fatalf("call %d: got %q, want %q (full sequence: %v)", i, llm.calls[i], want, llm.calls)
 		}
 	}
-	if llm.calls[len(llm.calls)-1] != "summary" {
-		t.Fatalf("expected last call to be summary, got %v", llm.calls)
+	if llm.calls[len(llm.calls)-1] != "review" {
+		t.Fatalf("expected last call to be review, got %v", llm.calls)
 	}
-	for _, c := range llm.calls[len(wantPrefix) : len(llm.calls)-1] {
+	if llm.calls[len(llm.calls)-2] != "summary" {
+		t.Fatalf("expected second-to-last call to be summary, got %v", llm.calls)
+	}
+	for _, c := range llm.calls[len(wantPrefix) : len(llm.calls)-2] {
 		if c != "expand" {
 			t.Fatalf("expected all calls between agenda and summary to be expand, got %v", llm.calls)
 		}
+	}
+}
+
+// TestGenerateProtoDeck_DuplicateTitlesAreDisambiguated proves generateOutlineChunked guarantees
+// unique slide titles even when the model doesn't — a real accessibility requirement (a screen
+// reader or a PPTX's slide-navigation pane can't distinguish two identically-titled slides), not
+// just a cosmetic nicety. stubChunkOutline titles every chunk's entries "Slide 1", "Slide 2", ...
+// starting over at 1 for each chunk, and stubReconcileOutline echoes titles back verbatim with no
+// disambiguation logic of its own — so a 2-chunk chapter with chunkOutlineCount: 1 naturally
+// produces two entries both titled "Slide 1" reaching reconcile's output, exactly the collision
+// disambiguateDuplicateTitles must catch.
+func TestGenerateProtoDeck_DuplicateTitlesAreDisambiguated(t *testing.T) {
+	t.Parallel()
+
+	// 2 paragraphs of 3000 chars each: same splitIntoChunks sizing as
+	// TestGenerateProtoDeck_CallSequence, deterministically producing exactly 2 chunks.
+	text := strings.Repeat("a", 3000) + "\n\n" + strings.Repeat("b", 3000)
+	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: text}}
+	llm := &protoDeckStubLLM{chunkOutlineCount: 1}
+	deck, _, err := distill.GenerateProtoDeck(t.Context(), llm, chapters, 3, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, _, slides, err := distill.ParseProtoDeck(deck)
+	if err != nil {
+		t.Fatalf("parse generated deck: %v", err)
+	}
+	titles := make([]string, len(slides))
+	for i, s := range slides {
+		titles[i] = s.Title
+	}
+	seen := make(map[string]bool, len(titles))
+	for _, title := range titles {
+		if seen[title] {
+			t.Fatalf("duplicate slide title %q in generated deck, titles: %v", title, titles)
+		}
+		seen[title] = true
+	}
+	if titles[0] != "Slide 1" || titles[1] != "Slide 1 (2)" {
+		t.Fatalf("got titles %v, want [\"Slide 1\", \"Slide 1 (2)\", ...]", titles)
 	}
 }
 
