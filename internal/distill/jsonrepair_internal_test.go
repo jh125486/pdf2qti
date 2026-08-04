@@ -316,3 +316,27 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 		})
 	}
 }
+
+// TestUnmarshalRepaired_MixedLeavesInSameResponse is the ch01_slides.md regression: a single
+// response with one bullet already correctly JSON-escaped ("\\(x\\)", observed from gpt-5.6-luna)
+// and a separate, unrelated bullet containing a raw, ambiguous LaTeX command ("\frac", the common
+// case from earlier models). Both bullets must come out correct — the already-valid one must not
+// be mangled as collateral damage from repairing the other. See mergeAmbiguousLeaves: unlike a
+// single string value mixing both patterns (which no leaf-level fix can help — you can't cherry-
+// pick within one string), this is the realistic shape an expand-batch response actually has:
+// several independent bullet strings in one JSON array.
+func TestUnmarshalRepaired_MixedLeavesInSameResponse(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"bullets":["inline math \\(x\\) here","separately \frac{1}{2} elsewhere"]}`
+	var out struct {
+		Bullets []string `json:"bullets"`
+	}
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := []string{`inline math \(x\) here`, `separately \frac{1}{2} elsewhere`}
+	if len(out.Bullets) != 2 || out.Bullets[0] != want[0] || out.Bullets[1] != want[1] {
+		t.Fatalf("got %q, want %q", out.Bullets, want)
+	}
+}
