@@ -810,6 +810,51 @@ func TestRender_RealTemplate(t *testing.T) {
 	}
 }
 
+// TestRender_AutofitScalePerSlide is the ch01_slides.pptx regression: duplicateContentSlides
+// builds each duplicated content slide from the *previous* slide's already-rendered bytes, not a
+// pristine copy of the prototype each time — a real generated deck was observed with every single
+// content slide sharing the exact same fontScale, because ensureNormAutofit treated the previous
+// slide's own already-present normAutofit as "an explicit choice, leave it alone" the same way it
+// correctly treats a genuine author noAutofit/spAutoFit choice, silently discarding every slide
+// after the first's own computed scale. Needs the real testdata template (unlike most of
+// TestRender's table, which uses baseTemplateEntries — a synthetic template with no placeholder
+// geometry at all, so contentBodyGeometry can never succeed against it and no scale is ever
+// computed to discard in the first place).
+func TestRender_AutofitScalePerSlide(t *testing.T) {
+	t.Parallel()
+
+	longBullet := "A moderately long bullet point that takes real horizontal room on the slide.\n"
+	dc := &distill.DistilledContext{
+		SourceID:   "src01",
+		Book:       "Systems Programming",
+		ModuleName: "Module 3",
+		Agenda:     []string{"Topic A", "Topic B", "Topic C"},
+		Slides: []distill.Slide{
+			{Title: "Short", Content: "One short point", Tag: "ch1"},
+			{Title: "Long", Content: strings.TrimSuffix(strings.Repeat(longBullet, 14), "\n"), Tag: "ch1"},
+		},
+	}
+
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "out.pptx")
+	if err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	outEntries, err := readZip(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short := string(outEntries["ppt/slides/slide3.xml"])
+	long := string(outEntries["ppt/slides/slide4.xml"])
+	if strings.Contains(short, "fontScale=") {
+		t.Fatalf("short slide's content shouldn't need an explicit autofit scale: %s", short)
+	}
+	if !strings.Contains(long, `fontScale="`) {
+		t.Fatalf("long slide's content should get its own explicit autofit scale: %s", long)
+	}
+}
+
 func writeZip(path string, entries map[string][]byte) error {
 	f, err := os.Create(path)
 	if err != nil {
