@@ -94,7 +94,7 @@ func stubExpandBatchJSON(prompt string) string {
 	n := len(rePlannedSlideLine.FindAllString(prompt, -1))
 	slides := make([]string, n)
 	for i := range slides {
-		slides[i] = `{"bullets":["placeholder"]}`
+		slides[i] = `{"bullets":[{"text":"placeholder","level":0}]}`
 	}
 	return fmt.Sprintf(`{"slides":[%s]}`, strings.Join(slides, ","))
 }

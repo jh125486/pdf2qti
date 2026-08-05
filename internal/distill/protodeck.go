@@ -216,14 +216,25 @@ func firstHeading(block string) string {
 	return ""
 }
 
-// bulletLines returns the text of every "- " line in block, in order, with the marker stripped.
+// bulletLines returns the text of every "- " line in block, in order, with the "- " marker
+// stripped but a leading two-space indent preserved for a sub-bullet ("  - text") — the
+// convention writeBulletLine (outline.go) writes and pptx.splitBullets reads back on the other
+// end of Slide.Content, which stays a marker-free plain string (each line implicitly its own
+// bullet) with only that leading indent distinguishing a sub-bullet from a top-level one.
 func bulletLines(block string) []string {
 	var bullets []string
 	for _, line := range strings.Split(block, "\n") {
-		line = strings.TrimSpace(line)
-		if after, ok := strings.CutPrefix(line, "- "); ok {
-			bullets = append(bullets, strings.TrimSpace(after))
+		trimmedRight := strings.TrimRight(line, " \t")
+		trimmed := strings.TrimLeft(trimmedRight, " \t")
+		after, ok := strings.CutPrefix(trimmed, "- ")
+		if !ok {
+			continue
 		}
+		text := strings.TrimSpace(after)
+		if indent := len(trimmedRight) - len(trimmed); indent >= 2 {
+			text = "  " + text
+		}
+		bullets = append(bullets, text)
 	}
 	return bullets
 }

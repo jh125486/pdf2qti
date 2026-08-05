@@ -268,12 +268,12 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 // template's own placeholder text is when empty, rather than erroring, since not every caller
 // has a course name to supply.
 func fillTitleSlide(parts map[string][]byte, slidePart, title, courseName string) error {
-	updated, err := setPlaceholderBullets(parts[slidePart], "title", []string{title})
+	updated, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: title}})
 	if err != nil {
 		return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 	}
 	if courseName != "" {
-		updated, err = setPlaceholderBullets(updated, "body", []string{courseName})
+		updated, err = setPlaceholderBullets(updated, "body", []bulletLine{{text: courseName}})
 		if err != nil {
 			return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 		}
@@ -361,7 +361,11 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) erro
 	if n := len(agenda); n < 3 || n > 8 {
 		return fmt.Errorf("agenda must have between 3 and 8 bullets, got %d", n)
 	}
-	updated, err := setPlaceholderBullets(parts[slidePart], "body", agenda)
+	bullets := make([]bulletLine, len(agenda))
+	for i, item := range agenda {
+		bullets[i] = bulletLine{text: item}
+	}
+	updated, err := setPlaceholderBullets(parts[slidePart], "body", bullets)
 	if err != nil {
 		return fmt.Errorf("fill agenda slide %q: %w", slidePart, err)
 	}
@@ -403,7 +407,7 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 	sldIDs := make([]string, len(slides))
 
 	for i, slide := range slides {
-		body, err := setPlaceholderBullets(parts[prototypePart], "title", []string{slide.Title})
+		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}})
 		if err != nil {
 			return nil, fmt.Errorf("set title for slide %d: %w", i+1, err)
 		}
@@ -624,8 +628,10 @@ func ensureNormAutofit(block []byte) []byte {
 }
 
 // setPlaceholderBullets locates the <p:sp> shape containing a <p:ph type="phType" .../> and
-// replaces its text body with one <a:p> paragraph per bullet.
-func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]byte, error) {
+// replaces its text body with one <a:p> paragraph per bullet, indented via <a:pPr lvl="1"/> for
+// any bullet.level >= 1 (see bulletLine) — omitted for level 0, since 0 is OOXML's own implicit
+// default level and doesn't need stating.
+func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine) ([]byte, error) {
 	marker := []byte(`<p:ph type="` + phType + `"`)
 	phIdx := bytes.Index(slideXML, marker)
 	if phIdx == -1 {
@@ -658,7 +664,10 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []string) ([]
 	var paragraphs strings.Builder
 	for _, b := range bullets {
 		paragraphs.WriteString(`<a:p>`)
-		paragraphs.WriteString(runsXML(b))
+		if b.level >= 1 {
+			paragraphs.WriteString(`<a:pPr lvl="1"/>`)
+		}
+		paragraphs.WriteString(runsXML(b.text))
 		paragraphs.WriteString(`</a:p>`)
 	}
 
@@ -748,16 +757,32 @@ func runXML(text string, bold bool) string {
 	return `<a:r>` + rPr + `<a:t>` + xmlTextReplacer.Replace(text) + `</a:t></a:r>`
 }
 
-// splitBullets splits content on newlines into trimmed, non-empty bullet lines.
-func splitBullets(content string) []string {
+// bulletLine is one bullet's text and indentation level (0 = top-level, 1 = an indented
+// sub-bullet), matching distill.Slide.Content's marker-free convention: each line is implicitly
+// its own bullet, with a leading two-space indent (preserved by distill.bulletLines) the only
+// signal a line is a sub-bullet rather than a top-level one.
+type bulletLine struct {
+	text  string
+	level int
+}
+
+// splitBullets splits content on newlines into non-empty bullet lines, detecting each line's
+// level from a leading two-space indent (see bulletLine) before trimming the rest of the
+// whitespace off.
+func splitBullets(content string) []bulletLine {
 	lines := strings.Split(content, "\n")
-	bullets := make([]string, 0, len(lines))
+	bullets := make([]bulletLine, 0, len(lines))
 	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l == "" {
+		trimmedRight := strings.TrimRight(l, " \t\r") // \r for CRLF content: strings.Split on "\n" alone leaves it dangling
+		trimmed := strings.TrimLeft(trimmedRight, " \t")
+		if trimmed == "" {
 			continue
 		}
-		bullets = append(bullets, l)
+		level := 0
+		if indent := len(trimmedRight) - len(trimmed); indent >= 2 {
+			level = 1
+		}
+		bullets = append(bullets, bulletLine{text: trimmed, level: level})
 	}
 	return bullets
 }

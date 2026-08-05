@@ -1,7 +1,69 @@
-// Whitebox package: ensureNormAutofit and resetLastView are unexported.
+// Whitebox package: ensureNormAutofit, splitBullets, and resetLastView are unexported.
 package pptx
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestSplitBullets_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    []bulletLine
+	}{
+		{
+			name:    "top-level bullets only",
+			content: "First\nSecond",
+			want:    []bulletLine{{text: "First", level: 0}, {text: "Second", level: 0}},
+		},
+		{
+			name:    "two-space indent is a level-1 sub-bullet",
+			content: "Top\n  Sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}},
+		},
+		{
+			name:    "deeper indent still collapses to level 1 (only one sub-level supported)",
+			content: "Top\n      Sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}},
+		},
+		{
+			name:    "single leading space is not enough to count as a sub-bullet",
+			content: "Top\n Not sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Not sub", level: 0}},
+		},
+		{
+			name:    "blank lines are skipped",
+			content: "First\n\n\nSecond",
+			want:    []bulletLine{{text: "First", level: 0}, {text: "Second", level: 0}},
+		},
+		{
+			name:    "empty content",
+			content: "",
+			want:    []bulletLine{},
+		},
+		{
+			// Regression: strings.Split on "\n" alone leaves a trailing "\r" dangling on every
+			// line of CRLF content; TrimRight must strip it too, or it leaks into bullet text
+			// (and a blank CRLF line, "\r" alone, would wrongly not count as blank).
+			name:    "CRLF line endings don't leak a trailing \\r into bullet text",
+			content: "Top\r\n  Sub\r\n\r\nSecond\r\n",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}, {text: "Second", level: 0}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitBullets(tt.content)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestResetLastView_Table(t *testing.T) {
 	t.Parallel()
