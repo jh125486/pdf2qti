@@ -261,6 +261,13 @@ level 0; a slide with every bullet at level 1, or with a level-1 bullet not prec
 one, is wrong. Don't manufacture a sub-bullet just to use one — omit it if the top-level bullet
 already stands on its own.
 
+If a bullet's worked example is a system of several equations or a matrix with more than one row
+(anything using \begin{aligned}, \begin{cases}, or a matrix environment like \begin{bmatrix}),
+break it into one level-1 sub-bullet per row instead of one bullet containing the whole multi-row
+block — each row is its own short sub-bullet (e.g. "Row 1: \(3x_1-2x_2+2x_3=2\)", not a single
+bullet holding all three rows glued together with \\ separators). This reads better on a slide and
+avoids one oversized bullet dominating the layout.
+
 A variable referenced inline (like x_1, x_2) must use the same LaTeX math delimiters as every
 other formula in your bullets, never bare underscore notation outside math mode.
 `))
