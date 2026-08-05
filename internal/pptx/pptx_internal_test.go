@@ -1,4 +1,4 @@
-// Whitebox package: ensureNormAutofit and splitBullets are unexported.
+// Whitebox package: ensureNormAutofit, splitBullets, and resetLastView are unexported.
 package pptx
 
 import (
@@ -52,6 +52,54 @@ func TestSplitBullets_Table(t *testing.T) {
 			got := splitBullets(tt.content)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResetLastView_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		parts map[string][]byte
+		want  string // expected ppt/viewProps.xml content, or "" if unchanged/absent
+	}{
+		{
+			name:  "sldMasterView is reset to sldView",
+			parts: map[string][]byte{"ppt/viewProps.xml": []byte(`<p:viewPr lastView="sldMasterView"><p:normalViewPr/></p:viewPr>`)},
+			want:  `<p:viewPr lastView="sldView"><p:normalViewPr/></p:viewPr>`,
+		},
+		{
+			name:  "sldView is left unchanged",
+			parts: map[string][]byte{"ppt/viewProps.xml": []byte(`<p:viewPr lastView="sldView"><p:normalViewPr/></p:viewPr>`)},
+			want:  `<p:viewPr lastView="sldView"><p:normalViewPr/></p:viewPr>`,
+		},
+		{
+			name:  "no lastView attribute at all is left unchanged",
+			parts: map[string][]byte{"ppt/viewProps.xml": []byte(`<p:viewPr><p:normalViewPr/></p:viewPr>`)},
+			want:  `<p:viewPr><p:normalViewPr/></p:viewPr>`,
+		},
+		{
+			name:  "no viewProps.xml part at all is a no-op",
+			parts: map[string][]byte{"ppt/presentation.xml": []byte(`<p:presentation/>`)},
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resetLastView(tt.parts)
+			got := string(tt.parts["ppt/viewProps.xml"])
+			if tt.want == "" {
+				if _, ok := tt.parts["ppt/viewProps.xml"]; ok {
+					t.Fatalf("expected no ppt/viewProps.xml part, got %q", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
 	}
