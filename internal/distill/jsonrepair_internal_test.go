@@ -447,6 +447,18 @@ func TestCollapseOverDoubledBackslashes_Table(t *testing.T) {
 			wantFixed:   `\`,
 			wantChanged: true,
 		},
+		{
+			// Caught in PR review: a matrix row separator that was itself already correctly
+			// escaped in the raw response gets re-doubled right along with everything else
+			// when repairJSONEscapes runs on the whole response, landing here as four
+			// consecutive backslashes before whitespace instead of two. Collapsing only the
+			// first pair (the old behavior) left three backslashes -- invalid LaTeX; the run
+			// must halve down to the original two.
+			name:        "re-doubled matrix row separator (four backslashes before whitespace) halves to two",
+			in:          `\begin{bmatrix}3\\\\ -2\end{bmatrix}`,
+			wantFixed:   `\begin{bmatrix}3\\ -2\end{bmatrix}`,
+			wantChanged: true,
+		},
 	}
 
 	for _, tt := range tests {

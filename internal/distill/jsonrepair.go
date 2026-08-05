@@ -98,7 +98,7 @@ func repairJSONEscapes(s string) string {
 // (0x09) followed by "heta": syntactically valid JSON, semantically wrong, since this domain never
 // legitimately wants a literal control byte in decoded content (see repairJSONEscapes's doc
 // comment) — only the LaTeX command that byte-plus-remaining-letters was actually meant to be.
-// repairControlByteArtifacts restores it by replacing the byte with '\' + this letter, recovering
+// fixControlByteArtifacts restores it by replacing the byte with '\' + this letter, recovering
 // "\theta" exactly.
 var controlByteToEscapeLetter = map[byte]byte{
 	'\b': 'b',
@@ -207,6 +207,15 @@ func fixControlByteArtifacts(s string) (fixed string, changed bool) {
 // every successful decode, not just ones that went through repairJSONEscapes: a direct decode of
 // already-valid JSON never produces two consecutive literal backslashes in its output at all
 // (json.Unmarshal always collapses a valid "\\" escape to exactly one), so this is a no-op there.
+//
+// Over-doubling doesn't stop at pairs: a matrix separator that was itself already correctly
+// escaped in the raw response ("\\\\ " in raw JSON, decoding to the legitimate "\\ ") gets
+// re-doubled right along with everything else when repairJSONEscapes runs, landing here as four
+// consecutive backslashes before whitespace instead of two. So this walks whole runs of
+// consecutive backslashes rather than isolated pairs: a run of exactly two immediately before
+// whitespace is left alone (the untouched, legitimate case above), and every other run — including
+// a longer whitespace-preceded one — halves, since over-doubling doubles every backslash in the
+// run uniformly.
 func collapseOverDoubledBackslashes(s string) (fixed string, changed bool) {
 	if !strings.Contains(s, `\\`) {
 		return s, false
@@ -214,20 +223,36 @@ func collapseOverDoubledBackslashes(s string) (fixed string, changed bool) {
 	var b strings.Builder
 	b.Grow(len(s))
 	didChange := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) && s[i+1] == '\\' {
-			next := byte(0)
-			if i+2 < len(s) {
-				next = s[i+2]
-			}
-			if next != ' ' && next != '\t' && next != '\n' {
-				b.WriteByte('\\')
-				i++ // consume both original backslashes, having emitted only one
-				didChange = true
-				continue
-			}
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
 		}
-		b.WriteByte(s[i])
+		j := i
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		n := j - i // length of this run of consecutive backslashes
+		next := byte(0)
+		if j < len(s) {
+			next = s[j]
+		}
+		// A run of exactly two immediately before whitespace is a genuine matrix row separator
+		// (see the doc comment above) and must survive untouched; every other run — including a
+		// longer whitespace-preceded run, which is that same separator re-doubled by
+		// repairJSONEscapes — halves, since over-doubling doubles every backslash uniformly.
+		keep := n
+		if n != 2 || next != ' ' && next != '\t' && next != '\n' {
+			keep = (n + 1) / 2
+		}
+		for range keep {
+			b.WriteByte('\\')
+		}
+		if keep != n {
+			didChange = true
+		}
+		i = j
 	}
 	if !didChange {
 		return s, false
@@ -239,10 +264,10 @@ func collapseOverDoubledBackslashes(s string) (fixed string, changed bool) {
 // it succeeds, falling back to repairJSONEscapes only if it doesn't (see repairJSONEscapes's doc
 // comment for why a direct parse routinely fails outright on raw, unescaped LaTeX containing a
 // non-letter escape target like "\(" — invalid JSON, not merely ambiguous). Either way, a
-// successful decode is always passed through repairControlByteArtifacts and
-// collapseOverDoubledBackslashes afterward, both safe to apply unconditionally since each only
-// ever touches a byte pattern that could never legitimately appear in this content otherwise (see
-// each one's own doc comment).
+// successful decode is always passed through repairDecodedArtifacts (which applies
+// fixControlByteArtifacts and collapseOverDoubledBackslashes to every string leaf), safe to apply
+// unconditionally since each only ever touches a byte pattern that could never legitimately appear
+// in this content otherwise (see each one's own doc comment).
 func unmarshalRepaired(raw string, v any) error {
 	if err := decodeJSON(raw, v); err == nil {
 		repairDecodedArtifacts(reflect.ValueOf(v))
