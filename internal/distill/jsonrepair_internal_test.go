@@ -318,14 +318,11 @@ func TestUnmarshalRepaired_Table(t *testing.T) {
 	}
 }
 
-// TestUnmarshalRepaired_MixedLeavesInSameResponse is the ch01_slides.md regression: a single
-// response with one bullet already correctly JSON-escaped ("\\(x\\)", observed from gpt-5.6-luna)
-// and a separate, unrelated bullet containing a raw, ambiguous LaTeX command ("\frac", the common
-// case from earlier models). Both bullets must come out correct — the already-valid one must not
-// be mangled as collateral damage from repairing the other. See mergeAmbiguousLeaves: unlike a
-// single string value mixing both patterns (which no leaf-level fix can help — you can't cherry-
-// pick within one string), this is the realistic shape an expand-batch response actually has:
-// several independent bullet strings in one JSON array.
+// TestUnmarshalRepaired_MixedLeavesInSameResponse is the first ch01_slides.md regression: a
+// single response with one bullet already correctly JSON-escaped ("\\(x\\)", observed from
+// gpt-5.6-luna) and a separate, unrelated bullet containing a raw, ambiguous LaTeX command
+// ("\frac", the common case from earlier models). Both bullets must come out correct — the
+// already-valid one must not be mangled as collateral damage from repairing the other.
 func TestUnmarshalRepaired_MixedLeavesInSameResponse(t *testing.T) {
 	t.Parallel()
 
@@ -342,37 +339,179 @@ func TestUnmarshalRepaired_MixedLeavesInSameResponse(t *testing.T) {
 	}
 }
 
-// TestHasAmbiguousControlByte_Map and TestMergeAmbiguousLeaves_Map cover the map-valued branches
-// of hasAmbiguousControlByte/mergeAmbiguousLeaves directly via reflection, since no current
-// response struct in this package actually has a map-typed field to exercise them through
-// unmarshalRepaired end-to-end — both functions are written generically to walk any of this
-// package's response shapes, not just the ones in use today, so the branch is real and worth
-// covering on its own rather than only through the shapes that happen to exist right now.
-func TestHasAmbiguousControlByte_Map(t *testing.T) {
+// TestUnmarshalRepaired_MixedWithinSameString is the second, harder ch01_slides.md regression: a
+// SINGLE bullet mixing an already-correctly-escaped "\\(" pair with a raw, unescaped "\tan" later
+// in the very same string (observed for real: "For \\(\mathbf v=(v_1,v_2)\\), use
+// \\(\theta=\tan^{-1}(v_2/v_1)\\)."). This is exactly the case TestUnmarshalRepaired_
+// MixedLeavesInSameResponse's own history called out as unfixable at the leaf level — "you can't
+// cherry-pick within one string" — which fixControlByteArtifacts now can, by repairing the
+// specific control byte \tan decodes into rather than choosing whether to trust or repair the
+// whole string.
+func TestUnmarshalRepaired_MixedWithinSameString(t *testing.T) {
 	t.Parallel()
 
-	clean := map[string]string{"a": `\(x\)`}
-	if hasAmbiguousControlByte(reflect.ValueOf(clean)) {
-		t.Fatal("clean map value flagged as ambiguous")
+	raw := `{"text":"For \\(\\mathbf v=(v_1,v_2)\\), use \\(\theta=\tan^{-1}(v_2/v_1)\\)."}`
+	var out struct {
+		Text string `json:"text"`
 	}
-
-	dirty := map[string]string{"a": "gradient \nabla f"}
-	if !hasAmbiguousControlByte(reflect.ValueOf(dirty)) {
-		t.Fatal("map value containing a literal newline not flagged as ambiguous")
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := `For \(\mathbf v=(v_1,v_2)\), use \(\theta=\tan^{-1}(v_2/v_1)\).`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
 	}
 }
 
-func TestMergeAmbiguousLeaves_Map(t *testing.T) {
+// TestFixControlByteArtifacts_Table covers fixControlByteArtifacts directly: each of the five
+// ambiguous control bytes restored to its backslash-letter pair, a clean string left untouched
+// (changed=false), and — the actual bug this function exists to fix — a control byte and an
+// already-correct backslash pair coexisting in the very same string, both ending up right.
+func TestFixControlByteArtifacts_Table(t *testing.T) {
 	t.Parallel()
 
-	direct := map[string]string{"clean": `\(x\)`, "dirty": "gradient \nabla f"}
-	repaired := map[string]string{"clean": `\\(x\\)`, "dirty": `gradient \nabla f`}
-	mergeAmbiguousLeaves(reflect.ValueOf(direct), reflect.ValueOf(repaired))
-
-	if direct["clean"] != `\(x\)` {
-		t.Fatalf(`clean leaf changed: got %q, want %q`, direct["clean"], `\(x\)`)
+	tests := []struct {
+		name        string
+		in          string
+		wantFixed   string
+		wantChanged bool
+	}{
+		{name: "clean string, nothing to fix", in: `\(x\)`, wantFixed: `\(x\)`, wantChanged: false},
+		{name: "backspace byte restored", in: "\begin", wantFixed: `\begin`, wantChanged: true},
+		{name: "form feed byte restored", in: "\frac", wantFixed: `\frac`, wantChanged: true},
+		{name: "newline byte restored", in: "gradient \nabla f", wantFixed: `gradient \nabla f`, wantChanged: true},
+		{name: "carriage return byte restored", in: "\rangle", wantFixed: `\rangle`, wantChanged: true},
+		{name: "tab byte restored", in: "\tan", wantFixed: `\tan`, wantChanged: true},
+		{
+			// The ch01_slides.md regression: a raw, unescaped "\theta" (decodes to a tab byte)
+			// sitting in the very same string as an already-correctly-escaped "\\(" pair — no
+			// per-leaf repair-or-trust choice can get both right at once, only fixing the specific
+			// control byte can. The Go source below uses a literal tab byte (typed as \t in the
+			// source) exactly where json.Unmarshal would have produced one from a raw "\theta".
+			name:        "control byte and an already-correct backslash pair in the same string",
+			in:          "For \\(\\mathbf v\\), use \\(\tan^{-1}(x)\\).",
+			wantFixed:   `For \(\mathbf v\), use \(\tan^{-1}(x)\).`,
+			wantChanged: true,
+		},
 	}
-	if direct["dirty"] != `gradient \nabla f` {
-		t.Fatalf(`dirty leaf not repaired: got %q, want %q`, direct["dirty"], `gradient \nabla f`)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixed, changed := fixControlByteArtifacts(tt.in)
+			if fixed != tt.wantFixed || changed != tt.wantChanged {
+				t.Fatalf("got (%q, %v), want (%q, %v)", fixed, changed, tt.wantFixed, tt.wantChanged)
+			}
+		})
+	}
+}
+
+// TestCollapseOverDoubledBackslashes_Table covers collapseOverDoubledBackslashes directly: an
+// over-doubled pair not followed by whitespace collapses to one backslash, a genuine matrix row
+// separator (followed by whitespace) is left alone, and a clean string with no double-backslash at
+// all reports changed=false.
+func TestCollapseOverDoubledBackslashes_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		in          string
+		wantFixed   string
+		wantChanged bool
+	}{
+		{name: "no double backslash at all", in: `\(x\)`, wantFixed: `\(x\)`, wantChanged: false},
+		{
+			name:        "over-doubled pair before a paren collapses to one",
+			in:          `\\(c\\)`,
+			wantFixed:   `\(c\)`,
+			wantChanged: true,
+		},
+		{
+			name:        "over-doubled pair before a letter collapses to one",
+			in:          `\\mathbb R^n`,
+			wantFixed:   `\mathbb R^n`,
+			wantChanged: true,
+		},
+		{
+			// A genuine matrix row separator: two literal backslashes immediately followed by a
+			// space — the one legitimate reason this domain wants two literal backslashes back to
+			// back (see repairMatrixRowSeparators) — must survive uncollapsed.
+			name:        "doubled pair before whitespace (matrix row separator) is left alone",
+			in:          `\begin{bmatrix}3\\ -2\end{bmatrix}`,
+			wantFixed:   `\begin{bmatrix}3\\ -2\end{bmatrix}`,
+			wantChanged: false,
+		},
+		{
+			name:        "doubled pair at the very end of the string (no following byte) collapses",
+			in:          `\\`,
+			wantFixed:   `\`,
+			wantChanged: true,
+		},
+		{
+			// Caught in PR review: a matrix row separator that was itself already correctly
+			// escaped in the raw response gets re-doubled right along with everything else
+			// when repairJSONEscapes runs on the whole response, landing here as four
+			// consecutive backslashes before whitespace instead of two. Collapsing only the
+			// first pair (the old behavior) left three backslashes -- invalid LaTeX; the run
+			// must halve down to the original two.
+			name:        "re-doubled matrix row separator (four backslashes before whitespace) halves to two",
+			in:          `\begin{bmatrix}3\\\\ -2\end{bmatrix}`,
+			wantFixed:   `\begin{bmatrix}3\\ -2\end{bmatrix}`,
+			wantChanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixed, changed := collapseOverDoubledBackslashes(tt.in)
+			if fixed != tt.wantFixed || changed != tt.wantChanged {
+				t.Fatalf("got (%q, %v), want (%q, %v)", fixed, changed, tt.wantFixed, tt.wantChanged)
+			}
+		})
+	}
+}
+
+// TestUnmarshalRepaired_OverDoubledByUnrelatedInvalidEscape is the ch01_slides.md slide-23/26
+// regression: a single raw, unescaped LaTeX command using a letter JSON doesn't recognize as a
+// valid escape at all ("\mathbb" — as opposed to "\tan", individually valid but ambiguous; see
+// TestUnmarshalRepaired_MixedWithinSameString) is enough to make direct decode of the *entire*
+// response fail outright, forcing the whole raw response through repairJSONEscapes — which then
+// also re-doubles an unrelated, already-correctly-escaped "\\(" pair elsewhere in that same
+// response as collateral damage. Both must come out right: "\mathbb" restored via the
+// repairJSONEscapes fallback (which correctly un-mangles genuinely raw single backslashes), and
+// "\(" collapsed back down from the fallback's over-doubling.
+func TestUnmarshalRepaired_OverDoubledByUnrelatedInvalidEscape(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"text":"A vector in \\(\mathbb R^3\\) requires three components."}`
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := `A vector in \(\mathbb R^3\) requires three components.`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
+// TestRepairDecodedArtifacts_Map covers the map-valued branch of repairDecodedArtifacts directly
+// via reflection, since no current response struct in this package actually has a map-typed field
+// to exercise it through unmarshalRepaired end-to-end — it's written generically to walk any of
+// this package's response shapes, not just the ones in use today, so the branch is real and worth
+// covering on its own rather than only through the shapes that happen to exist right now.
+func TestRepairDecodedArtifacts_Map(t *testing.T) {
+	t.Parallel()
+
+	m := map[string]string{"clean": `\(x\)`, "dirty": "gradient \nabla f"}
+	repairDecodedArtifacts(reflect.ValueOf(m))
+
+	if m["clean"] != `\(x\)` {
+		t.Fatalf(`clean leaf changed: got %q, want %q`, m["clean"], `\(x\)`)
+	}
+	if m["dirty"] != `gradient \nabla f` {
+		t.Fatalf(`dirty leaf not repaired: got %q, want %q`, m["dirty"], `gradient \nabla f`)
 	}
 }
