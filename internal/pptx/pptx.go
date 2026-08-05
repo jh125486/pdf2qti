@@ -773,7 +773,7 @@ func splitBullets(content string) []bulletLine {
 	lines := strings.Split(content, "\n")
 	bullets := make([]bulletLine, 0, len(lines))
 	for _, l := range lines {
-		trimmedRight := strings.TrimRight(l, " \t")
+		trimmedRight := strings.TrimRight(l, " \t\r") // \r for CRLF content: strings.Split on "\n" alone leaves it dangling
 		trimmed := strings.TrimLeft(trimmedRight, " \t")
 		if trimmed == "" {
 			continue

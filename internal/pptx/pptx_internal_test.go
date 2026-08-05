@@ -44,6 +44,14 @@ func TestSplitBullets_Table(t *testing.T) {
 			content: "",
 			want:    []bulletLine{},
 		},
+		{
+			// Regression: strings.Split on "\n" alone leaves a trailing "\r" dangling on every
+			// line of CRLF content; TrimRight must strip it too, or it leaks into bullet text
+			// (and a blank CRLF line, "\r" alone, would wrongly not count as blank).
+			name:    "CRLF line endings don't leak a trailing \\r into bullet text",
+			content: "Top\r\n  Sub\r\n\r\nSecond\r\n",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}, {text: "Second", level: 0}},
+		},
 	}
 
 	for _, tt := range tests {
