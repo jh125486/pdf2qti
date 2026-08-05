@@ -1,10 +1,56 @@
-// Whitebox package: ensureNormAutofit, splitBullets, and resetLastView are unexported.
+// Whitebox package: ensureNormAutofit, splitBullets, countMathRows, and resetLastView are
+// unexported.
 package pptx
 
 import (
 	"reflect"
 	"testing"
 )
+
+func TestCountMathRows_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "no math at all", text: "plain bullet text", want: 1},
+		{name: "inline math with no multi-row environment", text: `\(x_1+x_2\)`, want: 1},
+		{
+			// Observed in practice: the model routinely puts a matrix inside "\(...\)" inline
+			// delimiters, not just "\[...\]" display math — a 2x4 matrix (one "\\" row separator)
+			// still renders as 2 stacked rows regardless of which delimiter wraps it.
+			name: "bmatrix inside inline math delimiters",
+			text: `\(B=\begin{bmatrix}0&0&-2&1\\3&1&-1&0\end{bmatrix}\)`,
+			want: 2,
+		},
+		{
+			name: "4-row bmatrix",
+			text: `\(B^T=\begin{bmatrix}0&3\\0&1\\-2&-1\\1&0\end{bmatrix}\)`,
+			want: 4,
+		},
+		{
+			name: "3-equation aligned system",
+			text: `\(\begin{aligned}3x_1-2x_2+2x_3&=2\\0x_1+2x_2+x_3&=-1\\x_1+0x_2-x_3&=0\end{aligned}\)`,
+			want: 3,
+		},
+		{
+			name: "the taller of two multi-row environments in the same bullet wins",
+			text: `\(A=\begin{bmatrix}1&0\\0&1\end{bmatrix}\), \(B=\begin{bmatrix}1\\2\\3\end{bmatrix}\)`,
+			want: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := countMathRows(tt.text); got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestSplitBullets_Table(t *testing.T) {
 	t.Parallel()
@@ -119,6 +165,7 @@ func TestEnsureNormAutofit_Table(t *testing.T) {
 	tests := []struct {
 		name  string
 		block string
+		scale *autofitScale
 		want  string
 	}{
 		{
@@ -144,13 +191,31 @@ func TestEnsureNormAutofit_Table(t *testing.T) {
 			want:  `<p:sp><p:txBody><a:bodyPr><a:prstTxWarp prst="textArchUp"><a:avLst><a:gd name="adj" fmla="val 5400000"/></a:avLst></a:prstTxWarp><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 		},
 		{
-			name:  "bodyPr already declaring normAutofit is left untouched",
+			name:  "bodyPr already declaring bare normAutofit is left untouched when scale is nil",
 			block: `<p:sp><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 			want:  `<p:sp><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 		},
 		{
-			name:  "bodyPr already declaring noAutofit is left untouched",
+			// Regression: duplicateContentSlides builds each slide from the previous slide's own
+			// already-rendered bytes, so this shape's bodyPr routinely already has a *different*
+			// slide's own computed normAutofit on it by the time this slide's turn comes — that
+			// must be replaced with this slide's value, not left alone the way a genuine
+			// noAutofit/spAutoFit author choice below correctly is.
+			name:  "bodyPr already declaring a scaled normAutofit is replaced with a new scale",
+			block: `<p:sp><p:txBody><a:bodyPr><a:normAutofit fontScale="67604" lnSpcReduction="16197"/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+			scale: &autofitScale{fontScale: 48656, lnSpcReduction: 25671},
+			want:  `<p:sp><p:txBody><a:bodyPr><a:normAutofit fontScale="48656" lnSpcReduction="25671"/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+		},
+		{
+			name:  "bodyPr already declaring a bare normAutofit is replaced when a scale is now available",
+			block: `<p:sp><p:txBody><a:bodyPr><a:normAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+			scale: &autofitScale{fontScale: 48656, lnSpcReduction: 25671},
+			want:  `<p:sp><p:txBody><a:bodyPr><a:normAutofit fontScale="48656" lnSpcReduction="25671"/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+		},
+		{
+			name:  "bodyPr already declaring noAutofit is left untouched even when a scale is available",
 			block: `<p:sp><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
+			scale: &autofitScale{fontScale: 48656, lnSpcReduction: 25671},
 			want:  `<p:sp><p:txBody><a:bodyPr><a:noAutofit/></a:bodyPr><a:lstStyle/></p:txBody></p:sp>`,
 		},
 		{
@@ -168,7 +233,7 @@ func TestEnsureNormAutofit_Table(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := string(ensureNormAutofit([]byte(tt.block))); got != tt.want {
+			if got := string(ensureNormAutofit([]byte(tt.block), tt.scale)); got != tt.want {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})

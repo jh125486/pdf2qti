@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -268,12 +269,12 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 // template's own placeholder text is when empty, rather than erroring, since not every caller
 // has a course name to supply.
 func fillTitleSlide(parts map[string][]byte, slidePart, title, courseName string) error {
-	updated, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: title}})
+	updated, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: title}}, nil)
 	if err != nil {
 		return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 	}
 	if courseName != "" {
-		updated, err = setPlaceholderBullets(updated, "body", []bulletLine{{text: courseName}})
+		updated, err = setPlaceholderBullets(updated, "body", []bulletLine{{text: courseName}}, nil)
 		if err != nil {
 			return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 		}
@@ -324,15 +325,10 @@ func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map
 		if m == nil {
 			continue
 		}
-		relsData, ok := parts[relsPartFor(name)]
+		layoutPart, ok := slideLayoutPart(parts, name)
 		if !ok {
 			continue
 		}
-		rm := reSlideLayoutRel.FindSubmatch(relsData)
-		if rm == nil {
-			continue
-		}
-		layoutPart := resolveRelTarget(path.Dir(name), string(rm[1]))
 		layoutName, ok := layoutNames[layoutPart]
 		if !ok {
 			continue
@@ -342,6 +338,20 @@ func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map
 		}
 	}
 	return result
+}
+
+// slideLayoutPart resolves slidePart's slide layout part name by following its own relationships
+// part.
+func slideLayoutPart(parts map[string][]byte, slidePart string) (string, bool) {
+	relsData, ok := parts[relsPartFor(slidePart)]
+	if !ok {
+		return "", false
+	}
+	rm := reSlideLayoutRel.FindSubmatch(relsData)
+	if rm == nil {
+		return "", false
+	}
+	return resolveRelTarget(path.Dir(slidePart), string(rm[1])), true
 }
 
 // resolveRelTarget resolves a relationship Target (relative to baseDir) into a normalized part
@@ -365,7 +375,7 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) erro
 	for i, item := range agenda {
 		bullets[i] = bulletLine{text: item}
 	}
-	updated, err := setPlaceholderBullets(parts[slidePart], "body", bullets)
+	updated, err := setPlaceholderBullets(parts[slidePart], "body", bullets, nil)
 	if err != nil {
 		return fmt.Errorf("fill agenda slide %q: %w", slidePart, err)
 	}
@@ -404,14 +414,28 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 	nextRID := maxRelID(parts[presRelsPart]) + 1
 	nextSldID := maxSldID(presData) + 1
 
+	// Resolved once, from the prototype's own layout, since every duplicated slide shares it.
+	// geomOK false (no layout, or the layout's body placeholder doesn't match the expected shape)
+	// just means every slide falls back to setPlaceholderBullets's bare-normAutofit default.
+	var geom bodyGeometry
+	var geomOK bool
+	if layoutPart, ok := slideLayoutPart(parts, prototypePart); ok {
+		geom, geomOK = contentBodyGeometry(parts[layoutPart])
+	}
+
 	sldIDs := make([]string, len(slides))
 
 	for i, slide := range slides {
-		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}})
+		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}}, nil)
 		if err != nil {
 			return nil, fmt.Errorf("set title for slide %d: %w", i+1, err)
 		}
-		body, err = setPlaceholderBullets(body, "body", splitBullets(slide.Content))
+		bullets := splitBullets(slide.Content)
+		var scale *autofitScale
+		if geomOK {
+			scale = estimateAutofitScale(bullets, geom)
+		}
+		body, err = setPlaceholderBullets(body, "body", bullets, scale)
 		if err != nil {
 			return nil, fmt.Errorf("set content for slide %d: %w", i+1, err)
 		}
@@ -566,16 +590,215 @@ func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 // ("resize shape to fit text").
 var reAutofitChild = regexp.MustCompile(`<a:(?:normAutofit|noAutofit|spAutoFit)\b`)
 
+// reNormAutofit matches a complete "<a:normAutofit.../>" element (always self-closing — it has no
+// children in the schema), for ensureNormAutofit to replace in place when a fresher scale is
+// available, rather than only ever detecting its presence.
+var reNormAutofit = regexp.MustCompile(`<a:normAutofit\b[^>]*/>`)
+
 // rePrstTxWarp matches a complete <a:prstTxWarp> element, self-closing or with children (e.g. an
 // <a:avLst> of adjustment values) — CT_TextBodyProperties's schema requires prstTxWarp, when
 // present, to precede the autofit choice, so ensureNormAutofit must insert normAutofit after it
 // rather than as bodyPr's first child.
 var rePrstTxWarp = regexp.MustCompile(`(?s)^<a:prstTxWarp\b(?:[^>]*/>|[^>]*>.*?</a:prstTxWarp>)`)
 
-// ensureNormAutofit guarantees shape's <a:bodyPr> declares <a:normAutofit/> ("shrink text on
-// overflow") when it has no autofit child at all, leaving a bodyPr that already declares one
-// (normAutofit, noAutofit, or spAutoFit) untouched — that's a deliberate choice on this specific
-// shape, not the gap this works around.
+// bodyGeometry is a content-slide body placeholder's layout-level box size and default text
+// formatting, as read off the slide layout (not the slide itself, which normally leaves these
+// unset and inherits) — everything estimateAutofitScale needs to guess how much a slide's actual
+// bullet text will need to shrink to fit.
+type bodyGeometry struct {
+	widthEMU           int
+	heightEMU          int
+	fontSizeHundredths int // OOXML sz units: hundredths of a point (3600 = 36pt)
+	lineSpacePermille  int // OOXML spcPct units: thousandths of a percent (150000 = 150%)
+}
+
+var (
+	rePlaceholderExt = regexp.MustCompile(`<a:ext cx="(\d+)" cy="(\d+)"/>`)
+	reDefRPrSize      = regexp.MustCompile(`<a:defRPr sz="(\d+)"`)
+	reLineSpacePct    = regexp.MustCompile(`<a:lnSpc><a:spcPct val="(\d+)"/></a:lnSpc>`)
+)
+
+// contentBodyGeometry extracts bodyGeometry from a slide layout's "body" placeholder shape — the
+// same shape setPlaceholderBullets locates to write bullets into, read here instead for its
+// layout-level box definition and default paragraph properties. ok is false if the layout has no
+// such placeholder, or is missing the box size (the one piece estimateAutofitScale can't proceed
+// without); a missing font size or line spacing falls back to a reasonable default instead of
+// failing outright, since either is a smaller error to absorb than skipping autofit entirely.
+func contentBodyGeometry(layoutXML []byte) (bodyGeometry, bool) {
+	marker := []byte(`<p:ph type="body"`)
+	phIdx := bytes.Index(layoutXML, marker)
+	if phIdx == -1 {
+		return bodyGeometry{}, false
+	}
+	spStart := bytes.LastIndex(layoutXML[:phIdx], []byte("<p:sp>"))
+	spEndRel := bytes.Index(layoutXML[phIdx:], []byte("</p:sp>"))
+	if spStart == -1 || spEndRel == -1 {
+		return bodyGeometry{}, false
+	}
+	block := layoutXML[spStart : phIdx+spEndRel+len("</p:sp>")]
+
+	extM := rePlaceholderExt.FindSubmatch(block)
+	if extM == nil {
+		return bodyGeometry{}, false
+	}
+	widthEMU, err1 := strconv.Atoi(string(extM[1]))
+	heightEMU, err2 := strconv.Atoi(string(extM[2]))
+	if err1 != nil || err2 != nil || widthEMU <= 0 || heightEMU <= 0 {
+		return bodyGeometry{}, false
+	}
+
+	const defaultFontSizeHundredths = 1800 // 18pt, a conservative fallback if lstStyle omits sz
+	fontSizeHundredths := defaultFontSizeHundredths
+	if m := reDefRPrSize.FindSubmatch(block); m != nil {
+		if v, err := strconv.Atoi(string(m[1])); err == nil && v > 0 {
+			fontSizeHundredths = v
+		}
+	}
+
+	const defaultLineSpacePermille = 100000 // 100%, if lnSpc is unset
+	lineSpacePermille := defaultLineSpacePermille
+	if m := reLineSpacePct.FindSubmatch(block); m != nil {
+		if v, err := strconv.Atoi(string(m[1])); err == nil && v > 0 {
+			lineSpacePermille = v
+		}
+	}
+
+	return bodyGeometry{widthEMU, heightEMU, fontSizeHundredths, lineSpacePermille}, true
+}
+
+// reMultiRowMathEnvs matches a LaTeX environment that renders as several stacked rows regardless
+// of whether it's wrapped in inline "\(...\)" or display "\[...\]" delimiters — a matrix
+// (bmatrix/pmatrix/vmatrix/matrix/cases) or a system of aligned equations (aligned/align) —
+// observed in practice: the model routinely puts one of these inside "\(...\)" (not just "\[...\]"
+// display math), so delimiter type alone can't be used to detect multi-row content. RE2 has no
+// backreferences, so this can't require the \end name to match \begin's the way
+// repairMatrixRowSeparators's reMatrixEnvBegin/End pair works around the same limitation; matching
+// each environment name as its own alternative, with no cross-checking of the closing tag's name,
+// is an acceptable looseness here since this only feeds a line-count estimate, not a correctness-
+// critical rewrite.
+var reMultiRowMathEnvs = regexp.MustCompile(`(?s)\\begin\{(?:bmatrix|pmatrix|vmatrix|Bmatrix|Pmatrix|Vmatrix|matrix|cases|aligned|align\*?)\}(.*?)\\end\{(?:bmatrix|pmatrix|vmatrix|Bmatrix|Pmatrix|Vmatrix|matrix|cases|aligned|align\*?)\}`)
+
+// countMathRows returns the tallest rendered row count among text's multi-row LaTeX environments
+// (see reMultiRowMathEnvs) — 1 if it contains none — by counting "\\" row separators inside each
+// plus one. estimateAutofitScale uses this as a floor under its char-count-based line estimate,
+// which has no visibility into a matrix or aligned-equations block rendering as several stacked
+// rows no matter how short its LaTeX source is.
+func countMathRows(text string) int {
+	rows := 1
+	for _, m := range reMultiRowMathEnvs.FindAllStringSubmatch(text, -1) {
+		if n := strings.Count(m[1], `\\`) + 1; n > rows {
+			rows = n
+		}
+	}
+	return rows
+}
+
+// estimateAutofitScale computes an explicit <a:normAutofit> fontScale/lnSpcReduction for bullets
+// laid out in geom's box — or nil if the content fits at 100% and no explicit scale is needed.
+//
+// A bare "<a:normAutofit/>" (no percentage attributes) only tells a renderer the placeholder
+// *wants* autofit; PowerPoint's desktop app recalculates and applies the actual shrink live when
+// it renders a box like that, but not every PPTX viewer does the same (observed in practice:
+// generated decks opened still overflowing their placeholder despite normAutofit being present).
+// Baking in a real, pre-computed scale guarantees correct sizing regardless of whether the viewer
+// recalculates autofit itself.
+//
+// This is a text-layout approximation, not a replica of PowerPoint's own layout engine — there's
+// no font-metrics/text-shaping library involved, just two calibrated constants
+// (avgCharWidthFactor, lineHeightFactor) tuned against this project's actual template and real
+// generated content, plus countMathRows as a floor for matrix/aligned-equations content that
+// renders taller than its character count alone would suggest. It converges toward a fitting scale
+// over a handful of iterations, each re-measuring wrapped line count at the current candidate
+// scale: both average character width and line height shrink together as font size shrinks, so the
+// relationship between scale and space saved is closer to quadratic than linear (halving the font
+// roughly quarters the space multi-line bullets need) — a single-pass linear guess undershoots how
+// much scale actually helps. Sub-bullet (level >= 1) lines are counted the same as level-0 lines
+// for this estimate even though they actually render in a smaller inherited font (see bulletLine)
+// — a deliberately conservative simplification rather than a second layout lookup, since
+// sub-bullets are a small minority of real content.
+func estimateAutofitScale(bullets []bulletLine, geom bodyGeometry) *autofitScale {
+	const (
+		emuPerPoint        = 12700.0
+		avgCharWidthFactor = 0.5  // average glyph width as a fraction of font size
+		lineHeightFactor   = 1.2  // single-line-spacing factor for most sans-serif fonts
+		minScale           = 0.25 // floor, matching PowerPoint's own effective autofit minimum
+		maxIterations      = 20
+	)
+	widthPt := float64(geom.widthEMU) / emuPerPoint
+	heightPt := float64(geom.heightEMU) / emuPerPoint
+	fontSizePt := float64(geom.fontSizeHundredths) / 100
+	lineSpaceFactor := float64(geom.lineSpacePermille) / 100000
+	if widthPt <= 0 || heightPt <= 0 || fontSizePt <= 0 {
+		return nil
+	}
+
+	charCounts := make([]int, len(bullets))
+	mathRows := make([]int, len(bullets))
+	for i, b := range bullets {
+		charCounts[i] = len([]rune(b.text))
+		mathRows[i] = countMathRows(b.text)
+	}
+
+	neededHeightAt := func(scale float64) float64 {
+		fs := fontSizePt * scale
+		charsPerLine := widthPt / (avgCharWidthFactor * fs)
+		lineHeight := fs * lineHeightFactor * lineSpaceFactor
+		var lines float64
+		for i, n := range charCounts {
+			l := math.Ceil(float64(n) / charsPerLine)
+			if l < float64(mathRows[i]) {
+				l = float64(mathRows[i])
+			}
+			lines += l
+		}
+		return lines * lineHeight
+	}
+
+	scale := 1.0
+	for range maxIterations {
+		needed := neededHeightAt(scale)
+		if needed <= heightPt {
+			break
+		}
+		scale *= math.Sqrt(heightPt / needed)
+		if scale < minScale {
+			scale = minScale
+			break
+		}
+	}
+
+	if scale >= 0.999 {
+		return nil // fits at 100%; bare <a:normAutofit/> is enough
+	}
+	return &autofitScale{
+		fontScale:      int(scale * 100000),
+		lnSpcReduction: int((1 - scale) * 50000),
+	}
+}
+
+// autofitScale holds an explicit, pre-computed text-autofit scale to bake into a shape's
+// <a:normAutofit>, instead of the bare (percentage-less) form ensureNormAutofit otherwise inserts
+// — see estimateAutofitScale for why a bare tag isn't always enough on its own. fontScale and
+// lnSpcReduction are OOXML's own units: thousandths of a percent (e.g. 62000 means 62%).
+type autofitScale struct {
+	fontScale      int
+	lnSpcReduction int
+}
+
+// normAutofitTag renders scale as a "<a:normAutofit .../>" element: bare if scale is nil, with
+// explicit fontScale/lnSpcReduction attributes otherwise.
+func normAutofitTag(scale *autofitScale) string {
+	if scale == nil {
+		return "<a:normAutofit/>"
+	}
+	return fmt.Sprintf(`<a:normAutofit fontScale="%d" lnSpcReduction="%d"/>`, scale.fontScale, scale.lnSpcReduction)
+}
+
+// ensureNormAutofit guarantees shape's <a:bodyPr> declares <a:normAutofit> ("shrink text on
+// overflow", using scale's explicit percentages if non-nil — see estimateAutofitScale) when it
+// has no autofit child at all, leaving a bodyPr that already declares one (normAutofit, noAutofit,
+// or spAutoFit) untouched — that's a deliberate choice on this specific shape, not the gap this
+// works around.
 //
 // PowerPoint's own placeholder inheritance for autofit is unreliable in practice: this package's
 // template ships every placeholder's slide-level bodyPr empty ("<a:bodyPr/>", no autofit child at
@@ -586,7 +809,7 @@ var rePrstTxWarp = regexp.MustCompile(`(?s)^<a:prstTxWarp\b(?:[^>]*/>|[^>]*>.*?<
 // writing normAutofit onto every generated slide's own bodyPr, rather than relying on it being
 // inherited from the layout, guarantees "shrink text on overflow" applies without that manual
 // per-slide step.
-func ensureNormAutofit(block []byte) []byte {
+func ensureNormAutofit(block []byte, scale *autofitScale) []byte {
 	start := bytes.Index(block, []byte("<a:bodyPr"))
 	if start == -1 {
 		return block
@@ -596,12 +819,15 @@ func ensureNormAutofit(block []byte) []byte {
 		return block
 	}
 	tagEnd := start + tagEndRel // index of the opening tag's '>'
+	tag := normAutofitTag(scale)
 
 	if block[tagEnd-1] == '/' {
 		// Self-closing "<a:bodyPr.../>": splice in an explicit close and normAutofit child.
-		out := make([]byte, 0, len(block)+len("><a:normAutofit/></a:bodyPr>"))
+		out := make([]byte, 0, len(block)+len(tag)+len("></a:bodyPr>"))
 		out = append(out, block[:tagEnd-1]...)
-		out = append(out, []byte("><a:normAutofit/></a:bodyPr>")...)
+		out = append(out, '>')
+		out = append(out, tag...)
+		out = append(out, []byte("</a:bodyPr>")...)
 		out = append(out, block[tagEnd+1:]...)
 		return out
 	}
@@ -611,8 +837,30 @@ func ensureNormAutofit(block []byte) []byte {
 		return block // malformed/unclosed bodyPr; leave as-is rather than guess
 	}
 	content := block[tagEnd+1 : tagEnd+closeRel]
+
+	// A normAutofit already present is replaced, not skipped, whenever scale is non-nil: the
+	// existing one is routinely this exact shape's own tag from a previous call, carrying a stale
+	// scale forward — duplicateContentSlides builds every slide by re-locating this same
+	// placeholder shape inside bytes that already have the *previous* slide's rendered content
+	// (including whatever autofit scale that slide computed for its own, different bullets), not
+	// a pristine unmodified prototype each time. Treating a prior normAutofit as "already decided"
+	// the way an author's genuine noAutofit/spAutoFit choice below is treated would silently pin
+	// every slide after the first to that first slide's scale forever, regardless of how much
+	// their own content actually needs — exactly the bug this replacement fixes. scale == nil
+	// (the plain "ensure some autofit is set" caller) keeps the original skip-if-present behavior,
+	// since it has no specific value of its own to enforce over whatever's already there.
+	if loc := reNormAutofit.FindIndex(content); loc != nil {
+		if scale == nil {
+			return block
+		}
+		out := make([]byte, 0, len(block)+len(tag))
+		out = append(out, block[:tagEnd+1+loc[0]]...)
+		out = append(out, tag...)
+		out = append(out, block[tagEnd+1+loc[1]:]...)
+		return out
+	}
 	if reAutofitChild.Match(content) {
-		return block // already has an explicit autofit choice
+		return block // noAutofit or spAutoFit: a deliberate choice on this specific shape, not ours to override
 	}
 
 	insertAt := tagEnd + 1 // default: bodyPr's first child
@@ -620,9 +868,9 @@ func ensureNormAutofit(block []byte) []byte {
 		insertAt += len(warp) // schema requires prstTxWarp, when present, before the autofit choice
 	}
 
-	out := make([]byte, 0, len(block)+len("<a:normAutofit/>"))
+	out := make([]byte, 0, len(block)+len(tag))
 	out = append(out, block[:insertAt]...)
-	out = append(out, []byte("<a:normAutofit/>")...)
+	out = append(out, tag...)
 	out = append(out, block[insertAt:]...)
 	return out
 }
@@ -630,8 +878,10 @@ func ensureNormAutofit(block []byte) []byte {
 // setPlaceholderBullets locates the <p:sp> shape containing a <p:ph type="phType" .../> and
 // replaces its text body with one <a:p> paragraph per bullet, indented via <a:pPr lvl="1"/> for
 // any bullet.level >= 1 (see bulletLine) — omitted for level 0, since 0 is OOXML's own implicit
-// default level and doesn't need stating.
-func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine) ([]byte, error) {
+// default level and doesn't need stating. scale, if non-nil, bakes an explicit autofit percentage
+// into the shape's bodyPr (see estimateAutofitScale); nil gets the bare, percentage-less form
+// ensureNormAutofit inserts by default.
+func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine, scale *autofitScale) ([]byte, error) {
 	marker := []byte(`<p:ph type="` + phType + `"`)
 	phIdx := bytes.Index(slideXML, marker)
 	if phIdx == -1 {
@@ -648,7 +898,7 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine)
 	}
 	spEnd := phIdx + spEndRel + len("</p:sp>")
 
-	block := ensureNormAutofit(slideXML[spStart:spEnd])
+	block := ensureNormAutofit(slideXML[spStart:spEnd], scale)
 
 	lstIdx := bytes.Index(block, []byte("<a:lstStyle/>"))
 	if lstIdx == -1 {
