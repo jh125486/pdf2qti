@@ -1,7 +1,61 @@
-// Whitebox package: ensureNormAutofit is unexported.
+// Whitebox package: ensureNormAutofit and splitBullets are unexported.
 package pptx
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+func TestSplitBullets_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    []bulletLine
+	}{
+		{
+			name:    "top-level bullets only",
+			content: "First\nSecond",
+			want:    []bulletLine{{text: "First", level: 0}, {text: "Second", level: 0}},
+		},
+		{
+			name:    "two-space indent is a level-1 sub-bullet",
+			content: "Top\n  Sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}},
+		},
+		{
+			name:    "deeper indent still collapses to level 1 (only one sub-level supported)",
+			content: "Top\n      Sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Sub", level: 1}},
+		},
+		{
+			name:    "single leading space is not enough to count as a sub-bullet",
+			content: "Top\n Not sub",
+			want:    []bulletLine{{text: "Top", level: 0}, {text: "Not sub", level: 0}},
+		},
+		{
+			name:    "blank lines are skipped",
+			content: "First\n\n\nSecond",
+			want:    []bulletLine{{text: "First", level: 0}, {text: "Second", level: 0}},
+		},
+		{
+			name:    "empty content",
+			content: "",
+			want:    []bulletLine{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := splitBullets(tt.content)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestEnsureNormAutofit_Table(t *testing.T) {
 	t.Parallel()

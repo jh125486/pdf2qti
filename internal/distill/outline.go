@@ -103,7 +103,7 @@ func expandOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput, o
 		for i, entry := range batch {
 			fmt.Fprintf(&b, "<!-- meta: %d %s -->\n# %s\n\n", n, entry.Tag, entry.Title)
 			for _, bullet := range bullets[i] {
-				fmt.Fprintf(&b, "- %s\n", bullet)
+				writeBulletLine(&b, bullet.Text, bullet.Level)
 			}
 			b.WriteString("\n---\n\n")
 			n++
@@ -122,9 +122,29 @@ func expandOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput, o
 	return b.String(), nil
 }
 
+// writeBulletLine writes text as a top-level "- text" markdown bullet line, or an indented
+// "  - text" one for level >= 1 — the convention distill.bulletLines (protodeck.go) reads back on
+// parse. Only one sub-level is supported; level is clamped to [0, 1] defensively in case the model
+// returns something else despite the prompt only ever describing 0 and 1.
+func writeBulletLine(b *strings.Builder, text string, level int) {
+	if level >= 1 {
+		fmt.Fprintf(b, "  - %s\n", text)
+		return
+	}
+	fmt.Fprintf(b, "- %s\n", text)
+}
+
+// expandBullet is one bullet's text and indentation level (0 = top-level, 1 = an indented
+// sub-bullet elaborating the bullet immediately above it — see expandBatchPromptTmpl's own
+// description of when to use each).
+type expandBullet struct {
+	Text  string `json:"text"`
+	Level int    `json:"level"`
+}
+
 // expandSlide is the shape of one entry in expandBatchResponse.
 type expandSlide struct {
-	Bullets []string `json:"bullets"`
+	Bullets []expandBullet `json:"bullets"`
 }
 
 // expandBatchResponse is the shape of the LLM's JSON response to expandBatchPromptTmpl.
@@ -140,7 +160,10 @@ var expandBatchSchema = &Schema{
 	Name: "slide_bullets_batch",
 	Definition: jsonSchemaObject(map[string]any{
 		"slides": jsonSchemaArray(jsonSchemaObject(map[string]any{
-			"bullets": jsonSchemaArray(jsonSchemaString),
+			"bullets": jsonSchemaArray(jsonSchemaObject(map[string]any{
+				"text":  jsonSchemaString,
+				"level": jsonSchemaInteger,
+			})),
 		})),
 	}),
 }
@@ -162,13 +185,13 @@ const expandBatchMaxAttempts = 2
 // the response doesn't parse at all, or parses but returns fewer slide entries than batch has,
 // since both are otherwise indistinguishable from a real content failure to expandOutline's
 // caller.
-func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) ([][]string, error) {
+func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChapterInput, batch []outlineEntry) ([][]expandBullet, error) {
 	prompt, err := buildExpandBatchPrompt(chapterByTag, batch)
 	if err != nil {
 		return nil, fmt.Errorf("build expand prompt: %w", err)
 	}
 
-	var out [][]string
+	var out [][]expandBullet
 	var lastErr error
 	for attempt := 1; attempt <= expandBatchMaxAttempts; attempt++ {
 		raw, err := llm.Complete(ctx, prompt, expandBatchSchema)
@@ -181,11 +204,14 @@ func expandBatch(ctx context.Context, llm LLM, chapterByTag map[string]ProtoChap
 			continue
 		}
 		lastErr = nil
-		out = make([][]string, len(resp.Slides))
+		out = make([][]expandBullet, len(resp.Slides))
 		for i, s := range resp.Slides {
-			bullets := make([]string, len(s.Bullets))
+			bullets := make([]expandBullet, len(s.Bullets))
 			for j, bullet := range s.Bullets {
-				bullets[j] = repairMatrixRowSeparators(repairNulBytes(bullet))
+				bullets[j] = expandBullet{
+					Text:  repairMatrixRowSeparators(repairNulBytes(bullet.Text)),
+					Level: bullet.Level,
+				}
 			}
 			out[i] = bullets
 		}
@@ -219,14 +245,21 @@ artifacts, not real content. Also ignore any "Lab"/"Python Lab" hands-on coding-
 labs are a separate assignment, not lecture material.
 
 ## Task
-Produce a JSON object: {"slides": [{"bullets": ["...", "..."]}]}, one entry per planned slide
-above, IN THE SAME ORDER. Each entry's bullets is an array of 5-8 strings covering exactly what
-that slide's focus describes, normal weight, wrapping only key vocabulary/terms in **bold**
-inline where they first appear — never bold a whole bullet.
+Produce a JSON object: {"slides": [{"bullets": [{"text": "...", "level": 0}, ...]}]}, one entry
+per planned slide above, IN THE SAME ORDER. Each entry's bullets is an array of 5-8 objects
+covering exactly what that slide's focus describes, normal weight, wrapping only key
+vocabulary/terms in **bold** inline where they first appear — never bold a whole bullet.
 
-Each bullet is a short phrase or fragment, NOT a full flowing sentence — 11 words or fewer
+Each bullet's text is a short phrase or fragment, NOT a full flowing sentence — 11 words or fewer
 (formulas don't count toward this). Long sentences don't work on slides; cut to the essential
 words, the way a real lecture slide would, not the way a paragraph would.
+
+level is 0 for a normal top-level bullet. Use level 1 for an indented sub-bullet ONLY when it
+directly elaborates the bullet immediately above it — a worked example, a concrete instance, or a
+clarifying detail that would read as a non sequitur as its own top-level point. Most bullets stay
+level 0; a slide with every bullet at level 1, or with a level-1 bullet not preceded by a level-0
+one, is wrong. Don't manufacture a sub-bullet just to use one — omit it if the top-level bullet
+already stands on its own.
 
 A variable referenced inline (like x_1, x_2) must use the same LaTeX math delimiters as every
 other formula in your bullets, never bare underscore notation outside math mode.

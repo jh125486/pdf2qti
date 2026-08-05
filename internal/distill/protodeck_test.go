@@ -51,7 +51,10 @@ var (
 // rather than throwing away an otherwise-successful generation. reviewMalformed makes the review
 // call return unparseable content, to test reviewDeck's own parse-error wrapping (still advisory,
 // same as reviewFails). reviewIssues makes the review call return one populated issue, to test
-// reviewDeck's issues-to-warnings formatting path.
+// reviewDeck's issues-to-warnings formatting path. expandSubBullet makes the first expand-batch
+// call's first slide return a level-1 sub-bullet after its level-0 bullet, to test that
+// expandOutline's markdown output indents it and ParseProtoDeck/bulletLines round-trips that
+// indent back out.
 type protoDeckStubLLM struct {
 	err                         error
 	chunkOutlineCount           int
@@ -61,6 +64,7 @@ type protoDeckStubLLM struct {
 	summaryEmpty                bool
 	expandEmptyFirstCall        bool
 	expandTruncatedFirstCall    bool
+	expandSubBullet             bool
 	reviewFails                 bool
 	reviewMalformed             bool
 	reviewIssues                bool
@@ -163,12 +167,15 @@ func (s *protoDeckStubLLM) stubExpandBatch(prompt string) string {
 		return `{"slides":[]}`
 	}
 	if s.expandTruncatedFirstCall && s.expandCalls == 1 {
-		return `{"slides":[{"bullets":["a"]` // deliberately truncated mid-object
+		return `{"slides":[{"bullets":[{"text":"a","level":0}]` // deliberately truncated mid-object
 	}
 	n := len(rePlannedSlideLine.FindAllString(prompt, -1))
 	slides := make([]string, n)
 	for i := range slides {
-		slides[i] = `{"bullets":["a"]}`
+		slides[i] = `{"bullets":[{"text":"a","level":0}]}`
+	}
+	if s.expandSubBullet && s.expandCalls == 1 && n > 0 {
+		slides[0] = `{"bullets":[{"text":"a","level":0},{"text":"sub","level":1}]}`
 	}
 	return fmt.Sprintf(`{"slides":[%s]}`, strings.Join(slides, ","))
 }
@@ -403,6 +410,40 @@ func TestGenerateProtoDeck_DuplicateTitlesAreDisambiguated(t *testing.T) {
 	}
 	if titles[0] != "Slide 1" || titles[1] != "Slide 1 (2)" {
 		t.Fatalf("got titles %v, want [\"Slide 1\", \"Slide 1 (2)\", ...]", titles)
+	}
+}
+
+// TestGenerateProtoDeck_SubBulletRoundTrips checks a level-1 sub-bullet survives the full
+// pipeline: expandOutline's markdown output must indent it ("  - text", see writeBulletLine), and
+// ParseProtoDeck/bulletLines must read that indent back out into Slide.Content with the same
+// leading-two-space convention (see bulletLines' doc comment) — the exact shape
+// pptx.splitBullets expects on the render side.
+func TestGenerateProtoDeck_SubBulletRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	chapters := []distill.ProtoChapterInput{{Tag: "ch1", ModuleName: "Signals", Overview: "o", Text: "t"}}
+	llm := &protoDeckStubLLM{chunkOutlineCount: 1, expandSubBullet: true}
+	deck, _, err := distill.GenerateProtoDeck(t.Context(), llm, chapters, 3, 8)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(deck, "\n  - sub\n") {
+		t.Fatalf("expected indented sub-bullet in generated deck markdown, got:\n%s", deck)
+	}
+
+	_, _, slides, err := distill.ParseProtoDeck(deck)
+	if err != nil {
+		t.Fatalf("parse generated deck: %v", err)
+	}
+	found := false
+	for _, s := range slides {
+		if strings.Contains(s.Content, "\n  sub") || strings.HasPrefix(s.Content, "  sub") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a slide's Content to contain a \"  sub\" (two-space-indented) line, got slides: %+v", slides)
 	}
 }
 

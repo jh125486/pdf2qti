@@ -208,6 +208,21 @@ func renderTestCases() []renderTestCase {
 			},
 		},
 		{
+			// A two-space-indented Content line (see distill.bulletLines' convention) must render
+			// as a sub-bullet paragraph (<a:pPr lvl="1"/>), not a plain top-level one.
+			name:    "indented content line renders as a level-1 sub-bullet",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Top point\n  Sub point"),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				mustContainAll(t, "sub-bullet paragraph", contentSlide, `<a:p><a:pPr lvl="1"/><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Sub point</a:t></a:r></a:p>`)
+				if strings.Contains(contentSlide, `<a:pPr lvl="1"/><a:r><a:rPr lang="en-US" dirty="0"/><a:t>Top point</a:t>`) {
+					t.Fatalf("top-level bullet incorrectly got a pPr lvl: %s", contentSlide)
+				}
+			},
+		},
+		{
 			name:    "blank lines between bullets are skipped",
 			entries: baseTemplateEntries,
 			dc:      renderFirstContentSlideDC("Point 1\n\n\nPoint 2"),
