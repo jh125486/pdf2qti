@@ -4,6 +4,7 @@ package distill
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -99,6 +100,21 @@ func TestVerifyConsistency_Table(t *testing.T) {
 				"corrections": [{"find": "the magnitude of a vector is its length", "replace": "the magnitude of a vector is its length"}],
 				"warnings": []
 			}`},
+		},
+		{
+			// Caught in PR review (jh125486/pdf2qti#45): nothing server-side enforces the prompt's
+			// "short clause or sentence" instruction for find/replace, so an unmatched correction's
+			// warning must stay bounded even when the LLM ignores that and returns a very long span
+			// — otherwise it balloons VerificationWarnings and every downstream log line.
+			name: "long unmatched find/replace text is truncated in the warning",
+			llm: &staticLLM{response: fmt.Sprintf(`{
+				"vocabulary": [], "sections": [],
+				"corrections": [{"find": %q, "replace": %q}],
+				"warnings": []
+			}`, strings.Repeat("x", correctionPreviewLimit+50), strings.Repeat("y", correctionPreviewLimit+50)),
+			},
+			wantWarnings: []string{fmt.Sprintf(`correction not applied (found 0 exact matches, need exactly 1): %q -> %q`,
+				strings.Repeat("x", correctionPreviewLimit)+"…", strings.Repeat("y", correctionPreviewLimit)+"…")},
 		},
 	}
 

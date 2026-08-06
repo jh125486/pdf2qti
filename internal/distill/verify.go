@@ -60,12 +60,30 @@ func applyCorrections(dc *DistilledContext, corrections []textCorrection) (skipp
 			continue
 		}
 		if n := strings.Count(dc.Text, c.Find); n != 1 {
-			skipped = append(skipped, fmt.Sprintf("correction not applied (found %d exact matches, need exactly 1): %q -> %q", n, c.Find, c.Replace))
+			skipped = append(skipped, fmt.Sprintf("correction not applied (found %d exact matches, need exactly 1): %q -> %q", n, truncatePreview(c.Find), truncatePreview(c.Replace)))
 			continue
 		}
 		dc.Text = strings.Replace(dc.Text, c.Find, c.Replace, 1)
 	}
 	return skipped
+}
+
+// correctionPreviewLimit bounds how much of a skipped correction's Find/Replace text
+// truncatePreview keeps in a warning — the prompt asks the LLM for a short clause or sentence
+// (see verifyPromptTmpl), but nothing enforces that server-side, so an uncooperative response
+// could otherwise dump an arbitrarily long span straight into VerificationWarnings and, from
+// there, into every downstream log line that reports it (see distill.go's per-warning Warn log).
+const correctionPreviewLimit = 200
+
+// truncatePreview shortens s to at most correctionPreviewLimit runes, appending "…" when
+// truncated, so a warning stays a scannable one-liner regardless of how long the LLM's
+// Find/Replace text turned out to be.
+func truncatePreview(s string) string {
+	r := []rune(s)
+	if len(r) <= correctionPreviewLimit {
+		return s
+	}
+	return string(r[:correctionPreviewLimit]) + "…"
 }
 
 // textCorrection is a single verbatim substring of dc.Text (Find) and its corrected replacement
