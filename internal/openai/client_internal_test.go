@@ -70,7 +70,7 @@ func TestNew(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
-			c, err := New(tt.cfg)
+			c, err := New(tt.cfg, 0)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("got err %v, want containing %q", err, tt.wantErr)

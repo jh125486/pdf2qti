@@ -55,7 +55,7 @@ func TestSelectLLM(t *testing.T) {
 			}
 			logger := audit.New(io.Discard)
 			stub := stubLLM{}
-			got := selectLLM(tt.gen, logger, stub)
+			got := selectLLM(tt.gen, 0, logger, stub)
 			_, isStub := got.(stubLLM)
 			if isStub != tt.wantIsStub {
 				t.Fatalf("got isStub=%v, want %v (result type %T)", isStub, tt.wantIsStub, got)

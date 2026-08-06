@@ -67,7 +67,7 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 
 	minSlides, maxSlides := resolveSlideRange(s.MinSlides, s.MaxSlides, chapters)
 
-	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubSlidesLLM{})
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), cli.HTTPTimeout, logger, &stubSlidesLLM{})
 	logger.Info("generating slide deck", "sources", len(chapters), "minSlides", minSlides, "maxSlides", maxSlides)
 	deck, warnings, err := distill.GenerateProtoDeck(ctx, llm, chapters, minSlides, maxSlides)
 	if err != nil {

@@ -47,10 +47,16 @@ type Client struct {
 	modelParams json.RawMessage
 }
 
+// defaultHTTPTimeout is used when httpTimeout is unset (<=0) — e.g. a Client built
+// programmatically rather than through the CLI's --http-timeout flag (which itself defaults to
+// this same value; see CLI.HTTPTimeout).
+const defaultHTTPTimeout = 5 * time.Minute
+
 // New builds a Client from a resolved Generation config, reading the API key from the
 // environment variable named by cfg.APIKeyEnv. Returns an error if the provider isn't
-// "openai" or the key env var is unset/empty.
-func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere (internal/generate.New)
+// "openai" or the key env var is unset/empty. httpTimeout bounds each individual API call;
+// <=0 falls back to defaultHTTPTimeout.
+func New(cfg config.Generation, httpTimeout time.Duration) (*Client, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere (internal/generate.New)
 	if cfg.Provider != providerOpenAI {
 		return nil, fmt.Errorf("unsupported provider %q (only \"openai\" is implemented)", cfg.Provider)
 	}
@@ -66,8 +72,11 @@ func New(cfg config.Generation) (*Client, error) { //nolint:gocritic // matches 
 	if model == "" {
 		model = defaultModel
 	}
+	if httpTimeout <= 0 {
+		httpTimeout = defaultHTTPTimeout
+	}
 	return &Client{
-		httpClient:  &http.Client{Timeout: 5 * time.Minute},
+		httpClient:  &http.Client{Timeout: httpTimeout},
 		baseURL:     defaultBaseURL,
 		apiKey:      key,
 		model:       model,

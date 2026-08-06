@@ -33,7 +33,7 @@ func (d *DistillCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 
 	for _, src := range sources {
-		llm := selectLLM(cfg.EffectiveGeneration(src), logger, &stubDistillLLM{})
+		llm := selectLLM(cfg.EffectiveGeneration(src), cli.HTTPTimeout, logger, &stubDistillLLM{})
 		if err := runDistillSource(ctx, cfg, src, logger, llm, d.Force); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
@@ -90,8 +90,8 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 		return fmt.Errorf("distill: %w", err)
 	}
 
-	if len(dc.VerificationWarnings) > 0 {
-		logger.Warn("consistency check found unresolved issues", "source", src.ID, "count", len(dc.VerificationWarnings))
+	for _, w := range dc.VerificationWarnings {
+		logger.Warn("consistency check found an unresolved issue", "source", src.ID, "detail", w)
 	}
 
 	if err := distill.Save(ctxFile, dc); err != nil {
