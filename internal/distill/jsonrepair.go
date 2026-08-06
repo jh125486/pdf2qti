@@ -266,6 +266,21 @@ func stripStrayControlBytes(s string) (fixed string, changed bool) {
 // whitespace is left alone (the untouched, legitimate case above), and every other run — including
 // a longer whitespace-preceded one — halves, since over-doubling doubles every backslash in the
 // run uniformly.
+//
+// Known limitation, deliberately not fixed here (raised in a Fable-assisted review of this
+// package): a compact-notation matrix row separator directly abutting a cell that's itself a
+// single-backslash LaTeX command (e.g. "...&\lambda_1\\lambda_2&..." with no whitespace around
+// the separator) can decode to an odd-length run this function can't correctly halve — the
+// correct split depends on which raw encoding the model actually used for the separator (bare vs.
+// already-doubled), information this function has no way to recover from the decoded run alone.
+// The tempting-looking fix — leave a run alone whenever it's followed by a multi-letter command
+// name instead of collapsing it — was checked against this function's own primary, most-common
+// case (a single over-doubled command anywhere in prose, e.g. a decoded "\\mathbf" that must
+// still collapse to "\mathbf") and would silently break it: that's the exact same shape (a
+// 2-backslash run immediately followed by a multi-letter word) this function exists to fix, with
+// no local signal to tell the two apart. Matrix-context awareness — which repairMatrixRowSeparators
+// has and this function doesn't — is the only place that distinction could be made correctly; not
+// attempted here given the risk of regressing the far more common case for a narrower one.
 func collapseOverDoubledBackslashes(s string) (fixed string, changed bool) {
 	if !strings.Contains(s, `\\`) {
 		return s, false
