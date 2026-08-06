@@ -161,7 +161,8 @@ func repairDecodedArtifacts(v reflect.Value) {
 func fixDecodedLeaf(s string) (fixed string, changed bool) {
 	s, c1 := fixControlByteArtifacts(s)
 	s, c2 := collapseOverDoubledBackslashes(s)
-	return s, c1 || c2
+	s, c3 := stripStrayControlBytes(s)
+	return s, c1 || c2 || c3
 }
 
 // fixControlByteArtifacts replaces every controlByteToEscapeLetter byte in s with '\' plus its
@@ -181,6 +182,45 @@ func fixControlByteArtifacts(s string) (fixed string, changed bool) {
 		b.WriteByte(s[i])
 	}
 	return b.String(), true
+}
+
+// isXMLInvalidControlByte reports whether b is a C0 control byte XML 1.0 disallows in element
+// content — every byte below 0x20 except tab/newline/carriage-return, the three XML explicitly
+// permits (https://www.w3.org/TR/xml/#charsets).
+func isXMLInvalidControlByte(b byte) bool {
+	return b < 0x20 && b != '\t' && b != '\n' && b != '\r'
+}
+
+// stripStrayControlBytes removes every isXMLInvalidControlByte byte from s, reporting whether it
+// changed anything. Observed in practice: a slide-generation LLM call emitting a genuine, valid
+// JSON backslash-u-plus-4-hex-digit unicode escape (not a raw unescaped backslash — that's
+// fixControlByteArtifacts's five-byte table above) for a low control-code point in place of
+// intended content, e.g. inline-math delimiters replaced by a literal control byte. This domain
+// never legitimately wants any control
+// byte in decoded prose (see controlByteToEscapeLetter's doc comment) — and beyond being wrong
+// content, a byte like this landing in pdf2qti's PPTX output isn't just cosmetic: OOXML is XML,
+// and an XML-invalid byte in a run of text can make PowerPoint refuse to open the file rather
+// than merely rendering oddly. Runs last in fixDecodedLeaf, after fixControlByteArtifacts has
+// already turned the five bytes it can explain back into their letter-pair escapes, so nothing
+// this function removes was ever a legitimate, explainable artifact.
+func stripStrayControlBytes(s string) (fixed string, changed bool) {
+	hasStray := false
+	for i := 0; i < len(s); i++ {
+		if isXMLInvalidControlByte(s[i]) {
+			hasStray = true
+			break
+		}
+	}
+	if !hasStray {
+		return s, false
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if !isXMLInvalidControlByte(s[i]) {
+			b = append(b, s[i])
+		}
+	}
+	return string(b), true
 }
 
 // collapseOverDoubledBackslashes replaces a decoded "\\" (two literal backslash characters) not

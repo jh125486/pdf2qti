@@ -406,6 +406,53 @@ func TestFixControlByteArtifacts_Table(t *testing.T) {
 	}
 }
 
+// TestStripStrayControlBytes_Table covers stripStrayControlBytes directly: an XML-invalid C0
+// control byte (observed in practice: ch07_slides.md had this exact byte where backslash-open-
+// paren/backslash-close-paren math delimiters belonged, from a slide-generation LLM call
+// emitting a valid-but-wrong 4-hex-digit JSON unicode escape) gets removed; tab/newline/
+// carriage-return -- the three C0 bytes XML actually permits -- survive untouched; and a
+// clean string reports changed=false.
+func TestStripStrayControlBytes_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		in          string
+		wantFixed   string
+		wantChanged bool
+	}{
+		{name: "clean string, nothing to strip", in: `\(x\)`, wantFixed: `\(x\)`, wantChanged: false},
+		{
+			name:        "XML-invalid control byte removed (the ch07_slides.md regression)",
+			in:          "the norm \x05mathbf{u}\x05 is nonnegative",
+			wantFixed:   "the norm mathbf{u} is nonnegative",
+			wantChanged: true,
+		},
+		{
+			name:        "a different XML-invalid control byte is also removed",
+			in:          "bell\x07ring",
+			wantFixed:   "bellring",
+			wantChanged: true,
+		},
+		{
+			name:        "tab, newline, and carriage return survive untouched (XML permits them)",
+			in:          "a\tb\nc\rd",
+			wantFixed:   "a\tb\nc\rd",
+			wantChanged: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixed, changed := stripStrayControlBytes(tt.in)
+			if fixed != tt.wantFixed || changed != tt.wantChanged {
+				t.Fatalf("got (%q, %v), want (%q, %v)", fixed, changed, tt.wantFixed, tt.wantChanged)
+			}
+		})
+	}
+}
+
 // TestCollapseOverDoubledBackslashes_Table covers collapseOverDoubledBackslashes directly: an
 // over-doubled pair not followed by whitespace collapses to one backslash, a genuine matrix row
 // separator (followed by whitespace) is left alone, and a clean string with no double-backslash at
