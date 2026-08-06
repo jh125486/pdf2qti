@@ -49,6 +49,61 @@ func TestRepairMatrixRowSeparators_Table(t *testing.T) {
 			in:   `f(x) = \begin{cases} 1 \ -1 \end{cases}`,
 			want: `f(x) = \begin{cases} 1 \\ -1 \end{cases}`,
 		},
+		{
+			// The ch05/ch09/ch10 regression: compact matrix notation with no whitespace around the
+			// row separator at all. Caught by comparing math-span counts in generated slide
+			// Markdown against actual <m:oMath> elements in the rendered PPTX (see
+			// repairMatrixRowSeparators's doc comment) -- pandoc silently failed to convert every
+			// one of these to OOXML math, since a bare "\" directly followed by a digit or letter
+			// isn't valid LaTeX syntax at all.
+			name: "compact bare separator directly abutting a single-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a negative single-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\-1&0\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\-1&0\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a single-letter variable cell is doubled",
+			in:   `\begin{bmatrix}1&k\0&1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&k\\0&1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a negative single-letter variable cell is doubled",
+			in:   `\begin{bmatrix}1&0\-k&1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\-k&1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator directly before end (last row, single-digit cell) is doubled",
+			in:   `\begin{bmatrix}0&1\1&0\end{bmatrix}`,
+			want: `\begin{bmatrix}0&1\\1&0\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a multi-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\12&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\12&-1\end{bmatrix}`,
+		},
+		{
+			// The false-positive-avoidance case for the new compact-notation path: a genuine
+			// multi-letter LaTeX command (theta, a real Greek-letter macro) used as a matrix cell's
+			// entire content, directly abutting the next cell with no whitespace, must NOT be
+			// mistaken for a malformed row separator plus a one-letter cell "t" -- doubling it
+			// would turn the correct "\theta" into the wrong "\\theta" (an escaped literal
+			// backslash followed by unrelated text "theta", not the theta symbol).
+			name: "compact single-backslash multi-letter command as a cell is left unchanged",
+			in:   `\begin{bmatrix}\theta&\theta\end{bmatrix}`,
+			want: `\begin{bmatrix}\theta&\theta\end{bmatrix}`,
+		},
+		{
+			// Already-correct doubled separator immediately followed by a lone-cell-shaped token
+			// must not be corrupted into three backslashes by the new lone-cell path matching the
+			// separator's second backslash.
+			name: "already-doubled separator abutting a lone-cell token is left unchanged",
+			in:   `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+		},
 	}
 
 	for _, tt := range tests {
