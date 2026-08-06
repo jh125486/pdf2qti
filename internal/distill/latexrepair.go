@@ -11,17 +11,66 @@ import (
 // Go's regexp package (RE2) supports neither backreferences nor lookaround; a begin/end pair
 // naming different environments is vanishingly unlikely in practice, and even if the model ever
 // produced one, fixing row separators inside it is still the correct behavior either way.
+//
+// Covers, beyond the matrix variants and cases: array (the standard way to typeset an augmented
+// matrix with a vertical divider for Gaussian elimination, e.g.
+// "\begin{array}{cc|c}1&0&2\\0&1&3\end{array}" — none of the matrix variants support a divider
+// at all, so this is the only way a model would write one), and the align/aligned/gathered family
+// (multi-line derivations, e.g. simultaneous-equation steps), which use the identical bare-vs-
+// doubled "\\" row-separator convention. array's own "{cc|c}" column-spec argument immediately
+// after "\begin{array}" needs no special handling here: it's just inert text (no backslash) that
+// falls through fixRowSeparators untouched, same as any other non-backslash content in the block.
 var (
-	reMatrixEnvBegin = regexp.MustCompile(`\\begin\{(?:[bBpPvV]?matrix|cases)\}`)
-	reMatrixEnvEnd   = regexp.MustCompile(`\\end\{(?:[bBpPvV]?matrix|cases)\}`)
+	reMatrixEnvBegin = regexp.MustCompile(`\\begin\{(?:[bBpPvV]?matrix|cases|array|align\*?|aligned|gathered)\}`)
+	reMatrixEnvEnd   = regexp.MustCompile(`\\end\{(?:[bBpPvV]?matrix|cases|array|align\*?|aligned|gathered)\}`)
 )
 
-// reRowSeparator matches a run of one or two backslashes immediately followed by whitespace — a
-// LaTeX row separator, correct only when doubled ("\\\\" in Go source, two literal backslash
-// characters). The optional second backslash lets fixRowSeparators distinguish an already-correct
-// separator (leave alone) from a bare one (needs doubling) without lookaround, which RE2 doesn't
-// support; the callback uses the match length to decide.
-var reRowSeparator = regexp.MustCompile(`\\\\?[ \t\n]`)
+// reLoneCellDigits and reLoneCellLetter identify a "lone cell" token — a single matrix cell's
+// entire content — immediately following a bare row separator with no whitespace at all (see
+// loneCellTokenLen). A leading "-" is included for a negative numeric or single-letter-variable
+// cell (e.g. "-1", "-k").
+var (
+	reLoneCellDigits = regexp.MustCompile(`^-?\d+`)
+	reLoneCellLetter = regexp.MustCompile(`^-?[A-Za-z]`)
+)
+
+// loneCellTokenLen returns the length of a safely-identifiable "lone cell" token at the start of
+// s — a signed integer, or a single-letter variable name — or 0 if s doesn't begin with one.
+//
+// A signed integer is unambiguous regardless of what follows it: LaTeX macro names are never
+// digits. A single letter is only treated as a lone cell if it is NOT immediately followed by
+// another letter or digit — "theta" in "\theta" must never be mistaken for the single-letter cell
+// "t" followed by unrelated content "heta", since \theta is a real, correct LaTeX command whose
+// single leading backslash must stay exactly as-is.
+func loneCellTokenLen(s string) int {
+	if m := reLoneCellDigits.FindString(s); m != "" {
+		return len(m)
+	}
+	if m := reLoneCellLetter.FindString(s); m != "" {
+		if len(m) < len(s) && isAlnumByte(s[len(m)]) {
+			return 0 // part of a longer identifier/command name (e.g. "theta") -- leave alone
+		}
+		return len(m)
+	}
+	return 0
+}
+
+// reSpacingArg matches a row separator's optional extra-vertical-space argument, e.g. "[6pt]",
+// "[1em]", "[.5cm]" — LaTeX's own syntax for "\\[<length>]", never anything else in this domain,
+// so its bare presence directly after a row separator is an unambiguous signal on its own; the
+// exact length value inside isn't validated, just that a "]" closes it within a short, plausible
+// distance (long past that, "[" almost certainly means something else entirely).
+var reSpacingArg = regexp.MustCompile(`^\[[^\]\n\\]{1,10}\]`)
+
+// hasSpacingArg reports whether s begins with a row separator's optional spacing argument (see
+// reSpacingArg).
+func hasSpacingArg(s string) bool {
+	return reSpacingArg.MatchString(s)
+}
+
+func isAlnumByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
 
 // repairMatrixRowSeparators fixes a LaTeX matrix row separator that's missing its second
 // backslash — observed in practice against the real OpenAI API: the same model, across different
@@ -30,7 +79,13 @@ var reRowSeparator = regexp.MustCompile(`\\\\?[ \t\n]`)
 // single one ("\begin{bmatrix} a \ b \end{bmatrix}", one backslash) — both are syntactically valid
 // JSON string content, so this isn't a JSON-parsing bug (see jsonrepair.go for that class of
 // issue) and unmarshalRepaired can't catch it; it's the model being inconsistent about LaTeX
-// syntax itself.
+// syntax itself. A bare separator with no surrounding whitespace at all is just as common in
+// compact matrix notation (e.g. "\begin{bmatrix}1&0\0&-1\end{bmatrix}", a bare "\" directly
+// abutting the next row's first cell "0") — see loneCellTokenLen — and pandoc silently fails to
+// convert the whole formula to OOXML math when this goes unfixed (ch05/ch09/ch10's "1&0\0&-1"-
+// style 2x2 rotation/reflection/shear matrices, caught by comparing math-span counts in generated
+// slide Markdown against actual <m:oMath> elements in the rendered PPTX — nothing in pdf2qti logs
+// a per-formula conversion failure, see mathRunXML's doc comment on why that fallback is silent).
 //
 // Deliberately scoped to text inside \begin{ENV}...\end{ENV} blocks for known array-like
 // environments (bmatrix, pmatrix, vmatrix, Bmatrix, Vmatrix, matrix, cases) rather than fixing
@@ -65,15 +120,66 @@ func repairMatrixRowSeparators(s string) string {
 	return b.String()
 }
 
-// fixRowSeparators doubles every bare (single-backslash) row separator within block, leaving
-// already-doubled ones untouched.
+// fixRowSeparators doubles every bare (single-backslash) row separator within block — whether
+// followed by whitespace or directly abutting the next row's first cell with no whitespace at all
+// (see loneCellTokenLen) — leaving already-doubled ones, and anything else too ambiguous to
+// safely touch (a run of more than two backslashes, or a bare backslash followed by neither
+// whitespace nor a recognizable lone cell token), untouched.
+//
+// Scans block manually (rather than a single regexp, RE2's lack of lookaround aside) specifically
+// to get backslash-run-length right: a naive per-backslash regexp risks matching the *second*
+// backslash of an already-correct doubled separator that happens to be followed by a lone cell
+// token too (e.g. the "0" in "...\\0&1..."), which would triple it into three backslashes —
+// walking whole runs, exactly as jsonrepair.go's collapseOverDoubledBackslashes does for the same
+// reason, avoids that.
 func fixRowSeparators(block string) string {
-	return reRowSeparator.ReplaceAllStringFunc(block, func(m string) string {
-		if len(m) == 3 { // "\\" + whitespace: already doubled
-			return m
+	var b strings.Builder
+	b.Grow(len(block))
+	for i := 0; i < len(block); {
+		if block[i] != '\\' {
+			b.WriteByte(block[i])
+			i++
+			continue
 		}
-		return "\\" + m // "\" + whitespace: bare, needs doubling
-	})
+		j := i
+		for j < len(block) && block[j] == '\\' {
+			j++
+		}
+		n := j - i
+		if n != 1 {
+			b.WriteString(block[i:j]) // already doubled, or too ambiguous to guess at
+			i = j
+			continue
+		}
+		next := byte(0)
+		if j < len(block) {
+			next = block[j]
+		}
+		switch {
+		case next == ' ' || next == '\t' || next == '\n':
+			b.WriteString(`\\`)
+			b.WriteByte(next)
+			i = j + 1
+		case hasSpacingArg(block[j:]):
+			// A row separator followed by an optional extra-vertical-space argument, e.g.
+			// "\[6pt]" for a bare separator directly abutting a following row with no
+			// whitespace at all — the same compact-notation gap as loneCellTokenLen below,
+			// just for a spacing arg instead of a cell value. Only the bare "[" itself is the
+			// fix trigger; its contents are left for the normal per-byte copy loop to pass
+			// through untouched.
+			b.WriteString(`\\`)
+			i = j
+		case loneCellTokenLen(block[j:]) > 0:
+			tokenLen := loneCellTokenLen(block[j:])
+			b.WriteString(`\\`)
+			b.WriteString(block[j : j+tokenLen])
+			i = j + tokenLen
+		default:
+			b.WriteByte('\\') // ambiguous (e.g. a real multi-letter LaTeX command): leave alone
+			i = j
+		}
+	}
+	return b.String()
 }
 
 // nulByte is the literal NUL character (U+0000) repairNulBytes looks for, spelled out via

@@ -363,6 +363,30 @@ func TestUnmarshalRepaired_MixedWithinSameString(t *testing.T) {
 	}
 }
 
+// TestUnmarshalRepaired_NulByteArtifactEndToEnd is a regression for a bug caught in PR
+// review: stripStrayControlBytes deletes any C0 control byte XML disallows, including NUL
+// (0x00) -- the exact byte repairNulBytes exists to restore to a backslash (see its own doc
+// comment). Before fixDecodedLeaf called repairNulBytes itself, repairNulBytes was only ever
+// invoked later, in outline.go, on text that had already passed through fixDecodedLeaf during
+// JSON decode -- by which point stripStrayControlBytes had already silently deleted the NUL,
+// leaving repairNulBytes nothing to find. This exercises the real pipeline entry point
+// (unmarshalRepaired), not repairNulBytes in isolation, so it would have caught that gap.
+func TestUnmarshalRepaired_NulByteArtifactEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"text":"solve \u0000mathbf{v}=0"}`
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := `solve \mathbf{v}=0`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
 // TestFixControlByteArtifacts_Table covers fixControlByteArtifacts directly: each of the five
 // ambiguous control bytes restored to its backslash-letter pair, a clean string left untouched
 // (changed=false), and — the actual bug this function exists to fix — a control byte and an
@@ -399,6 +423,53 @@ func TestFixControlByteArtifacts_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fixed, changed := fixControlByteArtifacts(tt.in)
+			if fixed != tt.wantFixed || changed != tt.wantChanged {
+				t.Fatalf("got (%q, %v), want (%q, %v)", fixed, changed, tt.wantFixed, tt.wantChanged)
+			}
+		})
+	}
+}
+
+// TestStripStrayControlBytes_Table covers stripStrayControlBytes directly: an XML-invalid C0
+// control byte (observed in practice: ch07_slides.md had this exact byte where backslash-open-
+// paren/backslash-close-paren math delimiters belonged, from a slide-generation LLM call
+// emitting a valid-but-wrong 4-hex-digit JSON unicode escape) gets removed; tab/newline/
+// carriage-return -- the three C0 bytes XML actually permits -- survive untouched; and a
+// clean string reports changed=false.
+func TestStripStrayControlBytes_Table(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		in          string
+		wantFixed   string
+		wantChanged bool
+	}{
+		{name: "clean string, nothing to strip", in: `\(x\)`, wantFixed: `\(x\)`, wantChanged: false},
+		{
+			name:        "XML-invalid control byte removed (the ch07_slides.md regression)",
+			in:          "the norm \x05mathbf{u}\x05 is nonnegative",
+			wantFixed:   "the norm mathbf{u} is nonnegative",
+			wantChanged: true,
+		},
+		{
+			name:        "a different XML-invalid control byte is also removed",
+			in:          "bell\x07ring",
+			wantFixed:   "bellring",
+			wantChanged: true,
+		},
+		{
+			name:        "tab, newline, and carriage return survive untouched (XML permits them)",
+			in:          "a\tb\nc\rd",
+			wantFixed:   "a\tb\nc\rd",
+			wantChanged: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixed, changed := stripStrayControlBytes(tt.in)
 			if fixed != tt.wantFixed || changed != tt.wantChanged {
 				t.Fatalf("got (%q, %v), want (%q, %v)", fixed, changed, tt.wantFixed, tt.wantChanged)
 			}

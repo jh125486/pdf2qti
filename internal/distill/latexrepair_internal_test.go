@@ -49,6 +49,115 @@ func TestRepairMatrixRowSeparators_Table(t *testing.T) {
 			in:   `f(x) = \begin{cases} 1 \ -1 \end{cases}`,
 			want: `f(x) = \begin{cases} 1 \\ -1 \end{cases}`,
 		},
+		{
+			// The ch05/ch09/ch10 regression: compact matrix notation with no whitespace around the
+			// row separator at all. Caught by comparing math-span counts in generated slide
+			// Markdown against actual <m:oMath> elements in the rendered PPTX (see
+			// repairMatrixRowSeparators's doc comment) -- pandoc silently failed to convert every
+			// one of these to OOXML math, since a bare "\" directly followed by a digit or letter
+			// isn't valid LaTeX syntax at all.
+			name: "compact bare separator directly abutting a single-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a negative single-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\-1&0\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\-1&0\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a single-letter variable cell is doubled",
+			in:   `\begin{bmatrix}1&k\0&1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&k\\0&1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a negative single-letter variable cell is doubled",
+			in:   `\begin{bmatrix}1&0\-k&1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\-k&1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator directly before end (last row, single-digit cell) is doubled",
+			in:   `\begin{bmatrix}0&1\1&0\end{bmatrix}`,
+			want: `\begin{bmatrix}0&1\\1&0\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a multi-digit cell is doubled",
+			in:   `\begin{bmatrix}1&0\12&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\12&-1\end{bmatrix}`,
+		},
+		{
+			// The false-positive-avoidance case for the new compact-notation path: a genuine
+			// multi-letter LaTeX command (theta, a real Greek-letter macro) used as a matrix cell's
+			// entire content, directly abutting the next cell with no whitespace, must NOT be
+			// mistaken for a malformed row separator plus a one-letter cell "t" -- doubling it
+			// would turn the correct "\theta" into the wrong "\\theta" (an escaped literal
+			// backslash followed by unrelated text "theta", not the theta symbol).
+			name: "compact single-backslash multi-letter command as a cell is left unchanged",
+			in:   `\begin{bmatrix}\theta&\theta\end{bmatrix}`,
+			want: `\begin{bmatrix}\theta&\theta\end{bmatrix}`,
+		},
+		{
+			// Already-correct doubled separator immediately followed by a lone-cell-shaped token
+			// must not be corrupted into three backslashes by the new lone-cell path matching the
+			// separator's second backslash.
+			name: "already-doubled separator abutting a lone-cell token is left unchanged",
+			in:   `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\0&-1\end{bmatrix}`,
+		},
+		{
+			// array is the standard way to typeset an augmented matrix with a vertical divider
+			// (e.g. Gaussian elimination), which none of the matrix variants support at all.
+			// array's own "{cc|c}" column-spec argument right after "\begin{array}" is inert text
+			// (no backslash) and must survive untouched alongside the separator fix.
+			name: "array environment (augmented matrix with a divider) is fixed",
+			in:   `\begin{array}{cc|c} 1 & 0 & 2 \ 0 & 1 & 3 \end{array}`,
+			want: `\begin{array}{cc|c} 1 & 0 & 2 \\ 0 & 1 & 3 \end{array}`,
+		},
+		{
+			// aligned nests inside "\(...\)" for a multi-step derivation, using the identical
+			// bare-vs-doubled row-separator convention as the matrix variants.
+			name: "aligned environment is fixed",
+			in:   `\(\begin{aligned} x &= 1 \ y &= 2 \end{aligned}\)`,
+			want: `\(\begin{aligned} x &= 1 \\ y &= 2 \end{aligned}\)`,
+		},
+		{
+			name: "gathered environment is fixed",
+			in:   `\(\begin{gathered} x = 1 \ y = 2 \end{gathered}\)`,
+			want: `\(\begin{gathered} x = 1 \\ y = 2 \end{gathered}\)`,
+		},
+		{
+			// align (and align*) are less likely to arrive wrapped in "\(...\)"/"\[...\]" in
+			// practice (they're normally standalone, unlike aligned/gathered), but fixing their
+			// row separators is still correct behavior regardless of how they're delimited.
+			name: "align environment is fixed",
+			in:   `\begin{align} x &= 1 \ y &= 2 \end{align}`,
+			want: `\begin{align} x &= 1 \\ y &= 2 \end{align}`,
+		},
+		{
+			name: "align* environment is fixed",
+			in:   `\begin{align*} x &= 1 \ y &= 2 \end{align*}`,
+			want: `\begin{align*} x &= 1 \\ y &= 2 \end{align*}`,
+		},
+		{
+			// The compact-notation gap for a spacing arg instead of a cell value: a bare
+			// separator directly abutting "[6pt]" (LaTeX's own syntax for extra vertical space
+			// after a row break) with no whitespace at all.
+			name: "compact bare separator directly abutting a spacing arg is doubled",
+			in:   `\begin{bmatrix}1&0\[6pt]0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\[6pt]0&-1\end{bmatrix}`,
+		},
+		{
+			name: "compact bare separator abutting a decimal-length spacing arg is doubled",
+			in:   `\begin{bmatrix}1&0\[.5em]0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\\[.5em]0&-1\end{bmatrix}`,
+		},
+		{
+			// A "[" not shaped like a plausible spacing arg (no closing "]" within a short
+			// distance) must not be mistaken for one.
+			name: "bare backslash before an unrelated bracketed span is left unchanged",
+			in:   `\begin{bmatrix}1&0\[this is not a spacing arg at all]0&-1\end{bmatrix}`,
+			want: `\begin{bmatrix}1&0\[this is not a spacing arg at all]0&-1\end{bmatrix}`,
+		},
 	}
 
 	for _, tt := range tests {

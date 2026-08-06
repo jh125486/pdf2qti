@@ -74,8 +74,9 @@ func catScript(t *testing.T, data []byte) string {
 }
 
 // renderMathContent renders sampleContext() with slide[0]'s content overridden to content, and
-// returns the resulting first content slide's XML.
-func renderMathContent(t *testing.T, content string) string {
+// returns the resulting first content slide's XML plus any formula-conversion warnings Render
+// reported.
+func renderMathContent(t *testing.T, content string) (contentSlide string, warnings []string) {
 	t.Helper()
 	dc := sampleContext()
 	dc.Slides[0].Content = content
@@ -86,14 +87,15 @@ func renderMathContent(t *testing.T, content string) string {
 	if err := writeZip(templatePath, baseTemplateEntries()); err != nil {
 		t.Fatal(err)
 	}
-	if err := pptx.Render(templatePath, dc, "", nil, outputPath); err != nil {
+	warnings, err := pptx.Render(templatePath, dc, "", nil, outputPath)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	outEntries, err := readZip(outputPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(outEntries["ppt/slides/slide2.xml"])
+	return string(outEntries["ppt/slides/slide2.xml"]), warnings
 }
 
 // TestRender_MathConversion covers pptx.Render's LaTeX-to-OMML math conversion (math.go), both
@@ -109,23 +111,27 @@ func TestRender_MathConversion(t *testing.T) {
 		content      string
 		pathOverride bool   // stubs PATH via t.Setenv; the case can't run t.Parallel() when set
 		pandocScript string // pandoc stub script content; empty + pathOverride means no pandoc on PATH at all
-		verify       func(t *testing.T, contentSlide string)
+		verify       func(t *testing.T, contentSlide string, warnings []string)
 	}{
 		{
 			name:    "inline math, real pandoc or graceful fallback",
 			content: "Point 1\nSee \\(x^2 + y^2 = z^2\\) for details",
-			verify: func(t *testing.T, contentSlide string) {
+			verify: func(t *testing.T, contentSlide string, warnings []string) {
 				t.Helper()
 				if hasPandoc(t) {
 					mustContainAll(t, "content slide with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
 					if !strings.Contains(contentSlide, "mc:Fallback") {
 						t.Fatalf("expected mc:Fallback alongside real math, got: %s", contentSlide)
 					}
+					if len(warnings) != 0 {
+						t.Fatalf("expected no warnings on successful conversion, got: %v", warnings)
+					}
 				} else {
 					mustContainAll(t, "content slide without pandoc", contentSlide, "x^2 + y^2 = z^2")
 					if strings.Contains(contentSlide, "mc:AlternateContent") {
 						t.Fatalf("expected no math markup without pandoc, got: %s", contentSlide)
 					}
+					mustContainAll(t, "warning for un-convertible formula", strings.Join(warnings, "\n"), "x^2 + y^2 = z^2")
 				}
 			},
 		},
@@ -136,12 +142,15 @@ func TestRender_MathConversion(t *testing.T) {
 			// and rendered as raw LaTeX source.
 			name:    "bold-wrapped math still converts",
 			content: "Point 1\nSee **\\(q^4\\)** for details",
-			verify: func(t *testing.T, contentSlide string) {
+			verify: func(t *testing.T, contentSlide string, warnings []string) {
 				t.Helper()
 				if hasPandoc(t) {
 					// Before the fix, "**bold**" matched first and swallowed the whole span as
 					// a literal bold text run — no mc:AlternateContent/m:oMath would appear.
 					mustContainAll(t, "bold-wrapped math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
+					if len(warnings) != 0 {
+						t.Fatalf("expected no warnings on successful conversion, got: %v", warnings)
+					}
 				} else {
 					mustContainAll(t, "bold-wrapped math without pandoc", contentSlide, "q^4")
 				}
@@ -156,10 +165,13 @@ func TestRender_MathConversion(t *testing.T) {
 			// literal text — exit 0, no error, just no <m:oMath> either.
 			name:    "padded delimiters still convert",
 			content: "Point 1\nSee \\( y^6 + z^6 = w^6 \\) for details",
-			verify: func(t *testing.T, contentSlide string) {
+			verify: func(t *testing.T, contentSlide string, warnings []string) {
 				t.Helper()
 				if hasPandoc(t) {
 					mustContainAll(t, "padded-delimiter math with pandoc available", contentSlide, "mc:AlternateContent", "m:oMath", "m:sSup")
+					if len(warnings) != 0 {
+						t.Fatalf("expected no warnings on successful conversion, got: %v", warnings)
+					}
 				} else {
 					mustContainAll(t, "padded-delimiter math without pandoc", contentSlide, "y^6 + z^6 = w^6")
 				}
@@ -167,16 +179,18 @@ func TestRender_MathConversion(t *testing.T) {
 		},
 		{
 			// Rendering a formula when the converter can't find pandoc at all must degrade to
-			// plain escaped text, not error.
+			// plain escaped text, not error — and, per this PR, must report a warning instead of
+			// the previously entirely-silent fallback.
 			name:         "pandoc unavailable falls back gracefully",
 			content:      "See \\(n^3\\) here",
 			pathOverride: true,
-			verify: func(t *testing.T, contentSlide string) {
+			verify: func(t *testing.T, contentSlide string, warnings []string) {
 				t.Helper()
 				mustContainAll(t, "content slide with no pandoc on PATH", contentSlide, "n^3")
 				if strings.Contains(contentSlide, "mc:AlternateContent") {
 					t.Fatalf("expected no math markup with empty PATH, got: %s", contentSlide)
 				}
+				mustContainAll(t, "warning for missing pandoc", strings.Join(warnings, "\n"), "n^3")
 			},
 		},
 		{
@@ -203,8 +217,8 @@ func TestRender_MathConversion(t *testing.T) {
 				// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
 				stubPandoc(t, tt.pandocScript)
 			}
-			contentSlide := renderMathContent(t, tt.content)
-			tt.verify(t, contentSlide)
+			contentSlide, warnings := renderMathContent(t, tt.content)
+			tt.verify(t, contentSlide, warnings)
 		})
 	}
 
@@ -215,15 +229,15 @@ func TestRender_MathConversion(t *testing.T) {
 		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
 		z := zipBytes(t, map[string]string{"other.xml": "<root/>"})
 		stubPandoc(t, catScript(t, z))
-		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
-		verifyMathFallback(t, contentSlide)
+		contentSlide, warnings := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide, warnings)
 	})
 	t.Run("pandoc emits valid docx with no m:oMath in document.xml", func(t *testing.T) {
 		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
 		z := zipBytes(t, map[string]string{"word/document.xml": "<w:document><w:body>plain</w:body></w:document>"})
 		stubPandoc(t, catScript(t, z))
-		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
-		verifyMathFallback(t, contentSlide)
+		contentSlide, warnings := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide, warnings)
 	})
 	t.Run("pandoc emits docx whose document.xml fails checksum on read", func(t *testing.T) {
 		// Not t.Parallel(): stubPandoc mutates PATH via t.Setenv.
@@ -235,20 +249,22 @@ func TestRender_MathConversion(t *testing.T) {
 			"word/document.xml",
 		)
 		stubPandoc(t, catScript(t, z))
-		contentSlide := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
-		verifyMathFallback(t, contentSlide)
+		contentSlide, warnings := renderMathContent(t, "Point 1\nSee \\(m^7\\) for details")
+		verifyMathFallback(t, contentSlide, warnings)
 	})
 }
 
 // verifyMathFallback asserts formula "m^7" (the shared formula for every case in this file that
-// exercises a fallback path) appears as plain escaped text and no math markup was produced — the
-// expected outcome whenever pandoc is present but its output can't be turned into usable OMML.
-func verifyMathFallback(t *testing.T, contentSlide string) {
+// exercises a fallback path) appears as plain escaped text, no math markup was produced, and a
+// warning names the failed formula — the expected outcome whenever pandoc is present but its
+// output can't be turned into usable OMML.
+func verifyMathFallback(t *testing.T, contentSlide string, warnings []string) {
 	t.Helper()
 	mustContainAll(t, "fallback text", contentSlide, "m^7")
 	if strings.Contains(contentSlide, "mc:AlternateContent") {
 		t.Fatalf("expected graceful fallback (no math markup), got: %s", contentSlide)
 	}
+	mustContainAll(t, "warning for un-convertible formula", strings.Join(warnings, "\n"), "m^7")
 }
 
 // TestToOMML_CacheHit is a justified exception to one-function-per-scenario consolidation above:
@@ -263,7 +279,10 @@ func TestToOMML_CacheHit(t *testing.T) {
 
 	// Same formula twice: the second occurrence must hit toOMML's cache instead of re-invoking
 	// pandoc, and still render identical math markup.
-	contentSlide := renderMathContent(t, "Point 1\nSee \\(k^5\\) and again \\(k^5\\) for details")
+	contentSlide, warnings := renderMathContent(t, "Point 1\nSee \\(k^5\\) and again \\(k^5\\) for details")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings on successful conversion, got: %v", warnings)
+	}
 	if got := strings.Count(contentSlide, "m:oMath"); got < 2 {
 		t.Fatalf("expected repeated formula to render twice (cache hit reuses the same OMML), got %d occurrences: %s", got, contentSlide)
 	}

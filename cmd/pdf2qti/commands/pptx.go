@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
 	"github.com/jh125486/pdf2qti/internal/pptx"
@@ -42,8 +43,13 @@ func (p *PPTXCmd) Run(_ context.Context, cli *CLI) error {
 	}
 
 	dc := &distill.DistilledContext{ModuleName: title, Agenda: agenda, Slides: slides}
-	if err := pptx.Render(p.Template, dc, courseName, p.Vars, p.Output); err != nil {
+	warnings, err := pptx.Render(p.Template, dc, courseName, p.Vars, p.Output)
+	if err != nil {
 		return fmt.Errorf("render pptx: %w", err)
+	}
+	logger := audit.New(logOutput)
+	for _, w := range warnings {
+		logger.Warn("pptx render warning", "detail", w)
 	}
 	return nil
 }

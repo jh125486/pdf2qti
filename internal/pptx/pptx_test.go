@@ -715,7 +715,7 @@ func TestRender(t *testing.T) {
 				}
 			}
 
-			err := pptx.Render(templatePath, tt.dc(), tt.courseName, map[string]string{"module_name": "Module 3"}, outputPath)
+			_, err := pptx.Render(templatePath, tt.dc(), tt.courseName, map[string]string{"module_name": "Module 3"}, outputPath)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -745,7 +745,7 @@ func TestRender_RealTemplate(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "out.pptx")
 
-	if err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
+	if _, err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 
@@ -837,7 +837,7 @@ func TestRender_AutofitScalePerSlide(t *testing.T) {
 
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "out.pptx")
-	if err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
+	if _, err := pptx.Render("testdata/template.pptx", dc, "Test University", nil, outputPath); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	outEntries, err := readZip(outputPath)
