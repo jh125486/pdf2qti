@@ -3,6 +3,7 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
@@ -394,6 +396,36 @@ func TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited(t *testing.T) {
 		_, err := c.Complete(t.Context(), "prompt", nil)
 		if err == nil || !strings.Contains(err.Error(), "exceeded 5 retries") {
 			t.Fatalf("got err %v, want containing %q", err, "exceeded 5 retries")
+		}
+	})
+}
+
+// TestClient_Complete_ContextCanceledDuringBackoff: the context is canceled while Complete is
+// waiting out a retry backoff (sleepCtx's own select, not the HTTP call itself) — Complete must
+// return the context's error promptly instead of completing the wait and retrying anyway. Runs
+// in a synctest bubble for the same reason as the two sibling tests above; not t.Parallel() for
+// the same reason (a synctest bubble can't be one case among ordinarily-parallel subtests).
+func TestClient_Complete_ContextCanceledDuringBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestClient(func(*http.Request) (*http.Response, error) { //nolint:bodyclose // closed by Client.doComplete's defer resp.Body.Close(), not visible to this stub's own scope
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"rate limited"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			// Fires partway through the first retry's backoff wait (completeRetryBackoff*1),
+			// well before that timer would complete on its own.
+			time.Sleep(completeRetryBackoff / 2)
+			cancel()
+		}()
+
+		_, err := c.Complete(ctx, "prompt", nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got err %v, want context.Canceled", err)
 		}
 	})
 }

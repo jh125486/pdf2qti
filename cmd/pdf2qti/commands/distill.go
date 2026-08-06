@@ -90,6 +90,14 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 		return fmt.Errorf("distill: %w", err)
 	}
 
+	// Not covered by a CLI-level test: producing a real VerificationWarnings entry needs chunked
+	// distillation (see internal/distill/chunk.go's maxDirectChars), which needs chapterText well
+	// past that threshold -- constructing a fixture that large as a fake on-disk "PDF" and relying
+	// on extract.ExtractText's raw-bytes fallback to return it intact would be a bigger, more
+	// fragile piece of test infrastructure than this two-line loop justifies. The logic this loop
+	// depends on -- that Distill actually populates VerificationWarnings for a chunked chapter --
+	// is covered directly in internal/distill/distill_test.go's
+	// TestDistill_LargeChapterUsesCondensedTextVerbatim.
 	for _, w := range dc.VerificationWarnings {
 		logger.Warn("consistency check found an unresolved issue", "source", src.ID, "detail", w)
 	}
