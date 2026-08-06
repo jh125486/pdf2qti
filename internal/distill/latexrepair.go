@@ -11,9 +11,18 @@ import (
 // Go's regexp package (RE2) supports neither backreferences nor lookaround; a begin/end pair
 // naming different environments is vanishingly unlikely in practice, and even if the model ever
 // produced one, fixing row separators inside it is still the correct behavior either way.
+//
+// Covers, beyond the matrix variants and cases: array (the standard way to typeset an augmented
+// matrix with a vertical divider for Gaussian elimination, e.g.
+// "\begin{array}{cc|c}1&0&2\\0&1&3\end{array}" — none of the matrix variants support a divider
+// at all, so this is the only way a model would write one), and the align/aligned/gathered family
+// (multi-line derivations, e.g. simultaneous-equation steps), which use the identical bare-vs-
+// doubled "\\" row-separator convention. array's own "{cc|c}" column-spec argument immediately
+// after "\begin{array}" needs no special handling here: it's just inert text (no backslash) that
+// falls through fixRowSeparators untouched, same as any other non-backslash content in the block.
 var (
-	reMatrixEnvBegin = regexp.MustCompile(`\\begin\{(?:[bBpPvV]?matrix|cases)\}`)
-	reMatrixEnvEnd   = regexp.MustCompile(`\\end\{(?:[bBpPvV]?matrix|cases)\}`)
+	reMatrixEnvBegin = regexp.MustCompile(`\\begin\{(?:[bBpPvV]?matrix|cases|array|align\*?|aligned|gathered)\}`)
+	reMatrixEnvEnd   = regexp.MustCompile(`\\end\{(?:[bBpPvV]?matrix|cases|array|align\*?|aligned|gathered)\}`)
 )
 
 // reLoneCellDigits and reLoneCellLetter identify a "lone cell" token — a single matrix cell's
@@ -44,6 +53,19 @@ func loneCellTokenLen(s string) int {
 		return len(m)
 	}
 	return 0
+}
+
+// reSpacingArg matches a row separator's optional extra-vertical-space argument, e.g. "[6pt]",
+// "[1em]", "[.5cm]" — LaTeX's own syntax for "\\[<length>]", never anything else in this domain,
+// so its bare presence directly after a row separator is an unambiguous signal on its own; the
+// exact length value inside isn't validated, just that a "]" closes it within a short, plausible
+// distance (long past that, "[" almost certainly means something else entirely).
+var reSpacingArg = regexp.MustCompile(`^\[[^\]\n\\]{1,10}\]`)
+
+// hasSpacingArg reports whether s begins with a row separator's optional spacing argument (see
+// reSpacingArg).
+func hasSpacingArg(s string) bool {
+	return reSpacingArg.MatchString(s)
 }
 
 func isAlnumByte(b byte) bool {
@@ -138,6 +160,15 @@ func fixRowSeparators(block string) string {
 			b.WriteString(`\\`)
 			b.WriteByte(next)
 			i = j + 1
+		case hasSpacingArg(block[j:]):
+			// A row separator followed by an optional extra-vertical-space argument, e.g.
+			// "\[6pt]" for a bare separator directly abutting a following row with no
+			// whitespace at all — the same compact-notation gap as loneCellTokenLen below,
+			// just for a spacing arg instead of a cell value. Only the bare "[" itself is the
+			// fix trigger; its contents are left for the normal per-byte copy loop to pass
+			// through untouched.
+			b.WriteString(`\\`)
+			i = j
 		case loneCellTokenLen(block[j:]) > 0:
 			tokenLen := loneCellTokenLen(block[j:])
 			b.WriteString(`\\`)
