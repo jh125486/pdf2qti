@@ -363,6 +363,30 @@ func TestUnmarshalRepaired_MixedWithinSameString(t *testing.T) {
 	}
 }
 
+// TestUnmarshalRepaired_NulByteArtifactEndToEnd is a regression for a bug caught in PR
+// review: stripStrayControlBytes deletes any C0 control byte XML disallows, including NUL
+// (0x00) -- the exact byte repairNulBytes exists to restore to a backslash (see its own doc
+// comment). Before fixDecodedLeaf called repairNulBytes itself, repairNulBytes was only ever
+// invoked later, in outline.go, on text that had already passed through fixDecodedLeaf during
+// JSON decode -- by which point stripStrayControlBytes had already silently deleted the NUL,
+// leaving repairNulBytes nothing to find. This exercises the real pipeline entry point
+// (unmarshalRepaired), not repairNulBytes in isolation, so it would have caught that gap.
+func TestUnmarshalRepaired_NulByteArtifactEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	raw := `{"text":"solve \u0000mathbf{v}=0"}`
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := unmarshalRepaired(raw, &out); err != nil {
+		t.Fatalf("unmarshalRepaired: %v", err)
+	}
+	want := `solve \mathbf{v}=0`
+	if out.Text != want {
+		t.Fatalf("got %q, want %q", out.Text, want)
+	}
+}
+
 // TestFixControlByteArtifacts_Table covers fixControlByteArtifacts directly: each of the five
 // ambiguous control bytes restored to its backslash-letter pair, a clean string left untouched
 // (changed=false), and — the actual bug this function exists to fix — a control byte and an

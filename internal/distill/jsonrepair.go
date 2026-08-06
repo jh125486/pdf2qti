@@ -156,13 +156,23 @@ func repairDecodedArtifacts(v reflect.Value) {
 	}
 }
 
-// fixDecodedLeaf applies fixControlByteArtifacts and collapseOverDoubledBackslashes to s in turn,
-// reporting whether either changed anything.
+// fixDecodedLeaf applies fixControlByteArtifacts, repairNulBytes, collapseOverDoubledBackslashes,
+// and stripStrayControlBytes to s in turn, reporting whether any of them changed anything.
+//
+// repairNulBytes must run before stripStrayControlBytes: a NUL byte is itself an
+// isXMLInvalidControlByte byte, so stripStrayControlBytes would otherwise silently delete the
+// very artifact repairNulBytes exists to restore to a backslash — caught in PR review after
+// stripStrayControlBytes was added without noticing it made repairNulBytes (previously only
+// called later, on already-decoded bullet text in outline.go) unreachable in the real pipeline:
+// by the time that later call ran, the NUL was already gone.
 func fixDecodedLeaf(s string) (fixed string, changed bool) {
 	s, c1 := fixControlByteArtifacts(s)
-	s, c2 := collapseOverDoubledBackslashes(s)
-	s, c3 := stripStrayControlBytes(s)
-	return s, c1 || c2 || c3
+	beforeNulRepair := s
+	s = repairNulBytes(s)
+	c2 := s != beforeNulRepair
+	s, c3 := collapseOverDoubledBackslashes(s)
+	s, c4 := stripStrayControlBytes(s)
+	return s, c1 || c2 || c3 || c4
 }
 
 // fixControlByteArtifacts replaces every controlByteToEscapeLetter byte in s with '\' plus its
