@@ -77,13 +77,19 @@ const correctionPreviewLimit = 200
 
 // truncatePreview shortens s to at most correctionPreviewLimit runes, appending "…" when
 // truncated, so a warning stays a scannable one-liner regardless of how long the LLM's
-// Find/Replace text turned out to be.
+// Find/Replace text turned out to be. Scans rune boundaries via range (which decodes one rune at
+// a time, not a []rune(s) conversion) and returns as soon as it reaches the limit, so an
+// oversized s — the exact case this function guards against — is never fully materialized as
+// runes just to measure and discard the excess; caught in PR review.
 func truncatePreview(s string) string {
-	r := []rune(s)
-	if len(r) <= correctionPreviewLimit {
-		return s
+	count := 0
+	for i := range s {
+		if count == correctionPreviewLimit {
+			return s[:i] + "…"
+		}
+		count++
 	}
-	return string(r[:correctionPreviewLimit]) + "…"
+	return s
 }
 
 // textCorrection is a single verbatim substring of dc.Text (Find) and its corrected replacement
