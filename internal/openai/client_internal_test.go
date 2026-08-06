@@ -344,7 +344,7 @@ func newTestClient(roundTrip func(*http.Request) (*http.Response, error)) *Clien
 
 // TestClient_Complete_RateLimitedTwiceThenSucceeds: the first two calls are rate limited, the
 // third succeeds — Complete must retry with backoff rather than surfacing the 429 immediately.
-// Runs in a synctest bubble so the real rateLimitBackoff waits resolve instantly instead of
+// Runs in a synctest bubble so the real completeRetryBackoff waits resolve instantly instead of
 // actually pausing the test.
 func TestClient_Complete_RateLimitedTwiceThenSucceeds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -379,7 +379,7 @@ func TestClient_Complete_RateLimitedTwiceThenSucceeds(t *testing.T) {
 }
 
 // TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited: every call is rate limited —
-// Complete must give up after maxRateLimitRetries rather than retrying forever, and say so.
+// Complete must give up after maxCompleteRetries rather than retrying forever, and say so.
 // Runs in a synctest bubble for the same reason as the sibling test above.
 func TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -394,6 +394,63 @@ func TestClient_Complete_ExceedsMaxRetriesWhenAlwaysRateLimited(t *testing.T) {
 		_, err := c.Complete(t.Context(), "prompt", nil)
 		if err == nil || !strings.Contains(err.Error(), "exceeded 5 retries") {
 			t.Fatalf("got err %v, want containing %q", err, "exceeded 5 retries")
+		}
+	})
+}
+
+// TestClient_Complete_TruncatedThenSucceeds: the first call comes back with finish_reason
+// "length" (the model was cut off before writing valid JSON — the ch08/ch13 "no '{' found in
+// response" regression this feature exists to fix), the second succeeds — Complete must retry
+// rather than handing the truncated (and, for JSON, unparseable) content to the caller as if it
+// were a real answer.
+func TestClient_Complete_TruncatedThenSucceeds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		c := newTestClient(func(*http.Request) (*http.Response, error) { //nolint:bodyclose // closed by Client.doComplete's defer resp.Body.Close(), not visible to this stub's own scope
+			calls++
+			if calls == 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"{\"outl"},"finish_reason":"length"}]}`)),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"hello world"},"finish_reason":"stop"}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		})
+
+		got, err := c.Complete(t.Context(), "prompt", nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "hello world" {
+			t.Fatalf("got %q, want %q", got, "hello world")
+		}
+		if calls != 2 {
+			t.Fatalf("got %d calls, want 2", calls)
+		}
+	})
+}
+
+// TestClient_Complete_ExceedsMaxRetriesWhenAlwaysTruncated: every call comes back truncated —
+// Complete must give up after maxCompleteRetries and report errTruncated, the same as it does
+// for a rate limit that never clears.
+func TestClient_Complete_ExceedsMaxRetriesWhenAlwaysTruncated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newTestClient(func(*http.Request) (*http.Response, error) { //nolint:bodyclose // closed by Client.doComplete's defer resp.Body.Close(), not visible to this stub's own scope
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"length"}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		})
+
+		_, err := c.Complete(t.Context(), "prompt", nil)
+		if err == nil || !strings.Contains(err.Error(), "exceeded 5 retries") || !errors.Is(err, errTruncated) {
+			t.Fatalf("got err %v, want containing %q and wrapping errTruncated", err, "exceeded 5 retries")
 		}
 	})
 }
