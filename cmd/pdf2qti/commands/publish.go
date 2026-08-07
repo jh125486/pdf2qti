@@ -41,7 +41,7 @@ func (p *PublishCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 
 	sources := p.selectSources(cfg)
 	if len(sources) == 0 {

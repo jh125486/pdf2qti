@@ -16,12 +16,12 @@ import (
 type ValidateCmd struct{}
 
 // Run executes the validate command.
-func (v *ValidateCmd) Run(_ context.Context, cli *CLI) error {
+func (v *ValidateCmd) Run(ctx context.Context, cli *CLI) error {
 	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 	allValid := true
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
