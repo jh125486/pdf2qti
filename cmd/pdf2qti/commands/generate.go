@@ -24,7 +24,7 @@ func (g *GenerateCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
 		if err := runGenerateSource(ctx, cfg, src, logger, g.SkipApprove); err != nil {

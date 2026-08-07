@@ -16,12 +16,12 @@ import (
 type ApproveCmd struct{}
 
 // Run executes the approve command.
-func (a *ApproveCmd) Run(_ context.Context, cli *CLI) error {
+func (a *ApproveCmd) Run(ctx context.Context, cli *CLI) error {
 	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
 		if err := runApproveSource(cfg, src, logger); err != nil {

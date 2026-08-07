@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
@@ -30,7 +29,7 @@ func (s *SlidesCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 
 	srcs := s.selectSources(cfg)
 	if len(srcs) == 0 {

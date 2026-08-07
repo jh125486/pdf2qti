@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
+	"github.com/jh125486/pdf2qti/internal/audit"
 )
 
 const realPPTXTemplate = "../../../internal/pptx/testdata/template.pptx"
@@ -161,6 +162,59 @@ func TestPPTXCmdRun_BadConfig(t *testing.T) {
 		Run(context.Background(), &commands.CLI{Config: "/no/such/quiz.json"})
 	if err == nil {
 		t.Fatal("expected error for missing config")
+	}
+}
+
+// TestPPTXCmdRun_LogsRenderWarnings is a second test func against PPTXCmd.Run (alongside
+// TestPPTXCmdRun_Table and TestPPTXCmdRun_BadConfig, already an established pattern in this
+// file) because it needs its own PATH stub via t.Setenv, which — per this repo's Go test
+// conventions — rules out t.Parallel() and so can't share the parallel table above.
+func TestPPTXCmdRun_LogsRenderWarnings(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no pandoc on PATH at all
+
+	dir := t.TempDir()
+	cfgPath := writePPTXConfigFile(t, dir, "Test University")
+
+	const md = `# Module 1
+
+---
+
+<!-- meta: 1 agenda -->
+# Agenda
+
+- Topic A
+- Topic B
+- Topic C
+
+---
+
+<!-- meta: 2 src01 -->
+# Topic A
+
+- See \(x^2 + y^2 = z^2\) for details
+`
+	slidesPath := filepath.Join(dir, "src01_slides.md")
+	if err := os.WriteFile(slidesPath, []byte(md), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf strings.Builder
+	ctx := commands.WithLogger(t.Context(), audit.New(&logBuf))
+	cmd := &commands.PPTXCmd{
+		Slides:   slidesPath,
+		Template: realPPTXTemplate,
+		Output:   filepath.Join(dir, "out.pptx"),
+	}
+	if err := cmd.Run(ctx, &commands.CLI{Config: cfgPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := logBuf.String()
+	if !strings.Contains(got, "pptx render warning") {
+		t.Fatalf("expected a logged pptx render warning, got log output: %q", got)
+	}
+	if !strings.Contains(got, "x^2 + y^2 = z^2") {
+		t.Fatalf("expected the logged warning to name the failed formula, got: %q", got)
 	}
 }
 
