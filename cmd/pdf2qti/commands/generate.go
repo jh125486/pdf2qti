@@ -50,7 +50,10 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 
 	text := dc.Text
 
-	gen := generate.New(cfg.EffectiveGeneration(src))
+	gen, err := generate.New(cfg.EffectiveGeneration(src))
+	if err != nil {
+		return fmt.Errorf("configure quiz generator: %w", err)
+	}
 	q := cfg.EffectiveQuiz(src)
 
 	tfQs, err := gen.GenerateStage(ctx, config.StageTF, text, q.Counts.TF)

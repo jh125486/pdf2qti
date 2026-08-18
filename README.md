@@ -151,7 +151,9 @@ pdf2qti generate [--skip-approve]
 ```
 
 Requires `<outDir>/<id>_context.json` to already exist (run `distill` first — `generate` errors
-out with the exact command to run if it's missing). For each source in the config, `generate`:
+out with the exact command to run if it's missing), plus an OpenAI `generation` config and its API
+key environment variable. It fails when either is absent; it never writes placeholder questions.
+For each source in the config, `generate`:
 
 1. Loads the distilled context and calls the configured LLM once per question type (TF, MA, MC,
    SA, ES, MT, NR) using each type's configured count
