@@ -4,7 +4,7 @@
 # Variables
 BINARY_NAME          := pdf2qti
 BUILD_DIR            := bin
-CMD                  := ./cmd/pdf2qti
+CMD                  := .
 
 ## help: Show this help message
 help:
