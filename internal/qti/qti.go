@@ -17,8 +17,11 @@ const (
 
 // Assessment represents a QTI assessment.
 type Assessment struct {
-	XMLName    xml.Name   `xml:"questestinterop"`
-	Assessment innerAssmt `xml:"assessment"`
+	XMLName           xml.Name   `xml:"questestinterop"`
+	XMLNS             string     `xml:"xmlns,attr"`
+	XMLNSXSI          string     `xml:"xmlns:xsi,attr"`
+	XSISchemaLocation string     `xml:"xsi:schemaLocation,attr"`
+	Assessment        innerAssmt `xml:"assessment"`
 }
 
 type innerAssmt struct {
@@ -49,7 +52,14 @@ type ItemBody struct {
 
 // Material holds text content.
 type Material struct {
-	MatText string `xml:"mattext"`
+	MatText MatText `xml:"mattext"`
+}
+
+// MatText holds Canvas rich-text content. CDATA preserves HTML and LaTeX
+// delimiters such as \\(x^2\\) without XML escaping them into literal text.
+type MatText struct {
+	Text     string `xml:",cdata"`
+	TextType string `xml:"texttype,attr,omitempty"`
 }
 
 // RespDecl holds response choices.
@@ -162,6 +172,9 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 		return nil, fmt.Errorf("quiz draft must have a title")
 	}
 	a := &Assessment{
+		XMLNS:             qtiNamespace,
+		XMLNSXSI:          xsiNamespace,
+		XSISchemaLocation: qtiSchemaLocation,
 		Assessment: innerAssmt{
 			Title: d.Title,
 		},
@@ -224,6 +237,15 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 	return a, nil
 }
 
+func htmlMaterial(text string) Material {
+	return Material{MatText: MatText{Text: text, TextType: "text/html"}}
+}
+
+func materialPtr(text string) *Material {
+	m := htmlMaterial(text)
+	return &m
+}
+
 func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 	ident := fmt.Sprintf("q%d", idx)
 	respIdent := fmt.Sprintf("%s_resp", ident)
@@ -233,7 +255,7 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 		choiceID := fmt.Sprintf("%s_c%d", ident, j+1)
 		choices = append(choices, ResponseLabel{
 			Ident:    choiceID,
-			Material: Material{MatText: o.Text},
+			Material: htmlMaterial(o.Text),
 		})
 		if o.IsCorrect {
 			correctIdents = append(correctIdents, choiceID)
@@ -265,7 +287,7 @@ func buildItem(idx int, q render.Question, isMA bool) (Item, error) {
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
-			Material: Material{MatText: q.Text},
+			Material: htmlMaterial(q.Text),
 			RespDecls: []RespDecl{
 				{
 					Ident:        respIdent,
@@ -323,7 +345,7 @@ func buildSAItem(idx int, q render.Question) (Item, error) {
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
-			Material: Material{MatText: q.Text},
+			Material: htmlMaterial(q.Text),
 			RespStr: &RespStr{
 				Ident:        respIdent,
 				RCardinality: rCardinalitySingle,
@@ -347,7 +369,7 @@ func buildESItem(idx int, q render.Question) Item {
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
-			Material: Material{MatText: q.Text},
+			Material: htmlMaterial(q.Text),
 			RespStr: &RespStr{
 				Ident:        respIdent,
 				RCardinality: rCardinalitySingle,
@@ -382,7 +404,7 @@ func buildMTItem(idx int, q render.Question) (Item, error) {
 	for j, o := range q.Options {
 		rightLabels[j] = ResponseLabel{
 			Ident:    fmt.Sprintf("%s_match_%d", ident, j+1),
-			Material: Material{MatText: o.MatchText},
+			Material: htmlMaterial(o.MatchText),
 		}
 	}
 
@@ -392,7 +414,7 @@ func buildMTItem(idx int, q render.Question) (Item, error) {
 		respDecls[j] = RespDecl{
 			Ident:        fmt.Sprintf("%s_resp_%d", ident, j+1),
 			RCardinality: rCardinalitySingle,
-			Material:     &Material{MatText: o.Text},
+			Material:     materialPtr(o.Text),
 			Render:       RenderChoice{Choices: rightLabels},
 		}
 	}
@@ -417,7 +439,7 @@ func buildMTItem(idx int, q render.Question) (Item, error) {
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
-			Material:  Material{MatText: q.Text},
+			Material:  htmlMaterial(q.Text),
 			RespDecls: respDecls,
 		},
 		ResForm: ResForm{
@@ -477,7 +499,7 @@ func buildNRItem(idx int, q render.Question) (Item, error) {
 		Ident: ident,
 		Title: fmt.Sprintf("Question %d", idx),
 		ItemBody: ItemBody{
-			Material: Material{MatText: q.Text},
+			Material: htmlMaterial(q.Text),
 			RespNum: &RespNum{
 				Ident:        respIdent,
 				RCardinality: rCardinalitySingle,
@@ -501,6 +523,15 @@ func buildNRItem(idx int, q render.Question) (Item, error) {
 
 // Marshal encodes an Assessment to XML bytes.
 func Marshal(a *Assessment) ([]byte, error) {
+	if a.XMLNS == "" {
+		a.XMLNS = qtiNamespace
+	}
+	if a.XMLNSXSI == "" {
+		a.XMLNSXSI = xsiNamespace
+	}
+	if a.XSISchemaLocation == "" {
+		a.XSISchemaLocation = qtiSchemaLocation
+	}
 	out, err := xml.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal QTI: %w", err)

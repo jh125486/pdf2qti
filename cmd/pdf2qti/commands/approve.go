@@ -50,10 +50,21 @@ func runApproveSource(cfg *config.Config, src *config.Source, logger *audit.Logg
 	if err != nil {
 		return fmt.Errorf("marshal QTI: %w", err)
 	}
-	qtiFile := filepath.Join(outDir, src.ID+".qti")
-	if err := os.WriteFile(qtiFile, xmlBytes, 0o600); err != nil { //nolint:gosec // path is constructed from trusted config values
-		return fmt.Errorf("write QTI file: %w", err)
+	packageFile := filepath.Join(outDir, src.ID+".zip")
+	f, err := os.OpenFile(packageFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is constructed from trusted config values
+	if err != nil {
+		return fmt.Errorf("create QTI package: %w", err)
 	}
-	logger.Info("wrote QTI", "file", qtiFile)
+	if err := qti.WritePackage(f, xmlBytes); err != nil {
+		closeErr := f.Close()
+		if closeErr != nil {
+			return fmt.Errorf("write QTI package: %w (also close package: %v)", err, closeErr)
+		}
+		return fmt.Errorf("write QTI package: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close QTI package: %w", err)
+	}
+	logger.Info("wrote QTI package", "file", packageFile)
 	return nil
 }

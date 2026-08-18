@@ -35,7 +35,7 @@ func generateTestCases() []generateTestCase {
 			},
 		},
 		{
-			name:        "skip approve builds QTI",
+			name:        "skip approve builds QTI package",
 			skipApprove: true,
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
@@ -158,9 +158,7 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
 			if tt.checkQTI {
-				if _, statErr := os.Stat(filepath.Join(dir, "src01.qti")); statErr != nil {
-					t.Fatalf("expected QTI output: %v", statErr)
-				}
+				assertCanvasPackage(t, filepath.Join(dir, "src01.zip"))
 			}
 		})
 	}
