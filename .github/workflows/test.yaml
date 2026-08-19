@@ -14,6 +14,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          # SonarCloud's scan reads git blame/history for new-code-period
+          # analysis, which a shallow clone can't answer.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -33,3 +37,36 @@ jobs:
           files: ./coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
+
+      - name: Check Sonar token
+        # A separate step, not a job-level env:, so SONAR_TOKEN itself is
+        # never set as an environment variable on any step but the scan step
+        # below -- job-level env: is inherited by every step in the job
+        # (static checks, tests, ...), which is a wider exposure than the
+        # scan actually needs. secrets *is* a valid context inside a step's
+        # own run:/env: (confirmed against GitHub's contexts-availability
+        # docs), just not inside a step's if: -- so the secret is read here,
+        # inside run:, and only a plain true/false crosses into
+        # $GITHUB_OUTPUT for the next step's if: to read via the (allowed)
+        # steps context.
+        id: sonar_check
+        run: echo "has_token=${{ secrets.SONAR_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: SonarQube Cloud Scan
+        # SonarSource/sonarcloud-github-action is deprecated -- confirmed
+        # directly from this workflow's own earlier run, which already
+        # showed the action internally delegating to
+        # __SonarSource_sonarqube-scan-action. Swapped to the documented
+        # drop-in replacement: same SONAR_TOKEN/GITHUB_TOKEN env vars, no
+        # other changes needed.
+        #
+        # Guarded on the secret's presence so this step is a no-op -- not a
+        # broken CI run -- until SONAR_TOKEN exists as a repo secret. Reads
+        # coverage.txt directly via sonar.go.coverage.reportPaths (see
+        # sonar-project.properties), so this must run after the tests step
+        # above, not standalone.
+        if: steps.sonar_check.outputs.has_token == 'true'
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
