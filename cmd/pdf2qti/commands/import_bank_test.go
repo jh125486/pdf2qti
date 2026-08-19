@@ -114,7 +114,7 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 		{name: "import success", packageKind: "valid", wantImport: true},
 		{name: "import error", packageKind: "valid", importErr: errors.New("browser failed"), wantErr: "browser failed", wantImport: true},
 		{name: "negative random count", packageKind: "valid", quizCount: -1, wantErr: "must be non-negative"},
-		{name: "initial bank name differs from final QTI title", packageKind: "valid", bankName: "throwaway", packageTitle: "Final Bank", importedTitle: "Final Bank", importedCount: 3, quizCount: 3, wantPreflight: true, wantImport: true, wantQuiz: true},
+		{name: "importer does not honor requested bank name", packageKind: "valid", bankName: "throwaway", packageTitle: "Final Bank", importedTitle: "Final Bank", importedCount: 3, quizCount: 3, wantErr: "Item Bank title", wantPreflight: true, wantImport: true},
 		{name: "random quiz success", packageKind: "valid", quizCount: 3, wantPreflight: true, wantImport: true, wantQuiz: true},
 		{name: "random quiz error", packageKind: "valid", quizCount: 3, quizErr: errors.New("quiz failed"), wantErr: "quiz failed", wantPreflight: true, wantImport: true, wantQuiz: true},
 		{name: "random count exceeds package", packageKind: "valid", quizCount: 4, wantErr: "exceeds package question count"},

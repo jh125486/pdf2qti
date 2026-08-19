@@ -35,16 +35,16 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 	if err := validateQTIPackage(c.Package); err != nil {
 		return err
 	}
-	packageInfo := qtiPackageInfo{}
-	if c.CreateRandomQuiz > 0 {
-		var err error
-		packageInfo, err = inspectQTIPackage(c.Package)
-		if err != nil {
-			return err
-		}
-		if c.CreateRandomQuiz > packageInfo.ItemCount {
-			return fmt.Errorf("--create-random-quiz=%d exceeds package question count %d", c.CreateRandomQuiz, packageInfo.ItemCount)
-		}
+	// Inspected unconditionally: Canvas renames a New Quizzes Item Bank after
+	// the imported QTI package's assessment title even when --create-random-quiz
+	// isn't used, so the import step needs packageInfo.Title to detect and
+	// correct that regardless of whether a random quiz is also created.
+	packageInfo, err := inspectQTIPackage(c.Package)
+	if err != nil {
+		return err
+	}
+	if c.CreateRandomQuiz > packageInfo.ItemCount {
+		return fmt.Errorf("--create-random-quiz=%d exceeds package question count %d", c.CreateRandomQuiz, packageInfo.ItemCount)
 	}
 	logger := loggerFrom(ctx)
 	if c.DryRun {
@@ -61,7 +61,7 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 	}
 	quizRequest := &itembank.QuizRequest{
 		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, CourseID: c.CourseID,
-		BankName: packageInfo.Title, QuestionCount: c.CreateRandomQuiz,
+		BankName: c.BankName, QuestionCount: c.CreateRandomQuiz,
 	}
 	if c.CreateRandomQuiz > 0 {
 		if err := creator.PreflightRandomQuiz(ctx, quizRequest); err != nil {
@@ -85,8 +85,8 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 	if c.CreateRandomQuiz == 0 {
 		return nil
 	}
-	if result.BankName != packageInfo.Title {
-		return fmt.Errorf("imported Item Bank title = %q, want %q", result.BankName, packageInfo.Title)
+	if result.BankName != c.BankName {
+		return fmt.Errorf("imported Item Bank title = %q, want %q", result.BankName, c.BankName)
 	}
 	if result.QuestionCount != packageInfo.ItemCount {
 		return fmt.Errorf("imported Item Bank question count = %d, want %d", result.QuestionCount, packageInfo.ItemCount)
