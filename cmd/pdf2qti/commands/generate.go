@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -24,17 +25,17 @@ func (g *GenerateCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
-		if err := runGenerateSource(ctx, cfg, src, logger, g.SkipApprove); err != nil {
+		if err := runGenerateSource(ctx, cfg, src, logger, g.SkipApprove, cli.HTTPTimeout); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
 	}
 	return nil
 }
 
-func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Source, logger *audit.Logger, skipApprove bool) error { //nolint:gocyclo // complex but cohesive orchestration function
+func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Source, logger *audit.Logger, skipApprove bool, httpTimeout time.Duration) error { //nolint:gocyclo // complex but cohesive orchestration function
 	wf := cfg.EffectiveWorkflow(src)
 	outDir := cfg.OutDir(src)
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
@@ -50,7 +51,7 @@ func runGenerateSource(ctx context.Context, cfg *config.Config, src *config.Sour
 
 	text := dc.Text
 
-	gen, err := generate.New(cfg.EffectiveGeneration(src))
+	gen, err := generate.New(cfg.EffectiveGeneration(src), httpTimeout)
 	if err != nil {
 		return fmt.Errorf("configure quiz generator: %w", err)
 	}

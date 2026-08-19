@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
 )
@@ -26,7 +25,7 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 
 	mod, err := cfg.ModuleByID(m.ID)
 	if err != nil {
@@ -62,7 +61,7 @@ func (m *ModuleCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 	minSlides, maxSlides := resolveSlideRange(m.MinSlides, m.MaxSlides, protoChapters)
 
-	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), logger, &stubModuleLLM{})
+	llm := selectLLM(cfg.EffectiveGeneration(srcs[0]), cli.HTTPTimeout, logger, &stubModuleLLM{})
 	logger.Info("building module doc", "module", mod.ID, "sources", len(chapters), "minSlides", minSlides, "maxSlides", maxSlides)
 	doc, err := distill.BuildModuleDoc(ctx, llm, mod.ID, mod.Name, chapters, minSlides, maxSlides)
 	if err != nil {

@@ -32,7 +32,7 @@ A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LL
 ### Using `go install`
 
 ```bash
-go install github.com/jh125486/pdf2qti/cmd/pdf2qti@latest
+go install github.com/jh125486/pdf2qti@latest
 ```
 
 ### Download a release

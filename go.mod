@@ -2,13 +2,15 @@ module github.com/jh125486/pdf2qti
 
 go 1.26
 
-require github.com/alecthomas/kong v1.16.0
+require github.com/alecthomas/kong v1.16.1
 
-require github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+require (
+	github.com/chromedp/chromedp v0.14.2
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
+)
 
 require (
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327 // indirect
-	github.com/chromedp/chromedp v0.14.2 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/go-json-experiment/json v0.0.0-20250725192818-e39067aee2d2 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect

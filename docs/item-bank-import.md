@@ -111,7 +111,7 @@ Run manually first with disposable course/bank and real package:
 3. Test empty bank creation, package import, duplicate-name handling, and import
    failure UI.
 4. Verify question count and three question types: MC, MA, numerical.
-5. Verify inline/display LaTex renders in editor and learner preview.
+5. Verify inline/display LaTeX renders in editor and learner preview.
 
 Discovery output is instance-specific; local Canvas themes and New Quizzes rollout
 can change routes/selectors. Gate adapter implementation on recorded evidence.
@@ -132,7 +132,7 @@ Browser contract tests, disposable Canvas course:
 - appends only when explicitly requested;
 - failure leaves existing bank untouched;
 - imported count equals QTI item count;
-- MC/MA/numerical scoring plus inline/display LaTex work in preview.
+- MC/MA/numerical scoring plus inline/display LaTeX work in preview.
 
 These contract tests need credentials and a target Canvas tenant, so they must be
 opt-in (`CANVAS_BROWSER_E2E=1`) and never run in normal `go test ./...`.

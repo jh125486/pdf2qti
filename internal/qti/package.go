@@ -29,9 +29,11 @@ func WritePackage(w io.Writer, assessmentFilename string, assessmentXML []byte) 
 	}
 	zw := zip.NewWriter(w)
 	if err := writeZipFile(zw, manifestFilename, manifest); err != nil {
+		_ = zw.Close()
 		return err
 	}
 	if err := writeZipFile(zw, assessmentFilename, assessmentXML); err != nil {
+		_ = zw.Close()
 		return err
 	}
 	if err := zw.Close(); err != nil {

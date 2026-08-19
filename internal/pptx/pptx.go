@@ -93,35 +93,40 @@ func resetLastView(parts map[string][]byte) {
 // in the title slide (dc.ModuleName and courseName), the agenda bullets, and duplicates the
 // Content slide once per dc.Slides entry, executes Go text templates in the remaining XML/RELS
 // parts against distilled context data and vars, and writes the result to outputPath.
-func Render(templatePath string, dc *distill.DistilledContext, courseName string, vars map[string]string, outputPath string) error {
+//
+// warnings reports every formula that failed to convert to real OOXML math and fell back to
+// plain escaped text instead — see mathWarnings — so callers can surface them instead of a
+// broken formula silently shipping unrendered (nil, not an error, on full success).
+func Render(templatePath string, dc *distill.DistilledContext, courseName string, vars map[string]string, outputPath string) (warnings []string, err error) {
 	inData, err := os.ReadFile(templatePath)
 	if err != nil {
-		return fmt.Errorf("read pptx template %q: %w", templatePath, err)
+		return nil, fmt.Errorf("read pptx template %q: %w", templatePath, err)
 	}
 
 	reader, err := zip.NewReader(bytes.NewReader(inData), int64(len(inData)))
 	if err != nil {
-		return fmt.Errorf("open pptx template %q: %w", templatePath, err)
+		return nil, fmt.Errorf("open pptx template %q: %w", templatePath, err)
 	}
 
 	parts, headers, order, err := readParts(reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	markLayoutPicturesDecorative(parts)
 	resetLastView(parts)
 
-	if err := applyDeck(parts, &order, dc, courseName); err != nil {
-		return err
+	mathW := &mathWarnings{}
+	if err := applyDeck(parts, &order, dc, courseName, mathW); err != nil {
+		return nil, err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o750); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
+		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 	outFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("create output %q: %w", outputPath, err)
+		return nil, fmt.Errorf("create output %q: %w", outputPath, err)
 	}
 	defer outFile.Close()
 
@@ -137,16 +142,16 @@ func Render(templatePath string, dc *distill.DistilledContext, courseName string
 	for _, name := range order {
 		header := headers[name]
 		if err := writeEntry(writer, name, parts[name], &header, data); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	closeWriter = false
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("finalize output pptx: %w", err)
+		return nil, fmt.Errorf("finalize output pptx: %w", err)
 	}
 
-	return nil
+	return mathW.warnings(), nil
 }
 
 // readParts reads every entry of reader into memory, keyed by part name, along with its original
@@ -211,7 +216,7 @@ func isTemplatedPart(name string) bool {
 // applyDeck validates the template's slide layouts and mutates parts/order in place to fill the
 // title slide, inject agenda bullets into the Agenda slide, and duplicate the Content slide once
 // per dc.Slides entry.
-func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext, courseName string) error {
+func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext, courseName string, warnings *mathWarnings) error {
 	layoutNames, err := layoutNamesByPart(parts)
 	if err != nil {
 		return err
@@ -247,15 +252,15 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 		return err
 	}
 
-	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName); err != nil {
+	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName, warnings); err != nil {
 		return err
 	}
 
-	if err := fillAgenda(parts, agendaSlide, dc.Agenda); err != nil {
+	if err := fillAgenda(parts, agendaSlide, dc.Agenda, warnings); err != nil {
 		return err
 	}
 
-	contentSldIDs, err := duplicateContentSlides(parts, order, contentSlide, dc.Slides)
+	contentSldIDs, err := duplicateContentSlides(parts, order, contentSlide, dc.Slides, warnings)
 	if err != nil {
 		return err
 	}
@@ -268,13 +273,13 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 // non-empty, its body (subtitle) placeholder to courseName. courseName is left as whatever the
 // template's own placeholder text is when empty, rather than erroring, since not every caller
 // has a course name to supply.
-func fillTitleSlide(parts map[string][]byte, slidePart, title, courseName string) error {
-	updated, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: title}}, nil)
+func fillTitleSlide(parts map[string][]byte, slidePart, title, courseName string, warnings *mathWarnings) error {
+	updated, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: title}}, nil, warnings)
 	if err != nil {
 		return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 	}
 	if courseName != "" {
-		updated, err = setPlaceholderBullets(updated, "body", []bulletLine{{text: courseName}}, nil)
+		updated, err = setPlaceholderBullets(updated, "body", []bulletLine{{text: courseName}}, nil, warnings)
 		if err != nil {
 			return fmt.Errorf("fill title slide %q: %w", slidePart, err)
 		}
@@ -367,7 +372,7 @@ func relsPartFor(partName string) string {
 	return path.Dir(partName) + "/_rels/" + path.Base(partName) + ".rels"
 }
 
-func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) error {
+func fillAgenda(parts map[string][]byte, slidePart string, agenda []string, warnings *mathWarnings) error {
 	if n := len(agenda); n < 3 || n > 8 {
 		return fmt.Errorf("agenda must have between 3 and 8 bullets, got %d", n)
 	}
@@ -375,7 +380,7 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) erro
 	for i, item := range agenda {
 		bullets[i] = bulletLine{text: item}
 	}
-	updated, err := setPlaceholderBullets(parts[slidePart], "body", bullets, nil)
+	updated, err := setPlaceholderBullets(parts[slidePart], "body", bullets, nil, warnings)
 	if err != nil {
 		return fmt.Errorf("fill agenda slide %q: %w", slidePart, err)
 	}
@@ -387,7 +392,7 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string) erro
 // it once per remaining entry, wiring up the new part's relationships, content type, and
 // presentation slide list entry. It returns each entry's final numeric sldId, in slides order,
 // so callers can group them into PowerPoint Sections afterward.
-func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypePart string, slides []distill.Slide) ([]string, error) {
+func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypePart string, slides []distill.Slide, warnings *mathWarnings) ([]string, error) {
 	if len(slides) == 0 {
 		return nil, errors.New("distilled context has no slides to render")
 	}
@@ -426,7 +431,7 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 	sldIDs := make([]string, len(slides))
 
 	for i, slide := range slides {
-		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}}, nil)
+		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}}, nil, warnings)
 		if err != nil {
 			return nil, fmt.Errorf("set title for slide %d: %w", i+1, err)
 		}
@@ -435,7 +440,7 @@ func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypeP
 		if geomOK {
 			scale = estimateAutofitScale(bullets, geom)
 		}
-		body, err = setPlaceholderBullets(body, "body", bullets, scale)
+		body, err = setPlaceholderBullets(body, "body", bullets, scale, warnings)
 		if err != nil {
 			return nil, fmt.Errorf("set content for slide %d: %w", i+1, err)
 		}
@@ -614,8 +619,8 @@ type bodyGeometry struct {
 
 var (
 	rePlaceholderExt = regexp.MustCompile(`<a:ext cx="(\d+)" cy="(\d+)"/>`)
-	reDefRPrSize      = regexp.MustCompile(`<a:defRPr sz="(\d+)"`)
-	reLineSpacePct    = regexp.MustCompile(`<a:lnSpc><a:spcPct val="(\d+)"/></a:lnSpc>`)
+	reDefRPrSize     = regexp.MustCompile(`<a:defRPr sz="(\d+)"`)
+	reLineSpacePct   = regexp.MustCompile(`<a:lnSpc><a:spcPct val="(\d+)"/></a:lnSpc>`)
 )
 
 // contentBodyGeometry extracts bodyGeometry from a slide layout's "body" placeholder shape — the
@@ -881,7 +886,7 @@ func ensureNormAutofit(block []byte, scale *autofitScale) []byte {
 // default level and doesn't need stating. scale, if non-nil, bakes an explicit autofit percentage
 // into the shape's bodyPr (see estimateAutofitScale); nil gets the bare, percentage-less form
 // ensureNormAutofit inserts by default.
-func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine, scale *autofitScale) ([]byte, error) {
+func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine, scale *autofitScale, warnings *mathWarnings) ([]byte, error) {
 	marker := []byte(`<p:ph type="` + phType + `"`)
 	phIdx := bytes.Index(slideXML, marker)
 	if phIdx == -1 {
@@ -917,7 +922,7 @@ func setPlaceholderBullets(slideXML []byte, phType string, bullets []bulletLine,
 		if b.level >= 1 {
 			paragraphs.WriteString(`<a:pPr lvl="1"/>`)
 		}
-		paragraphs.WriteString(runsXML(b.text))
+		paragraphs.WriteString(runsXML(b.text, warnings))
 		paragraphs.WriteString(`</a:p>`)
 	}
 
@@ -955,18 +960,18 @@ var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
 // (forcing bold onto pandoc-generated OMML output isn't worth the complexity for how rarely a
 // bolded formula appears at all, and this matches the pre-existing behavior for a formula bolded
 // on its own).
-func runsXML(text string) string {
+func runsXML(text string, warnings *mathWarnings) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range reBold.FindAllStringSubmatchIndex(text, -1) {
 		if loc[0] > last {
-			b.WriteString(mathAwareRunsXML(text[last:loc[0]], false))
+			b.WriteString(mathAwareRunsXML(text[last:loc[0]], false, warnings))
 		}
-		b.WriteString(mathAwareRunsXML(text[loc[2]:loc[3]], true))
+		b.WriteString(mathAwareRunsXML(text[loc[2]:loc[3]], true, warnings))
 		last = loc[1]
 	}
 	if last < len(text) {
-		b.WriteString(mathAwareRunsXML(text[last:], false))
+		b.WriteString(mathAwareRunsXML(text[last:], false, warnings))
 	}
 	if b.Len() == 0 {
 		b.WriteString(runXML(text, false))
@@ -977,7 +982,7 @@ func runsXML(text string) string {
 // mathAwareRunsXML renders text (assumed free of "**bold**" markers — runsXML strips those before
 // calling this) as one or more <a:r>/math runs, rendering "\(...\)"/"\[...\]" spans as math (never
 // bold, see runsXML) and everything else as plain text runs bolded per bold.
-func mathAwareRunsXML(text string, bold bool) string {
+func mathAwareRunsXML(text string, bold bool, warnings *mathWarnings) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range reMathSpan.FindAllStringSubmatchIndex(text, -1) {
@@ -986,9 +991,9 @@ func mathAwareRunsXML(text string, bold bool) string {
 		}
 		switch {
 		case loc[2] != -1: // \(inline math\)
-			b.WriteString(mathRunXML(text[loc[2]:loc[3]], [2]string{`\(`, `\)`}))
+			b.WriteString(mathRunXML(text[loc[2]:loc[3]], [2]string{`\(`, `\)`}, warnings))
 		case loc[4] != -1: // \[display math\]
-			b.WriteString(mathRunXML(text[loc[4]:loc[5]], [2]string{`\[`, `\]`}))
+			b.WriteString(mathRunXML(text[loc[4]:loc[5]], [2]string{`\[`, `\]`}, warnings))
 		}
 		last = loc[1]
 	}

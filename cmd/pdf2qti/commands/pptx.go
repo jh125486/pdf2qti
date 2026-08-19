@@ -20,7 +20,7 @@ type PPTXCmd struct {
 }
 
 // Run executes the pptx command.
-func (p *PPTXCmd) Run(_ context.Context, cli *CLI) error {
+func (p *PPTXCmd) Run(ctx context.Context, cli *CLI) error {
 	cfg, err := config.Load(cli.Config)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -42,8 +42,13 @@ func (p *PPTXCmd) Run(_ context.Context, cli *CLI) error {
 	}
 
 	dc := &distill.DistilledContext{ModuleName: title, Agenda: agenda, Slides: slides}
-	if err := pptx.Render(p.Template, dc, courseName, p.Vars, p.Output); err != nil {
+	warnings, err := pptx.Render(p.Template, dc, courseName, p.Vars, p.Output)
+	if err != nil {
 		return fmt.Errorf("render pptx: %w", err)
+	}
+	logger := loggerFrom(ctx)
+	for _, w := range warnings {
+		logger.Warn("pptx render warning", "detail", w)
 	}
 	return nil
 }

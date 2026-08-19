@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jh125486/pdf2qti/internal/audit"
 	"github.com/jh125486/pdf2qti/internal/itembank"
 )
 
@@ -27,7 +26,7 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error {
 	if err := validateQTIPackage(c.Package); err != nil {
 		return err
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 	if c.DryRun {
 		logger.Info("would import QTI package", "file", c.Package, "course", c.CourseID, "bank", c.BankName)
 		return nil

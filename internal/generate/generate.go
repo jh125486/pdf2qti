@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/distill"
@@ -26,8 +27,8 @@ type Generator struct {
 
 // New creates an OpenAI-backed generator from resolved generation config. It never falls back to
 // placeholder questions: a missing key or unsupported provider is a configuration error.
-func New(cfg config.Generation) (*Generator, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere
-	llm, err := openai.New(cfg)
+func New(cfg config.Generation, httpTimeout time.Duration) (*Generator, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere
+	llm, err := openai.New(cfg, httpTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("create generation LLM: %w", err)
 	}

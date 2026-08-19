@@ -25,7 +25,7 @@ func (d *DistillCmd) Run(ctx context.Context, cli *CLI) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := audit.New(logOutput)
+	logger := loggerFrom(ctx)
 
 	sources := d.selectSources(cfg)
 	if len(sources) == 0 {
@@ -33,7 +33,7 @@ func (d *DistillCmd) Run(ctx context.Context, cli *CLI) error {
 	}
 
 	for _, src := range sources {
-		llm := selectLLM(cfg.EffectiveGeneration(src), logger, &stubDistillLLM{})
+		llm := selectLLM(cfg.EffectiveGeneration(src), cli.HTTPTimeout, logger, &stubDistillLLM{})
 		if err := runDistillSource(ctx, cfg, src, logger, llm, d.Force); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
@@ -90,8 +90,16 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 		return fmt.Errorf("distill: %w", err)
 	}
 
-	if len(dc.VerificationWarnings) > 0 {
-		logger.Warn("consistency check found unresolved issues", "source", src.ID, "count", len(dc.VerificationWarnings))
+	// Not covered by a CLI-level test: producing a real VerificationWarnings entry needs chunked
+	// distillation (see internal/distill/chunk.go's maxDirectChars), which needs chapterText well
+	// past that threshold -- constructing a fixture that large as a fake on-disk "PDF" and relying
+	// on extract.ExtractText's raw-bytes fallback to return it intact would be a bigger, more
+	// fragile piece of test infrastructure than this two-line loop justifies. The logic this loop
+	// depends on -- that Distill actually populates VerificationWarnings for a chunked chapter --
+	// is covered directly in internal/distill/distill_test.go's
+	// TestDistill_LargeChapterUsesCondensedTextVerbatim.
+	for _, w := range dc.VerificationWarnings {
+		logger.Warn("consistency check found an unresolved issue", "source", src.ID, "detail", w)
 	}
 
 	if err := distill.Save(ctxFile, dc); err != nil {

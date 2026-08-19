@@ -156,12 +156,23 @@ func repairDecodedArtifacts(v reflect.Value) {
 	}
 }
 
-// fixDecodedLeaf applies fixControlByteArtifacts and collapseOverDoubledBackslashes to s in turn,
-// reporting whether either changed anything.
+// fixDecodedLeaf applies fixControlByteArtifacts, repairNulBytes, collapseOverDoubledBackslashes,
+// and stripStrayControlBytes to s in turn, reporting whether any of them changed anything.
+//
+// repairNulBytes must run before stripStrayControlBytes: a NUL byte is itself an
+// isXMLInvalidControlByte byte, so stripStrayControlBytes would otherwise silently delete the
+// very artifact repairNulBytes exists to restore to a backslash — caught in PR review after
+// stripStrayControlBytes was added without noticing it made repairNulBytes (previously only
+// called later, on already-decoded bullet text in outline.go) unreachable in the real pipeline:
+// by the time that later call ran, the NUL was already gone.
 func fixDecodedLeaf(s string) (fixed string, changed bool) {
 	s, c1 := fixControlByteArtifacts(s)
-	s, c2 := collapseOverDoubledBackslashes(s)
-	return s, c1 || c2
+	beforeNulRepair := s
+	s = repairNulBytes(s)
+	c2 := s != beforeNulRepair
+	s, c3 := collapseOverDoubledBackslashes(s)
+	s, c4 := stripStrayControlBytes(s)
+	return s, c1 || c2 || c3 || c4
 }
 
 // fixControlByteArtifacts replaces every controlByteToEscapeLetter byte in s with '\' plus its
@@ -181,6 +192,45 @@ func fixControlByteArtifacts(s string) (fixed string, changed bool) {
 		b.WriteByte(s[i])
 	}
 	return b.String(), true
+}
+
+// isXMLInvalidControlByte reports whether b is a C0 control byte XML 1.0 disallows in element
+// content — every byte below 0x20 except tab/newline/carriage-return, the three XML explicitly
+// permits (https://www.w3.org/TR/xml/#charsets).
+func isXMLInvalidControlByte(b byte) bool {
+	return b < 0x20 && b != '\t' && b != '\n' && b != '\r'
+}
+
+// stripStrayControlBytes removes every isXMLInvalidControlByte byte from s, reporting whether it
+// changed anything. Observed in practice: a slide-generation LLM call emitting a genuine, valid
+// JSON backslash-u-plus-4-hex-digit unicode escape (not a raw unescaped backslash — that's
+// fixControlByteArtifacts's five-byte table above) for a low control-code point in place of
+// intended content, e.g. inline-math delimiters replaced by a literal control byte. This domain
+// never legitimately wants any control
+// byte in decoded prose (see controlByteToEscapeLetter's doc comment) — and beyond being wrong
+// content, a byte like this landing in pdf2qti's PPTX output isn't just cosmetic: OOXML is XML,
+// and an XML-invalid byte in a run of text can make PowerPoint refuse to open the file rather
+// than merely rendering oddly. Runs last in fixDecodedLeaf, after fixControlByteArtifacts has
+// already turned the five bytes it can explain back into their letter-pair escapes, so nothing
+// this function removes was ever a legitimate, explainable artifact.
+func stripStrayControlBytes(s string) (fixed string, changed bool) {
+	hasStray := false
+	for i := 0; i < len(s); i++ {
+		if isXMLInvalidControlByte(s[i]) {
+			hasStray = true
+			break
+		}
+	}
+	if !hasStray {
+		return s, false
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if !isXMLInvalidControlByte(s[i]) {
+			b = append(b, s[i])
+		}
+	}
+	return string(b), true
 }
 
 // collapseOverDoubledBackslashes replaces a decoded "\\" (two literal backslash characters) not
@@ -216,6 +266,21 @@ func fixControlByteArtifacts(s string) (fixed string, changed bool) {
 // whitespace is left alone (the untouched, legitimate case above), and every other run — including
 // a longer whitespace-preceded one — halves, since over-doubling doubles every backslash in the
 // run uniformly.
+//
+// Known limitation, deliberately not fixed here (raised in a Fable-assisted review of this
+// package): a compact-notation matrix row separator directly abutting a cell that's itself a
+// single-backslash LaTeX command (e.g. "...&\lambda_1\\lambda_2&..." with no whitespace around
+// the separator) can decode to an odd-length run this function can't correctly halve — the
+// correct split depends on which raw encoding the model actually used for the separator (bare vs.
+// already-doubled), information this function has no way to recover from the decoded run alone.
+// The tempting-looking fix — leave a run alone whenever it's followed by a multi-letter command
+// name instead of collapsing it — was checked against this function's own primary, most-common
+// case (a single over-doubled command anywhere in prose, e.g. a decoded "\\mathbf" that must
+// still collapse to "\mathbf") and would silently break it: that's the exact same shape (a
+// 2-backslash run immediately followed by a multi-letter word) this function exists to fix, with
+// no local signal to tell the two apart. Matrix-context awareness — which repairMatrixRowSeparators
+// has and this function doesn't — is the only place that distinction could be made correctly; not
+// attempted here given the risk of regressing the far more common case for a narrower one.
 func collapseOverDoubledBackslashes(s string) (fixed string, changed bool) {
 	if !strings.Contains(s, `\\`) {
 		return s, false

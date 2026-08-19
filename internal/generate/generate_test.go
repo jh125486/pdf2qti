@@ -90,7 +90,7 @@ func TestGenerateStage_ZeroCountSkipsLLM(t *testing.T) {
 
 func TestNew_RequiresConfiguredOpenAI(t *testing.T) {
 	t.Parallel()
-	_, err := generate.New(config.Generation{})
+	_, err := generate.New(config.Generation{}, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported provider") {
 		t.Fatalf("error=%v", err)
 	}
