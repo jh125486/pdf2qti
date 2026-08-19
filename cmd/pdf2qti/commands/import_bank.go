@@ -11,12 +11,12 @@ import (
 )
 
 type ImportBankCmd struct {
-	CourseID   string `required:"" help:"Canvas course ID."`
-	BankName   string `required:"" help:"Exact Item Bank name."`
-	Package    string `required:"" type:"path" help:"QTI ZIP package."`
-	BaseURL    string `default:"https://unt.instructure.com" help:"Canvas base URL."`
-	BrowserURL string `default:"http://127.0.0.1:9222" help:"Authenticated Chrome remote-debugging URL."`
-	OnExisting string `default:"fail" enum:"fail,append" help:"Existing bank behavior."`
+	CourseID   string `help:"Canvas course ID."                                           required:""`
+	BankName   string `help:"Exact Item Bank name."                                       required:""`
+	Package    string `help:"QTI ZIP package."                                            required:""                                       type:"path"`
+	BaseURL    string `default:"https://unt.instructure.com"                              help:"Canvas base URL."`
+	BrowserURL string `default:"http://127.0.0.1:9222"                                    help:"Authenticated Chrome remote-debugging URL."`
+	OnExisting string `default:"fail"                                                     enum:"fail,append"                                help:"Existing bank behavior."`
 	DryRun     bool   `help:"Validate package and report action without browser changes."`
 }
 
@@ -31,7 +31,7 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error {
 		logger.Info("would import QTI package", "file", c.Package, "course", c.CourseID, "bank", c.BankName)
 		return nil
 	}
-	result, err := newItemBankImporter().Import(ctx, itembank.Request{
+	result, err := newItemBankImporter().Import(ctx, &itembank.Request{
 		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, CourseID: c.CourseID,
 		BankName: c.BankName, Package: c.Package, OnExisting: itembank.Existing(c.OnExisting),
 	})

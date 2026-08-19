@@ -14,7 +14,10 @@ import (
 // authenticated Chrome instance started with remote debugging enabled.
 type ChromedpImporter struct{}
 
-func (ChromedpImporter) Import(ctx context.Context, req Request) (Result, error) {
+func (ChromedpImporter) Import(ctx context.Context, req *Request) (Result, error) { //nolint:gocyclo // browser UI state machine
+	if req == nil {
+		return Result{}, fmt.Errorf("item bank import request is required")
+	}
 	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
 	defer cancel()
 	browser, cancel := chromedp.NewContext(allocator)
@@ -38,7 +41,7 @@ func (ChromedpImporter) Import(ctx context.Context, req Request) (Result, error)
 		return Result{}, fmt.Errorf("find Item Bank: %w", err)
 	}
 	if found && req.OnExisting == ExistingFail {
-		return Result{}, fmt.Errorf("Item Bank %q already exists (use --on-existing=append)", req.BankName)
+		return Result{}, fmt.Errorf("item bank %q already exists (use --on-existing=append)", req.BankName)
 	}
 	if !found {
 		if err := chromedp.Run(browser, clickText("Create Bank")); err != nil {

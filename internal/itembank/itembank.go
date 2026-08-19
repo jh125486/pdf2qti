@@ -25,5 +25,5 @@ type Result struct {
 
 // Importer controls an already-authenticated browser; it never uses Canvas APIs.
 type Importer interface {
-	Import(context.Context, Request) (Result, error)
+	Import(context.Context, *Request) (Result, error)
 }

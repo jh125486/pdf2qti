@@ -25,6 +25,8 @@ type Generator struct {
 	llm LLM
 }
 
+const schemaTypeKey = "type"
+
 // New creates an OpenAI-backed generator from resolved generation config. It never falls back to
 // placeholder questions: a missing key or unsupported provider is a configuration error.
 func New(cfg config.Generation, httpTimeout time.Duration) (*Generator, error) { //nolint:gocritic // matches config.Generation-by-value convention used elsewhere
@@ -190,18 +192,18 @@ func stageInstructions(stage config.Stage) string {
 }
 
 func questionSchema() *distill.Schema {
-	stringSchema := map[string]any{"type": "string"}
+	stringSchema := map[string]any{schemaTypeKey: "string"}
 	optionSchema := strictObject(map[string]any{
 		"text":       stringSchema,
-		"is_correct": map[string]any{"type": "boolean"},
+		"is_correct": map[string]any{schemaTypeKey: "boolean"},
 		"match_text": stringSchema,
 	})
 	question := strictObject(map[string]any{
 		"text":    stringSchema,
-		"options": map[string]any{"type": "array", "items": optionSchema},
+		"options": map[string]any{schemaTypeKey: "array", "items": optionSchema},
 	})
 	return &distill.Schema{Name: "quiz_questions", Definition: strictObject(map[string]any{
-		"questions": map[string]any{"type": "array", "items": question},
+		"questions": map[string]any{schemaTypeKey: "array", "items": question},
 	})}
 }
 
@@ -210,5 +212,5 @@ func strictObject(properties map[string]any) map[string]any {
 	for name := range properties {
 		required = append(required, name)
 	}
-	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+	return map[string]any{schemaTypeKey: "object", "properties": properties, "required": required, "additionalProperties": false}
 }
