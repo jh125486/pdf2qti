@@ -18,9 +18,9 @@ type ImportBankCmd struct {
 	BrowserURL string `default:"http://127.0.0.1:9222"                                    help:"Authenticated Chrome remote-debugging URL."`
 	OnExisting string `default:"fail"                                                     enum:"fail,append"                                help:"Existing bank behavior."`
 	DryRun     bool   `help:"Validate package and report action without browser changes."`
-}
 
-var newItemBankImporter = func() itembank.Importer { return itembank.ChromedpImporter{} }
+	importer itembank.Importer
+}
 
 func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error {
 	if err := validateQTIPackage(c.Package); err != nil {
@@ -31,7 +31,11 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error {
 		logger.Info("would import QTI package", "file", c.Package, "course", c.CourseID, "bank", c.BankName)
 		return nil
 	}
-	result, err := newItemBankImporter().Import(ctx, &itembank.Request{
+	importer := c.importer
+	if importer == nil {
+		importer = itembank.ChromedpImporter{}
+	}
+	result, err := importer.Import(ctx, &itembank.Request{
 		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, CourseID: c.CourseID,
 		BankName: c.BankName, Package: c.Package, OnExisting: itembank.Existing(c.OnExisting),
 	})

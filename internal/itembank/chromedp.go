@@ -13,7 +13,9 @@ import (
 // ChromedpImporter drives only documented Canvas UI actions in an existing,
 // authenticated Chrome instance started with remote debugging enabled.
 type ChromedpImporter struct {
-	run chromedpRun
+	run      chromedpRun
+	findBank func(context.Context, string) (bool, error)
+	location func(context.Context) (string, error)
 }
 
 type chromedpRun func(context.Context, ...chromedp.Action) error
@@ -45,8 +47,14 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	}
 	name := jsString(req.BankName)
 	var found bool
-	if err := run(browser, chromedp.Evaluate(bankExistsJS(name), &found)); err != nil {
-		return Result{}, fmt.Errorf("find Item Bank: %w", err)
+	var findErr error
+	if c.findBank != nil {
+		found, findErr = c.findBank(browser, name)
+	} else {
+		findErr = run(browser, chromedp.Evaluate(bankExistsJS(name), &found))
+	}
+	if findErr != nil {
+		return Result{}, fmt.Errorf("find Item Bank: %w", findErr)
 	}
 	if found && req.OnExisting == ExistingFail {
 		return Result{}, fmt.Errorf("item bank %q already exists (use --on-existing=append)", req.BankName)
@@ -97,8 +105,14 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		return Result{}, fmt.Errorf("wait for import completion: %w", err)
 	}
 	var location string
-	if err := run(browser, chromedp.Location(&location)); err != nil {
-		return Result{}, fmt.Errorf("read Item Bank URL: %w", err)
+	var locationErr error
+	if c.location != nil {
+		location, locationErr = c.location(browser)
+	} else {
+		locationErr = run(browser, chromedp.Location(&location))
+	}
+	if locationErr != nil {
+		return Result{}, fmt.Errorf("read Item Bank URL: %w", locationErr)
 	}
 	return Result{BankURL: location}, nil
 }

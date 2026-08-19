@@ -134,7 +134,7 @@ func assertCanvasPackage(t *testing.T, path string) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if string(manifest) == "" {
+	if len(manifest) == 0 {
 		t.Fatal("empty package manifest")
 	}
 }

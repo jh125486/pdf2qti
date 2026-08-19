@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -13,7 +14,14 @@ import (
 )
 
 // ApproveCmd converts an approved quiz markdown draft to QTI.
-type ApproveCmd struct{}
+type packageOps struct {
+	open  func(string) (io.WriteCloser, error)
+	write func(io.Writer, string, []byte) error
+}
+
+type ApproveCmd struct {
+	packageOps packageOps
+}
 
 // Run executes the approve command.
 func (a *ApproveCmd) Run(ctx context.Context, cli *CLI) error {
@@ -22,9 +30,18 @@ func (a *ApproveCmd) Run(ctx context.Context, cli *CLI) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	logger := loggerFrom(ctx)
+	ops := a.packageOps
+	if ops.open == nil {
+		ops.open = func(path string) (io.WriteCloser, error) {
+			return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is constructed from trusted config values
+		}
+	}
+	if ops.write == nil {
+		ops.write = qti.WritePackage
+	}
 	for i := range cfg.Sources {
 		src := &cfg.Sources[i]
-		if err := runApproveSource(cfg, src, logger); err != nil {
+		if err := runApproveSourceWithOps(cfg, src, logger, ops); err != nil {
 			return fmt.Errorf("source %q: %w", src.ID, err)
 		}
 	}
@@ -32,6 +49,10 @@ func (a *ApproveCmd) Run(ctx context.Context, cli *CLI) error {
 }
 
 func runApproveSource(cfg *config.Config, src *config.Source, logger *audit.Logger) error {
+	return runApproveSourceWithOps(cfg, src, logger, packageOps{})
+}
+
+func runApproveSourceWithOps(cfg *config.Config, src *config.Source, logger *audit.Logger, ops packageOps) error {
 	outDir := cfg.OutDir(src)
 	quizFile := filepath.Join(outDir, src.ID+"_quiz.md")
 	data, err := os.ReadFile(quizFile)
@@ -51,14 +72,22 @@ func runApproveSource(cfg *config.Config, src *config.Source, logger *audit.Logg
 		return fmt.Errorf("marshal QTI: %w", err)
 	}
 	packageFile := filepath.Join(outDir, src.ID+".zip")
-	f, err := os.OpenFile(packageFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is constructed from trusted config values
+	if ops.open == nil {
+		ops.open = func(path string) (io.WriteCloser, error) {
+			return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path is constructed from trusted config values
+		}
+	}
+	if ops.write == nil {
+		ops.write = qti.WritePackage
+	}
+	f, err := ops.open(packageFile)
 	if err != nil {
 		return fmt.Errorf("create QTI package: %w", err)
 	}
-	if err := qti.WritePackage(f, src.ID+".xml", xmlBytes); err != nil {
+	if err := ops.write(f, src.ID+".xml", xmlBytes); err != nil {
 		closeErr := f.Close()
 		if closeErr != nil {
-			return fmt.Errorf("write QTI package: %w (also close package: %v)", err, closeErr)
+			return fmt.Errorf("write QTI package: %w (also close package: %w)", err, closeErr)
 		}
 		return fmt.Errorf("write QTI package: %w", err)
 	}

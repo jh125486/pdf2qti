@@ -17,9 +17,22 @@ const (
 	manifestFilename = "imsmanifest.xml"
 )
 
+type archiveWriter interface {
+	Create(string) (io.Writer, error)
+	Close() error
+}
+
+type archiveWriterFactory func(io.Writer) archiveWriter
+
 // WritePackage writes a Canvas-importable QTI 1.2 content package. Its manifest
 // and assessment XML are both placed at the ZIP root as Canvas requires.
 func WritePackage(w io.Writer, assessmentFilename string, assessmentXML []byte) error {
+	return writePackage(w, assessmentFilename, assessmentXML, func(w io.Writer) archiveWriter {
+		return zip.NewWriter(w)
+	})
+}
+
+func writePackage(w io.Writer, assessmentFilename string, assessmentXML []byte, newArchive archiveWriterFactory) error {
 	if filepath.Base(assessmentFilename) != assessmentFilename || !strings.HasSuffix(assessmentFilename, ".xml") {
 		return fmt.Errorf("assessment filename must be a root-level .xml file: %q", assessmentFilename)
 	}
@@ -27,7 +40,7 @@ func WritePackage(w io.Writer, assessmentFilename string, assessmentXML []byte) 
 	if err != nil {
 		return err
 	}
-	zw := zip.NewWriter(w)
+	zw := newArchive(w)
 	if err := writeZipFile(zw, manifestFilename, manifest); err != nil {
 		_ = zw.Close()
 		return err
@@ -60,7 +73,7 @@ func buildManifest(assessmentFilename string) ([]byte, error) {
 </manifest>`, assessmentID, escaped.String())), nil
 }
 
-func writeZipFile(zw *zip.Writer, name string, content []byte) error {
+func writeZipFile(zw archiveWriter, name string, content []byte) error {
 	w, err := zw.Create(name)
 	if err != nil {
 		return fmt.Errorf("create ZIP entry %q: %w", name, err)
