@@ -12,13 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # SONAR_TOKEN is exposed at job level, not just the SonarCloud step's own
-    # env:, so the step's `if:` guard below can read it as `env.SONAR_TOKEN`
-    # -- the `secrets` context isn't valid inside a step/job `if:` at all;
-    # referencing secrets.SONAR_TOKEN there fails the whole workflow at
-    # parse time.
-    env:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,6 +38,20 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
+      - name: Check Sonar token
+        # A separate step, not a job-level env:, so SONAR_TOKEN itself is
+        # never set as an environment variable on any step but the scan step
+        # below -- job-level env: is inherited by every step in the job
+        # (static checks, tests, ...), which is a wider exposure than the
+        # scan actually needs. secrets *is* a valid context inside a step's
+        # own run:/env: (confirmed against GitHub's contexts-availability
+        # docs), just not inside a step's if: -- so the secret is read here,
+        # inside run:, and only a plain true/false crosses into
+        # $GITHUB_OUTPUT for the next step's if: to read via the (allowed)
+        # steps context.
+        id: sonar_check
+        run: echo "has_token=${{ secrets.SONAR_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
       - name: SonarQube Cloud Scan
         # SonarSource/sonarcloud-github-action is deprecated -- confirmed
         # directly from this workflow's own earlier run, which already
@@ -58,7 +65,8 @@ jobs:
         # coverage.txt directly via sonar.go.coverage.reportPaths (see
         # sonar-project.properties), so this must run after the tests step
         # above, not standalone.
-        if: ${{ env.SONAR_TOKEN != '' }}
+        if: steps.sonar_check.outputs.has_token == 'true'
         uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
