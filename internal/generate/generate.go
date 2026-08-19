@@ -159,7 +159,7 @@ func validateQuestion(stage config.Stage, question generatedQuestion) error { //
 func buildPrompt(stage config.Stage, sourceText string, count int) string {
 	return fmt.Sprintf(`Create exactly %d %s quiz questions from source material below.
 
-Ground every question and answer in source material. Do not invent facts. Return JSON only, matching supplied schema. Preserve LaTeX delimiters (\\(...\\) or \\[...\\]) when source uses math. For unused match_text fields return an empty string.
+Ground every question and answer in source material. Do not invent facts. Return JSON only, matching supplied schema. Write every mathematical expression in LaTeX delimiters: inline math uses \\(...\\) and display math uses \\[...\\]. Preserve source LaTeX exactly when it already uses these delimiters. For unused match_text fields return an empty string.
 
 %s
 

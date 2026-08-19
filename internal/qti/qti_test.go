@@ -249,7 +249,7 @@ func TestWritePackage(t *testing.T) {
 	}
 
 	var packageBytes bytes.Buffer
-	if err := qti.WritePackage(&packageBytes, assessmentXML); err != nil {
+	if err := qti.WritePackage(&packageBytes, "signals.xml", assessmentXML); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,11 +275,11 @@ func TestWritePackage(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("expected exactly two ZIP root files, got %v", files)
 	}
-	if !strings.Contains(files["imsmanifest.xml"], `type="imsqti_xmlv1p2p1"`) || !strings.Contains(files["imsmanifest.xml"], `href="assessment.xml"`) {
+	if !strings.Contains(files["imsmanifest.xml"], `type="imsqti_xmlv1p2"`) || !strings.Contains(files["imsmanifest.xml"], `href="signals.xml"`) {
 		t.Fatalf("manifest does not reference QTI assessment: %s", files["imsmanifest.xml"])
 	}
-	if !strings.Contains(files["assessment.xml"], `xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1"`) {
-		t.Fatalf("assessment has no QTI namespace: %s", files["assessment.xml"])
+	if !strings.Contains(files["signals.xml"], `xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1"`) {
+		t.Fatalf("assessment has no QTI namespace: %s", files["signals.xml"])
 	}
 }
 

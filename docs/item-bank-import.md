@@ -32,12 +32,42 @@ Last requirement already exists in `internal/qti/qti.go`; package tests must kee
 it. Canvas New Quizzes import reports show this attribute is required in practice
 for choice questions even though QTI permits omission.
 
+## Browser command
+
+`import-bank` uses Chromedp against existing authenticated Chrome debugging
+session. It drives Canvas UI only; no private Canvas endpoints.
+
+```sh
+# Start separate profile, sign into Canvas, leave Chrome running.
+open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/private/tmp/pdf2qti-canvas-profile
+
+pdf2qti import-bank \
+  --course-id 147966 \
+  --bank-name '2120: Chapter 1 Quiz' \
+  --package /absolute/path/ch01_qti.zip \
+  --on-existing append
+```
+
+Use `--dry-run` first. Default `--on-existing=fail` protects existing banks;
+`append` imports into exact matching bank. Command validates ZIP and root
+`imsmanifest.xml` before browser connection.
+
+Recorded UNT UI flow (Aug 18 2026):
+
+1. `/courses/{course}/banks` → `Create Bank` → `Item Bank` dialog →
+   `Bank Name` → `Create Bank`.
+2. Open bank → `More Item Banking Actions` → `Import Content`.
+3. Attach ZIP, submit `Import`, wait for visible completion.
+4. Quiz builder → `Add from item bank` → bank → `Add this bank to quiz`.
+5. Edit bank group → `Randomly select questions` → `Number of questions` → `Done`.
+
+`Add this bank to quiz` initially adds all questions. Configure random count in
+bank-group editor afterward.
+
 ## Browser-adapter design
 
-Add this only after a discovery run against target Canvas instance.
-
 ```text
-commands.ImportItemBankCmd
+commands.ImportBankCmd
   -> itembank.Importer interface
        -> browser adapter (Chromedp or browser MCP)
             -> Canvas New Quizzes Item Banks UI

@@ -120,7 +120,7 @@ func assertCanvasPackage(t *testing.T, path string) {
 		t.Fatalf("open QTI package: %v", err)
 	}
 	defer zr.Close()
-	if len(zr.File) != 2 || zr.File[0].Name != "imsmanifest.xml" || zr.File[1].Name != "assessment.xml" {
+	if len(zr.File) != 2 || zr.File[0].Name != "imsmanifest.xml" || zr.File[1].Name != "src01.xml" {
 		t.Fatalf("unexpected QTI package entries: %+v", zr.File)
 	}
 	r, err := zr.File[0].Open()

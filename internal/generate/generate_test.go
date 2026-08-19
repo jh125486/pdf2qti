@@ -69,6 +69,9 @@ func TestGenerateStage_Table(t *testing.T) {
 			if !strings.Contains(fake.prompt, "Grounding material") || !strings.Contains(fake.prompt, fmt.Sprintf("%s quiz", tt.stage)) {
 				t.Fatalf("prompt missing source or stage: %q", fake.prompt)
 			}
+			if !strings.Contains(fake.prompt, `inline math uses \\(...\\)`) {
+				t.Fatalf("prompt does not require Canvas-compatible LaTeX delimiters: %q", fake.prompt)
+			}
 		})
 	}
 }

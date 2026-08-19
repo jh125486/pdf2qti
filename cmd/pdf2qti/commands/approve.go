@@ -55,7 +55,7 @@ func runApproveSource(cfg *config.Config, src *config.Source, logger *audit.Logg
 	if err != nil {
 		return fmt.Errorf("create QTI package: %w", err)
 	}
-	if err := qti.WritePackage(f, xmlBytes); err != nil {
+	if err := qti.WritePackage(f, src.ID+".xml", xmlBytes); err != nil {
 		closeErr := f.Close()
 		if closeErr != nil {
 			return fmt.Errorf("write QTI package: %w (also close package: %v)", err, closeErr)
