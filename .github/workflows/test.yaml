@@ -45,13 +45,20 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
-      - name: SonarCloud Scan
+      - name: SonarQube Cloud Scan
+        # SonarSource/sonarcloud-github-action is deprecated -- confirmed
+        # directly from this workflow's own earlier run, which already
+        # showed the action internally delegating to
+        # __SonarSource_sonarqube-scan-action. Swapped to the documented
+        # drop-in replacement: same SONAR_TOKEN/GITHUB_TOKEN env vars, no
+        # other changes needed.
+        #
         # Guarded on the secret's presence so this step is a no-op -- not a
         # broken CI run -- until SONAR_TOKEN exists as a repo secret. Reads
         # coverage.txt directly via sonar.go.coverage.reportPaths (see
         # sonar-project.properties), so this must run after the tests step
         # above, not standalone.
         if: ${{ env.SONAR_TOKEN != '' }}
-        uses: SonarSource/sonarcloud-github-action@v5
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
