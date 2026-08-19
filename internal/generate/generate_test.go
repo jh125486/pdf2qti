@@ -101,6 +101,9 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 			if !strings.Contains(fake.prompt, `inline math uses \\(...\\)`) {
 				t.Fatalf("prompt does not require Canvas-compatible LaTeX delimiters: %q", fake.prompt)
 			}
+			if !strings.Contains(fake.prompt, "plain markdown backtick spans") {
+				t.Fatalf("prompt does not keep code identifiers out of LaTeX delimiters: %q", fake.prompt)
+			}
 		})
 	}
 }
