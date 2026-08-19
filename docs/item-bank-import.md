@@ -53,6 +53,12 @@ The quiz uses exactly `N` randomly selected questions from the imported bank.
 Its title is the final Item Bank title with ` Quiz` appended, unless that title
 already ends with the whole word `Quiz` (case-insensitive).
 
+`--bank-name` is the initial Canvas lookup/create name. Canvas may rename that
+bank to the QTI assessment title during import. The command intentionally
+supports those two names: it passes `--bank-name` to the importer, verifies the
+post-import bank title against the QTI title, then uses that final title for
+random-quiz collision preflight and quiz creation.
+
 ```sh
 pdf2qti import-bank \
   --course-id 147966 \

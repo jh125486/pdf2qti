@@ -30,7 +30,7 @@ type ImportBankCmd struct {
 
 func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocyclo // validates and coordinates optional browser workflows
 	if c.CreateRandomQuiz < 0 {
-		return fmt.Errorf("--create-random-quiz must be positive: %d", c.CreateRandomQuiz)
+		return fmt.Errorf("--create-random-quiz must be non-negative: %d", c.CreateRandomQuiz)
 	}
 	if err := validateQTIPackage(c.Package); err != nil {
 		return err

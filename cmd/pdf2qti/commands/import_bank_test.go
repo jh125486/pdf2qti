@@ -15,11 +15,15 @@ import (
 )
 
 func writeZIP(t *testing.T, path, entry string) {
+	writeQTIPackage(t, path, "Bank", 3, entry)
+}
+
+func writeQTIPackage(t *testing.T, path, title string, itemCount int, entry string) {
 	t.Helper()
 	entries := map[string]string{entry: "<manifest/>"}
 	if entry == "imsmanifest.xml" {
 		entries[entry] = `<manifest><resources><resource type="imsqti_xmlv1p2"><file href="quiz.xml"/></resource></resources></manifest>`
-		entries["quiz.xml"] = `<questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1"><assessment title="Bank"><section><item/><item/><item/></section></assessment></questestinterop>`
+		entries["quiz.xml"] = `<questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1"><assessment title="` + title + `"><section>` + strings.Repeat("<item/>", itemCount) + `</section></assessment></questestinterop>`
 	}
 	writeCustomZIP(t, path, entries)
 }
@@ -60,20 +64,24 @@ func (f *fakeItemBankImporter) Import(_ context.Context, req *itembank.Request) 
 }
 
 type fakeRandomQuizCreator struct {
-	err          error
-	preflightErr error
-	got          *itembank.QuizRequest
-	preflightGot *itembank.QuizRequest
+	err            error
+	preflightErr   error
+	got            *itembank.QuizRequest
+	preflightGot   *itembank.QuizRequest
+	preflightTitle string
+	createTitle    string
 }
 
 func (f *fakeRandomQuizCreator) PreflightRandomQuiz(_ context.Context, req *itembank.QuizRequest) error {
 	clone := *req
 	f.preflightGot = &clone
+	f.preflightTitle = itembank.QuizTitle(req.BankName)
 	return f.preflightErr
 }
 
 func (f *fakeRandomQuizCreator) CreateRandomQuiz(_ context.Context, req *itembank.QuizRequest) (itembank.QuizResult, error) {
 	f.got = req
+	f.createTitle = itembank.QuizTitle(req.BankName)
 	return itembank.QuizResult{QuizURL: "https://canvas/quizzes/2", Title: "Bank Quiz", QuestionCount: req.QuestionCount}, f.err
 }
 
@@ -89,6 +97,8 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 		preflightErr  error
 		importedTitle string
 		importedCount int
+		bankName      string
+		packageTitle  string
 		wantErr       string
 		wantPreflight bool
 		wantImport    bool
@@ -103,7 +113,8 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 		{name: "nested manifest", packageKind: "nested-manifest", dryRun: true, wantErr: "lacks root imsmanifest.xml"},
 		{name: "import success", packageKind: "valid", wantImport: true},
 		{name: "import error", packageKind: "valid", importErr: errors.New("browser failed"), wantErr: "browser failed", wantImport: true},
-		{name: "negative random count", packageKind: "valid", quizCount: -1, wantErr: "must be positive"},
+		{name: "negative random count", packageKind: "valid", quizCount: -1, wantErr: "must be non-negative"},
+		{name: "initial bank name differs from final QTI title", packageKind: "valid", bankName: "throwaway", packageTitle: "Final Bank", importedTitle: "Final Bank", importedCount: 3, quizCount: 3, wantPreflight: true, wantImport: true, wantQuiz: true},
 		{name: "random quiz success", packageKind: "valid", quizCount: 3, wantPreflight: true, wantImport: true, wantQuiz: true},
 		{name: "random quiz error", packageKind: "valid", quizCount: 3, quizErr: errors.New("quiz failed"), wantErr: "quiz failed", wantPreflight: true, wantImport: true, wantQuiz: true},
 		{name: "random count exceeds package", packageKind: "valid", quizCount: 4, wantErr: "exceeds package question count"},
@@ -123,7 +134,11 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 			path := filepath.Join(dir, "quiz"+ext)
 			switch tt.packageKind {
 			case "valid":
-				writeZIP(t, path, "imsmanifest.xml")
+				title := tt.packageTitle
+				if title == "" {
+					title = "Bank"
+				}
+				writeQTIPackage(t, path, title, 3, "imsmanifest.xml")
 			case "invalid":
 				if err := os.WriteFile(path, []byte("not a ZIP"), 0o600); err != nil {
 					t.Fatal(err)
@@ -144,8 +159,12 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 				fake.result.QuestionCount = tt.importedCount
 			}
 			quiz := &fakeRandomQuizCreator{err: tt.quizErr, preflightErr: tt.preflightErr}
+			bankName := tt.bankName
+			if bankName == "" {
+				bankName = "Bank"
+			}
 			cmd := &ImportBankCmd{
-				CourseID: "7", BankName: "Bank", Package: path,
+				CourseID: "7", BankName: bankName, Package: path,
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
 				OnExisting: "append", DryRun: tt.dryRun, CreateRandomQuiz: tt.quizCount,
 				importer: fake, quizCreator: quiz,
@@ -172,12 +191,16 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 			if fake.got == nil {
 				t.Fatal("Import() request = nil")
 			}
-			if fake.got.CourseID != "7" || fake.got.BankName != "Bank" ||
+			if fake.got.CourseID != "7" || fake.got.BankName != bankName ||
 				fake.got.Package != path || fake.got.BaseURL != "https://canvas.example.edu" ||
 				fake.got.BrowserURL != "http://127.0.0.1:9222" || fake.got.OnExisting != itembank.ExistingAppend {
 				t.Fatalf("Import() request = %+v", fake.got)
 			}
-			if tt.quizCount > 0 && (fake.got.ExpectedBankName != "Bank" || fake.got.ExpectedItemCount != 3) {
+			packageTitle := tt.packageTitle
+			if packageTitle == "" {
+				packageTitle = "Bank"
+			}
+			if tt.quizCount > 0 && (fake.got.ExpectedBankName != packageTitle || fake.got.ExpectedItemCount != 3) {
 				t.Fatalf("Import() expected package metadata = %+v", fake.got)
 			}
 			if !tt.wantQuiz {
@@ -195,9 +218,12 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 			if quiz.got == nil {
 				t.Fatal("CreateRandomQuiz() request = nil")
 			}
-			wantBank := "Bank"
-			if quiz.got.BankName != wantBank || quiz.got.BankURL != "https://canvas/banks/1" || quiz.got.QuestionCount != tt.quizCount {
+			if quiz.got.BankName != packageTitle || quiz.got.BankURL != "https://canvas/banks/1" || quiz.got.QuestionCount != tt.quizCount {
 				t.Fatalf("CreateRandomQuiz() request = %+v", quiz.got)
+			}
+			wantQuizTitle := itembank.QuizTitle(packageTitle)
+			if quiz.preflightTitle != wantQuizTitle || quiz.createTitle != wantQuizTitle {
+				t.Fatalf("quiz titles = preflight %q/create %q, want %q", quiz.preflightTitle, quiz.createTitle, wantQuizTitle)
 			}
 		})
 	}
