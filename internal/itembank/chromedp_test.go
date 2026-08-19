@@ -86,9 +86,56 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 				if result.BankURL != tt.wantURL {
 					t.Fatalf("Import() result = %+v, want URL %q", result, tt.wantURL)
 				}
+				if result.BankName != "Bank" {
+					t.Fatalf("Import() result bank name = %q, want %q", result.BankName, "Bank")
+				}
+				if result.BankID != "42" {
+					t.Fatalf("Import() result bank ID = %q, want %q", result.BankID, "42")
+				}
 				if len(batchSizes) < 2 || batchSizes[len(batchSizes)-2] != 2 {
 					t.Fatalf("import submit action batch = %v, want penultimate batch size 2", batchSizes)
 				}
+			}
+		})
+	}
+}
+
+func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, title, expectedTitle, wantErr string
+		count, expectedCount                int
+		titleErr, countErr                  error
+	}{
+		{name: "match", title: "Bank", expectedTitle: "Bank", count: 3, expectedCount: 3},
+		{name: "title mismatch", title: "Wrong", expectedTitle: "Bank", wantErr: `title = "Wrong"`},
+		{name: "empty title", expectedTitle: "Bank", wantErr: "title is empty"},
+		{name: "title read error", expectedTitle: "Bank", titleErr: errors.New("title unavailable"), wantErr: "read Item Bank title"},
+		{name: "count mismatch", title: "Bank", expectedTitle: "Bank", count: 2, expectedCount: 3, wantErr: "question count = 2"},
+		{name: "count read error", title: "Bank", expectedTitle: "Bank", expectedCount: 3, countErr: errors.New("count unavailable"), wantErr: "read imported Item Bank question count"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			importer := ChromedpImporter{
+				run:           func(context.Context, ...chromedp.Action) error { calls++; return nil },
+				findBank:      func(context.Context, string) (bool, error) { return true, nil },
+				bankTitle:     func(context.Context) (string, error) { return tt.title, tt.titleErr },
+				bankItemCount: func(context.Context) (int, error) { return tt.count, tt.countErr },
+				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+			}
+			result, err := importer.Import(context.Background(), &Request{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedBankName: tt.expectedTitle, ExpectedItemCount: tt.expectedCount})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != 8 {
+				t.Fatalf("browser action batches = %d, want 8", calls)
+			}
+			if tt.wantErr == "" && (result.BankName != tt.expectedTitle || result.QuestionCount != tt.expectedCount) {
+				t.Fatalf("Import() result = %+v", result)
 			}
 		})
 	}
@@ -124,6 +171,152 @@ func TestXPathString_Table(t *testing.T) {
 			t.Parallel()
 			if got := xpathString(tt.input); got != tt.want {
 				t.Fatalf("xpathString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBankIDAndQuizTitle_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, rawURL, bank, wantID, wantTitle string
+	}{
+		{name: "bank URL", rawURL: "https://canvas.example/courses/7/banks/42", bank: "Chapter 1", wantID: "42", wantTitle: "Chapter 1 Quiz"},
+		{name: "quiz suffix", rawURL: "https://canvas.example/courses/7/banks/42?x=1", bank: "Chapter 1 Quiz", wantID: "42", wantTitle: "Chapter 1 Quiz"},
+		{name: "case insensitive suffix", bank: "Exam QUIZ", wantTitle: "Exam QUIZ"},
+		{name: "invalid URL", rawURL: "://bad", bank: "Quizlet", wantTitle: "Quizlet Quiz"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := bankIDFromURL(tt.rawURL); got != tt.wantID {
+				t.Fatalf("bankIDFromURL(%q) = %q, want %q", tt.rawURL, got, tt.wantID)
+			}
+			if got := QuizTitle(tt.bank); got != tt.wantTitle {
+				t.Fatalf("QuizTitle(%q) = %q, want %q", tt.bank, got, tt.wantTitle)
+			}
+		})
+	}
+}
+
+func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo // table covers browser state-machine failures
+	t.Parallel()
+	tests := []struct {
+		name          string
+		count         int
+		failAt        int
+		locationErr   error
+		collision     bool
+		collisionErr  error
+		wantErr       string
+		wantURL       string
+		wantTitle     string
+		expectedCalls int
+	}{
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
+		{name: "invalid request", wantErr: "request is required"},
+		{name: "invalid count", count: 0, wantErr: "must be positive"},
+		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
+		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
+		{name: "set title", count: 2, failAt: 6, expectedCalls: 6, wantErr: "set quiz title"},
+		{name: "build quiz", count: 2, failAt: 7, expectedCalls: 7, wantErr: "build quiz"},
+		{name: "save group", count: 2, failAt: 16, expectedCalls: 16, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 17, expectedCalls: 17, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 17, wantErr: "read quiz URL"},
+		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
+		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			creator := ChromedpImporter{
+				run: func(_ context.Context, _ ...chromedp.Action) error {
+					calls++
+					if calls == tt.failAt {
+						return errors.New("browser failed")
+					}
+					return nil
+				},
+				quizLocation: func(context.Context) (string, error) {
+					return "https://canvas.example.edu/courses/7/quizzes/9", tt.locationErr
+				},
+				quizExists: func(context.Context, string) (bool, error) { return tt.collision, tt.collisionErr },
+			}
+			req := &QuizRequest{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankID: "42", BankName: "Bank", QuestionCount: tt.count}
+			if tt.name == "existing quiz suffix" {
+				req.BankName = "Bank Quiz"
+			}
+			if tt.name == "invalid request" {
+				req = nil
+			}
+			if tt.name == "invalid base URL" {
+				req.BaseURL = "://bad"
+			}
+			result, err := creator.CreateRandomQuiz(context.Background(), req)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("CreateRandomQuiz() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("CreateRandomQuiz() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != tt.expectedCalls {
+				t.Fatalf("browser action batches = %d, want %d", calls, tt.expectedCalls)
+			}
+			if tt.wantURL != "" {
+				if result.QuizURL != tt.wantURL || result.Title != tt.wantTitle {
+					t.Fatalf("CreateRandomQuiz() result = %+v, want URL %q/title %q", result, tt.wantURL, tt.wantTitle)
+				}
+			}
+		})
+	}
+}
+
+func TestChromedpImporterPreflightRandomQuiz_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, baseURL, bankName, wantErr string
+		count, failAt                    int
+		collision                        bool
+		collisionErr                     error
+		wantCalls                        int
+	}{
+		{name: "available", baseURL: "https://canvas.example.edu", bankName: "Bank", count: 3, wantCalls: 1},
+		{name: "nil request", wantErr: "request is required"},
+		{name: "invalid count", baseURL: "https://canvas.example.edu", bankName: "Bank", wantErr: "must be positive"},
+		{name: "empty bank", baseURL: "https://canvas.example.edu", count: 3, wantErr: "name is required"},
+		{name: "invalid URL", baseURL: "://bad", bankName: "Bank", count: 3, wantErr: "invalid Canvas base URL"},
+		{name: "open error", baseURL: "https://canvas.example.edu", bankName: "Bank", count: 3, failAt: 1, wantCalls: 1, wantErr: "open Quizzes"},
+		{name: "collision", baseURL: "https://canvas.example.edu", bankName: "Bank", count: 3, collision: true, wantCalls: 1, wantErr: "already exists"},
+		{name: "collision error", baseURL: "https://canvas.example.edu", bankName: "Bank", count: 3, collisionErr: errors.New("lookup failed"), wantCalls: 1, wantErr: "check quiz title collision"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			creator := ChromedpImporter{
+				run: func(context.Context, ...chromedp.Action) error {
+					calls++
+					if calls == tt.failAt {
+						return errors.New("browser failed")
+					}
+					return nil
+				},
+				quizExists: func(context.Context, string) (bool, error) { return tt.collision, tt.collisionErr },
+			}
+			var req *QuizRequest
+			if tt.name != "nil request" {
+				req = &QuizRequest{BaseURL: tt.baseURL, BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: tt.bankName, QuestionCount: tt.count}
+			}
+			err := creator.PreflightRandomQuiz(context.Background(), req)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("PreflightRandomQuiz() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("PreflightRandomQuiz() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != tt.wantCalls {
+				t.Fatalf("browser action batches = %d, want %d", calls, tt.wantCalls)
 			}
 		})
 	}
