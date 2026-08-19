@@ -48,9 +48,32 @@ pdf2qti import-bank \
   --on-existing append
 ```
 
+Append `--create-random-quiz=N` to create an unpublished New Quiz after import.
+The quiz uses exactly `N` randomly selected questions from the imported bank.
+Its title is the final Item Bank title with ` Quiz` appended, unless that title
+already ends with the whole word `Quiz` (case-insensitive).
+
+`--bank-name` is the initial Canvas lookup/create name. Canvas may rename that
+bank to the QTI assessment title during import. The command intentionally
+supports those two names: it passes `--bank-name` to the importer, verifies the
+post-import bank title against the QTI title, then uses that final title for
+random-quiz collision preflight and quiz creation.
+
+```sh
+pdf2qti import-bank \
+  --course-id 147966 \
+  --bank-name '2120: Chapter 1 Quiz' \
+  --package /absolute/path/ch01_qti.zip \
+  --on-existing append \
+  --create-random-quiz=10
+```
+
 Use `--dry-run` first. Default `--on-existing=fail` protects existing banks;
 `append` imports into exact matching bank. Command validates ZIP and root
-`imsmanifest.xml` before browser connection.
+`imsmanifest.xml` before browser connection. With `--create-random-quiz`, it
+also validates the manifest-referenced assessment title and item count, rejects
+`N` greater than that count, and checks for an exact quiz-title collision before
+importing. It never publishes the quiz or overwrites an existing quiz.
 
 Recorded UNT UI flow (Aug 18 2026):
 
@@ -79,6 +102,7 @@ Command inputs:
 - `--bank-name` (required; e.g. `2120: Chapter 1`)
 - `--package` (required QTI ZIP)
 - `--on-existing=fail|append` (default `fail`)
+- `--create-random-quiz=N` (optional; create an unpublished random bank group)
 - `--dry-run`
 
 Do not accept `--replace` until behavior is explicitly designed: deletion could

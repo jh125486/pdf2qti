@@ -13,12 +13,18 @@ import (
 // ChromedpImporter drives only documented Canvas UI actions in an existing,
 // authenticated Chrome instance started with remote debugging enabled.
 type ChromedpImporter struct {
-	run      chromedpRun
-	findBank func(context.Context, string) (bool, error)
-	location func(context.Context) (string, error)
+	run           chromedpRun
+	findBank      func(context.Context, string) (bool, error)
+	location      func(context.Context) (string, error)
+	bankTitle     func(context.Context) (string, error)
+	bankItemCount func(context.Context) (int, error)
+	quizLocation  func(context.Context) (string, error)
+	quizExists    func(context.Context, string) (bool, error)
 }
 
 type chromedpRun func(context.Context, ...chromedp.Action) error
+
+const buildQuizStep = "build quiz"
 
 func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, error) { //nolint:gocyclo // browser UI state machine
 	if req == nil {
@@ -104,6 +110,43 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if err := run(browser, chromedp.Poll(`document.body.innerText.includes('has imported successfully!')`, nil, chromedp.WithPollingTimeout(60*time.Second))); err != nil {
 		return Result{}, fmt.Errorf("wait for import completion: %w", err)
 	}
+	bankTitle := req.BankName
+	if req.ExpectedBankName != "" {
+		var titleErr error
+		if c.bankTitle != nil {
+			bankTitle, titleErr = c.bankTitle(browser)
+		} else {
+			titleErr = run(browser,
+				chromedp.Poll(bankTitleMatchesJS(req.ExpectedBankName), nil, chromedp.WithPollingTimeout(30*time.Second)),
+				chromedp.Evaluate(bankTitleJS, &bankTitle),
+			)
+		}
+		if titleErr != nil {
+			return Result{}, fmt.Errorf("read Item Bank title: %w", titleErr)
+		}
+		bankTitle = strings.TrimSpace(bankTitle)
+		if bankTitle == "" {
+			return Result{}, fmt.Errorf("imported Item Bank title is empty")
+		}
+		if bankTitle != req.ExpectedBankName {
+			return Result{}, fmt.Errorf("imported Item Bank title = %q, want %q", bankTitle, req.ExpectedBankName)
+		}
+	}
+	itemCount := 0
+	if req.ExpectedItemCount > 0 {
+		var countErr error
+		if c.bankItemCount != nil {
+			itemCount, countErr = c.bankItemCount(browser)
+		} else {
+			countErr = run(browser, chromedp.Evaluate(bankItemCountJS, &itemCount))
+		}
+		if countErr != nil {
+			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)
+		}
+		if itemCount != req.ExpectedItemCount {
+			return Result{}, fmt.Errorf("imported Item Bank question count = %d, want %d", itemCount, req.ExpectedItemCount)
+		}
+	}
 	var location string
 	var locationErr error
 	if c.location != nil {
@@ -114,7 +157,205 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if locationErr != nil {
 		return Result{}, fmt.Errorf("read Item Bank URL: %w", locationErr)
 	}
-	return Result{BankURL: location}, nil
+	return Result{BankURL: location, BankID: bankIDFromURL(location), BankName: bankTitle, QuestionCount: itemCount}, nil
+}
+
+// PreflightRandomQuiz checks that the derived quiz title is available before
+// Item Bank import mutates Canvas.
+func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequest) error {
+	if err := validateQuizRequest(req, false); err != nil {
+		return err
+	}
+	base, err := canvasURL(req.BaseURL, req.CourseID, "/quizzes")
+	if err != nil {
+		return err
+	}
+	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
+	defer cancel()
+	browser, cancel := chromedp.NewContext(allocator)
+	defer cancel()
+	browser, cancel = context.WithTimeout(browser, 30*time.Second)
+	defer cancel()
+	run := c.run
+	if run == nil {
+		run = chromedp.Run
+	}
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+		return fmt.Errorf("open Quizzes: %w", err)
+	}
+	return c.checkQuizCollision(browser, run, QuizTitle(req.BankName))
+}
+
+// CreateRandomQuiz drives Canvas's New Quizzes builder. Canvas does not expose
+// creation of Item Bank-backed quiz groups through its public API, so this
+// intentionally uses only visible UI controls in an authenticated browser.
+func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest) (QuizResult, error) { //nolint:gocyclo // browser UI state machine
+	if err := validateQuizRequest(req, true); err != nil {
+		return QuizResult{}, err
+	}
+	base, err := canvasURL(req.BaseURL, req.CourseID, "/quizzes")
+	if err != nil {
+		return QuizResult{}, err
+	}
+	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
+	defer cancel()
+	browser, cancel := chromedp.NewContext(allocator)
+	defer cancel()
+	browser, cancel = context.WithTimeout(browser, 120*time.Second)
+	defer cancel()
+	run := c.run
+	if run == nil {
+		run = chromedp.Run
+	}
+
+	quizTitle := QuizTitle(req.BankName)
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+		return QuizResult{}, fmt.Errorf("open Quizzes: %w", err)
+	}
+	if err := c.checkQuizCollision(browser, run, quizTitle); err != nil {
+		return QuizResult{}, err
+	}
+	steps := []struct {
+		label  string
+		action chromedp.Action
+	}{
+		{"open quiz creator", clickTextInsensitive("+ Quiz")},
+		{"wait for quiz setup", chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second))},
+		{"select New Quizzes if prompted", chromedp.Evaluate(selectNewQuizEngineJS, nil)},
+		{"wait for quiz title", chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery)},
+		{"set quiz title", chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery)},
+		{buildQuizStep, clickTextInsensitive("Build")},
+		{"wait for Item Bank action", chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second))},
+		{"open Item Bank picker", clickTextInsensitive("Add from item bank")},
+		{"select Item Bank", clickBank(req.BankID, req.BankName)},
+		{"add Item Bank to quiz", clickTextInsensitive("Add this bank to quiz")},
+		{"edit Item Bank group", clickTextInsensitive("Edit bank group")},
+		{"enable random questions", clickTextInsensitive("Randomly select questions")},
+		{"wait for question count", chromedp.WaitVisible(randomCountSelector, chromedp.ByQuery)},
+		{"set question count", chromedp.SetValue(randomCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery)},
+		{"save Item Bank group", clickTextInsensitive("Done")},
+		{"verify random group", chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second))},
+	}
+	for _, step := range steps {
+		if err := run(browser, step.action); err != nil {
+			return QuizResult{}, fmt.Errorf("%s: %w", step.label, err)
+		}
+	}
+	var quizURL string
+	var locationErr error
+	if c.quizLocation != nil {
+		quizURL, locationErr = c.quizLocation(browser)
+	} else {
+		locationErr = run(browser, chromedp.Location(&quizURL))
+	}
+	if locationErr != nil {
+		return QuizResult{}, fmt.Errorf("read quiz URL: %w", locationErr)
+	}
+	return QuizResult{QuizURL: quizURL, Title: quizTitle, QuestionCount: req.QuestionCount}, nil
+}
+
+func validateQuizRequest(req *QuizRequest, requireBankID bool) error {
+	if req == nil {
+		return fmt.Errorf("random quiz request is required")
+	}
+	if req.QuestionCount <= 0 {
+		return fmt.Errorf("random quiz question count must be positive: %d", req.QuestionCount)
+	}
+	if strings.TrimSpace(req.BankName) == "" {
+		return fmt.Errorf("random quiz Item Bank name is required")
+	}
+	if requireBankID && strings.TrimSpace(req.BankID) == "" {
+		return fmt.Errorf("random quiz Item Bank ID is required")
+	}
+	return nil
+}
+
+func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRun, title string) error {
+	var collision bool
+	var err error
+	if c.quizExists != nil {
+		collision, err = c.quizExists(ctx, title)
+	} else {
+		err = run(ctx, chromedp.Evaluate(quizExistsJS(title), &collision))
+	}
+	if err != nil {
+		return fmt.Errorf("check quiz title collision: %w", err)
+	}
+	if collision {
+		return fmt.Errorf("quiz %q already exists", title)
+	}
+	return nil
+}
+
+func canvasURL(rawBase, courseID, path string) (string, error) {
+	base, err := url.Parse(rawBase)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return "", fmt.Errorf("invalid Canvas base URL %q", rawBase)
+	}
+	base.Path = "/courses/" + url.PathEscape(courseID) + path
+	base.RawQuery = ""
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+func hasQuizSuffix(name string) bool {
+	fields := strings.Fields(name)
+	return len(fields) > 0 && strings.EqualFold(fields[len(fields)-1], "Quiz")
+}
+
+// QuizTitle derives a New Quiz title from its final Item Bank title.
+func QuizTitle(name string) string {
+	name = strings.TrimSpace(name)
+	if hasQuizSuffix(name) {
+		return name
+	}
+	return name + " Quiz"
+}
+
+func bankIDFromURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "banks" {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+const (
+	quizTitleSelector     = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
+	randomCountSelector   = `[role="dialog"] input[type="number"]`
+	bankTitleJS           = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
+	bankItemCountJS       = `(() => { const selectors = ['[data-testid*="item-bank-item"]', '[data-testid*="item-bank-question"]', '[data-testid*="question"]', '[class*="item-bank-item"]']; for (const selector of selectors) { const count = document.querySelectorAll(selector).length; if (count > 0) return count; } const match = document.body.innerText.match(/(\d+)\s+(?:questions|items)\b/i); return match ? Number(match[1]) : 0; })()`
+	selectNewQuizEngineJS = `(() => { const nodes = Array.from(document.querySelectorAll('label,button,[role="radio"]')); const engine = nodes.find(el => el.innerText.trim().toLowerCase() === 'new quizzes'); if (!engine) return false; engine.click(); const submit = Array.from(document.querySelectorAll('button')).find(el => /^(submit|continue)$/i.test(el.innerText.trim())); if (submit) submit.click(); return true; })()`
+	quizSetupReadyJS      = `Boolean(document.querySelector('input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]')) || document.body.innerText.toLowerCase().includes('new quizzes')`
+	addFromBankReadyJS    = `document.body.innerText.toLowerCase().includes('add from item bank')`
+)
+
+func bankTitleMatchesJS(title string) string {
+	return `(() => { const h = document.querySelector('h1'); return Boolean(h && h.innerText.trim() === ` + jsString(title) + `); })()`
+}
+
+func clickTextInsensitive(text string) chromedp.Action {
+	lower := strings.ToLower(text)
+	translate := "translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+	return chromedp.Click("//*[self::button or self::a or @role='button'][contains("+translate+", "+xpathString(lower)+")]", chromedp.BySearch)
+}
+
+func clickBank(bankID, bankName string) chromedp.Action {
+	return chromedp.Click("//*[self::button or self::a or @role='button'][@data-bank-id="+xpathString(bankID)+" or contains(@href, "+xpathString("/banks/"+bankID)+")][contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "+xpathString(strings.ToLower(strings.TrimSpace(bankName)))+")]", chromedp.BySearch)
+}
+
+func quizExistsJS(title string) string {
+	return `Array.from(document.querySelectorAll('a,button,[role="button"],h2,h3')).some(el => el.innerText.trim() === ` + jsString(title) + `)`
+}
+
+func randomGroupJS(bankName string, count int) string {
+	return fmt.Sprintf(`(() => { const text = document.body.innerText.toLowerCase(); return text.includes(%q) && text.includes('random') && text.includes(%q); })()`, strings.ToLower(strings.TrimSpace(bankName)), fmt.Sprintf("%d", count))
 }
 
 func clickText(text string) chromedp.Action {
