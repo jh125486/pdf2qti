@@ -93,8 +93,8 @@ func TestDistill_LargeChapterUsesCondensedTextVerbatim(t *testing.T) {
 	// Paragraphs so splitIntoChunks can pack them without a mid-paragraph hard split, and large
 	// enough (with maxDirectChars=70000) to force the condense path.
 	para := strings.Repeat("a", 500)
-	var paras []string
-	for i := 0; i < 200; i++ {
+	paras := make([]string, 0, 200)
+	for range 200 {
 		paras = append(paras, para)
 	}
 	chapterText := strings.Join(paras, "\n\n")

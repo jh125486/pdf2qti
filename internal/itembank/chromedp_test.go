@@ -1,0 +1,130 @@
+// Whitebox tests inject Chromedp's unexported runner and exercise selector helpers.
+package itembank
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/chromedp/chromedp"
+)
+
+func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table covers browser state-machine failures
+	t.Parallel()
+	tests := []struct {
+		name          string
+		failAt        int
+		existing      bool
+		findErr       error
+		onExisting    Existing
+		expectedCalls int
+		wantErr       string
+		wantURL       string
+	}{
+		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 8, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
+		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
+		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
+		{name: "find bank", failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "find Item Bank"},
+		{name: "open create dialog", failAt: 3, onExisting: ExistingAppend, expectedCalls: 3, wantErr: "open create bank dialog"},
+		{name: "bank name field", failAt: 4, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "wait for bank-name field"},
+		{name: "fill bank name", failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "fill bank name"},
+		{name: "share course", failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "share bank with course"},
+		{name: "submit create", failAt: 7, onExisting: ExistingAppend, expectedCalls: 7, wantErr: "submit create bank"},
+		{name: "return to banks", failAt: 8, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "return to Item Banks"},
+		{name: "open bank", failAt: 9, onExisting: ExistingAppend, expectedCalls: 9, wantErr: "open Item Bank"},
+		{name: "wait actions", failAt: 10, onExisting: ExistingAppend, expectedCalls: 10, wantErr: "wait for Item Bank actions"},
+		{name: "open actions", failAt: 11, onExisting: ExistingAppend, expectedCalls: 11, wantErr: "open import actions"},
+		{name: "open dialog", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import dialog"},
+		{name: "attach package", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "attach package"},
+		{name: "submit import", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "submit import"},
+		{name: "wait completion", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "wait for import completion"},
+		{name: "read location", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "read Item Bank URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			batchSizes := make([]int, 0, 16)
+			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action) error {
+				batchSizes = append(batchSizes, len(actions))
+				calls++
+				if calls == tt.failAt {
+					return errors.New("browser failed")
+				}
+				return nil
+			}, findBank: func(_ context.Context, name string) (bool, error) {
+				if name != `"Bank"` {
+					t.Fatalf("bank lookup name = %q, want %q", name, `"Bank"`)
+				}
+				return tt.existing, tt.findErr
+			}}
+			if !tt.existing && tt.findErr == nil {
+				// Exercise production Evaluate path for normal create-bank flow and its
+				// failure points; existing-bank cases use injected lookup result below.
+				importer.findBank = nil
+			}
+			if tt.wantURL != "" {
+				importer.location = func(context.Context) (string, error) { return tt.wantURL, nil }
+			}
+			result, err := importer.Import(context.Background(), &Request{
+				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
+				CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: tt.onExisting,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != tt.expectedCalls {
+				t.Fatalf("browser action batches = %d, want %d", calls, tt.expectedCalls)
+			}
+			if tt.wantURL != "" {
+				if result.BankURL != tt.wantURL {
+					t.Fatalf("Import() result = %+v, want URL %q", result, tt.wantURL)
+				}
+				if len(batchSizes) < 2 || batchSizes[len(batchSizes)-2] != 2 {
+					t.Fatalf("import submit action batch = %v, want penultimate batch size 2", batchSizes)
+				}
+			}
+		})
+	}
+}
+
+func TestChromedpImporterImport_InvalidRequest_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		req  *Request
+		want string
+	}{
+		{name: "nil", want: "request is required"},
+		{name: "invalid base URL", req: &Request{BaseURL: "://bad"}, want: "invalid Canvas base URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := (ChromedpImporter{}).Import(context.Background(), tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestXPathString_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ input, want string }{
+		{"plain", "'plain'"}, {"don't", `"don't"`}, {`say "don't"`, `concat('say "don',"'",'t"')`},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			if got := xpathString(tt.input); got != tt.want {
+				t.Fatalf("xpathString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

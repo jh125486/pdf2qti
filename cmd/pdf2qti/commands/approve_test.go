@@ -1,7 +1,9 @@
 package commands_test
 
 import (
+	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,9 +74,8 @@ func TestApproveCmdRun_Table(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// Pre-creating a directory at the QTI output path makes os.WriteFile fail with
-			// "is a directory", exercising the write-QTI-file error branch.
-			name: "write QTI file error, output path is a directory",
+			// Pre-creating a directory at package output path makes os.OpenFile fail.
+			name: "create QTI package error, output path is a directory",
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				cfgFile := filepath.Join(dir, "quiz.json")
@@ -85,7 +86,7 @@ func TestApproveCmdRun_Table(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "src01_quiz.md"), []byte(validQuizMD), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Mkdir(filepath.Join(dir, "src01.qti"), 0o750); err != nil {
+				if err := os.Mkdir(filepath.Join(dir, "src01.zip"), 0o750); err != nil {
 					t.Fatal(err)
 				}
 				return cfgFile
@@ -106,10 +107,34 @@ func TestApproveCmdRun_Table(t *testing.T) {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
 			if !tt.wantErr {
-				if _, statErr := os.Stat(filepath.Join(dir, "src01.qti")); statErr != nil {
-					t.Fatalf("expected QTI file to exist: %v", statErr)
-				}
+				assertCanvasPackage(t, filepath.Join(dir, "src01.zip"))
 			}
 		})
+	}
+}
+
+func assertCanvasPackage(t *testing.T, path string) {
+	t.Helper()
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatalf("open QTI package: %v", err)
+	}
+	defer zr.Close()
+	if len(zr.File) != 2 || zr.File[0].Name != "imsmanifest.xml" || zr.File[1].Name != "src01.xml" {
+		t.Fatalf("unexpected QTI package entries: %+v", zr.File)
+	}
+	r, err := zr.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest) == 0 {
+		t.Fatal("empty package manifest")
 	}
 }

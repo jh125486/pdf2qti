@@ -196,9 +196,13 @@ func TestMarshal_Table(t *testing.T) {
 			},
 			wantToken: []string{
 				"<?xml", "Signals Quiz", "questestinterop",
+				`xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1"`,
+				`xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"`,
+				`xsi:schemaLocation="http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1 http://www.imsglobal.org/xsd/ims_qtiasiv1p2p1.xsd"`,
 				"response_lid", "response_str", "response_num",
 				"varequal", "vargte", "varlte",
 				`respident="q1_resp"`, `case="No"`,
+				`texttype="text/html"`, "<![CDATA[Signals are synchronous by default?]]>",
 			},
 		},
 		{name: "zero assessment", buildAssmt: func(_ *testing.T) (*qti.Assessment, error) { return &qti.Assessment{}, nil }, wantToken: []string{"<?xml"}},
@@ -226,5 +230,37 @@ func TestMarshal_Table(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMarshalPreservesLaTeXInRichText(t *testing.T) {
+	t.Parallel()
+	draft := &render.QuizDraft{
+		Title: "Math",
+		MCQuestions: []render.Question{{
+			Number: 1,
+			Text:   `Solve \(x^2 = 4\).`,
+			Options: []render.Option{
+				{Text: `\(x = 2\)`, IsCorrect: true},
+				{Text: `\(x = 3\)`, IsCorrect: false},
+			},
+		}},
+	}
+	assessment, err := qti.BuildAssessment(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xmlBytes, err := qti.Marshal(assessment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`texttype="text/html"`,
+		`<![CDATA[Solve \(x^2 = 4\).]]>`,
+		`<![CDATA[\(x = 2\)]]>`,
+	} {
+		if !strings.Contains(string(xmlBytes), want) {
+			t.Fatalf("expected marshaled XML to contain %q: %s", want, xmlBytes)
+		}
 	}
 }

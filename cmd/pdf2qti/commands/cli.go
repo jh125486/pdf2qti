@@ -17,6 +17,7 @@ type CLI struct {
 	Distill     DistillCmd    `cmd:""                    help:"Distill PDF into structured context JSON."`
 	Generate    GenerateCmd   `cmd:""                    help:"Generate quiz draft from distilled context."`
 	Approve     ApproveCmd    `cmd:""                    help:"Convert approved quiz markdown draft to QTI."`
+	ImportBank  ImportBankCmd `cmd:""                    help:"Import QTI ZIP into Canvas New Quizzes Item Bank via browser UI."`
 	Validate    ValidateCmd   `cmd:""                    help:"Validate quiz markdown draft."`
 	Page        PageCmd       `cmd:""                    help:"Render HTML page from distilled context and template."`
 	Slides      SlidesCmd     `cmd:""                    help:"Generate proto-deck slide Markdown from distilled context."`

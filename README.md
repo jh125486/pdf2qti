@@ -15,7 +15,7 @@ A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LL
 - **Extracts** text from PDF documents
 - **Distills** each PDF into structured context JSON (concepts, examples, LaTeX-bearing prose) via an LLM provider — the shared input for everything below
 - **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice, Short Answer, Essay, Matching, Numerical) from that context
-- **Renders** a human-reviewable Markdown draft for editing and approval, and converts approved drafts to QTI 1.2 XML ready for Canvas import
+- **Renders** a human-reviewable Markdown draft for editing and approval, and converts approved drafts to Canvas-importable QTI 1.2 ZIP packages
 - **Builds** slide-deck Markdown from the same context and renders it into a PPTX using a template
 - **Publishes** Learning Objectives / Materials pages directly to Canvas
 
@@ -98,7 +98,7 @@ Each `source` requires at minimum an `id` and a `pdf` path. All other fields inh
 
 Each `module` requires an `id`, a `name`, and `sourceIds` (one or more `source.id` values it spans).
 
-`defaults.workflow.outDir` is where every generated artifact lands: `<id>_context.json` (`distill`), `<id>_quiz.md`/`<id>.qti` (`generate`/`approve`), and `<id>_slides.md` (`slides`). Point it wherever you want that scratch/output tree to live — e.g. `"ctx"` if you'd rather keep it out of an `out/` you use for something else.
+`defaults.workflow.outDir` is where every generated artifact lands: `<id>_context.json` (`distill`), `<id>_quiz.md`/`<id>.zip` (`generate`/`approve`), and `<id>_slides.md` (`slides`). Point it wherever you want that scratch/output tree to live — e.g. `"ctx"` if you'd rather keep it out of an `out/` you use for something else.
 
 ## Usage
 
@@ -114,7 +114,7 @@ pdf2qti [--config <file>] <command>
 PDF. Every other command reads the `<outDir>/<id>_context.json` it produces.
 
 ```
-                              ┌─→ generate → validate → approve → <id>.qti
+                              ┌─→ generate → validate → approve → <id>.zip
 pdf.pdf → distill → context.json
                               └─→ slides → pptx → <output>.pptx
 
@@ -126,7 +126,7 @@ A typical end-to-end run for one source:
 ```bash
 pdf2qti distill ch01              # ctx/ch01_context.json
 pdf2qti generate                  # ctx/ch01_quiz.md   (all sources in config)
-pdf2qti approve                   # ctx/ch01.qti
+pdf2qti approve                   # ctx/ch01.zip
 
 pdf2qti slides ch01                                    # ctx/ch01_slides.md
 pdf2qti pptx --slides=ctx/ch01_slides.md \
@@ -152,7 +152,9 @@ pdf2qti generate [--skip-approve]
 ```
 
 Requires `<outDir>/<id>_context.json` to already exist (run `distill` first — `generate` errors
-out with the exact command to run if it's missing). For each source in the config, `generate`:
+out with the exact command to run if it's missing), plus an OpenAI `generation` config and its API
+key environment variable. It fails when either is absent; it never writes placeholder questions.
+For each source in the config, `generate`:
 
 1. Loads the distilled context and calls the configured LLM once per question type (TF, MA, MC,
    SA, ES, MT, NR) using each type's configured count
@@ -174,7 +176,7 @@ Reads `<outDir>/<id>_quiz.md` for each source and reports any validation errors 
 pdf2qti approve
 ```
 
-Reads the approved `<outDir>/<id>_quiz.md` and writes a Canvas-compatible QTI 1.2 XML file to `<outDir>/<id>.qti`.
+Reads approved `<outDir>/<id>_quiz.md` and writes Canvas-compatible QTI 1.2 package `<outDir>/<id>.zip`. Package contains `imsmanifest.xml` and `assessment.xml` at ZIP root. Canvas uses draft title as imported quiz name.
 
 ### `slides` — Generate proto-deck slide Markdown from a distilled context
 

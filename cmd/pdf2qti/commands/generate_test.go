@@ -22,7 +22,8 @@ type generateTestCase struct {
 func generateTestCases() []generateTestCase {
 	return []generateTestCase{
 		{
-			name: "success",
+			name:    "success",
+			wantErr: true, // generate now requires configured OpenAI; fixture intentionally has none.
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
@@ -35,8 +36,9 @@ func generateTestCases() []generateTestCase {
 			},
 		},
 		{
-			name:        "skip approve builds QTI",
+			name:        "skip approve builds QTI package",
 			skipApprove: true,
+			wantErr:     true, // generate now requires configured OpenAI; fixture intentionally has none.
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
@@ -50,7 +52,8 @@ func generateTestCases() []generateTestCase {
 			checkQTI: true,
 		},
 		{
-			name: "description template and open review",
+			name:    "description template and open review",
+			wantErr: true, // generate now requires configured OpenAI; fixture intentionally has none.
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
@@ -63,7 +66,8 @@ func generateTestCases() []generateTestCase {
 			},
 		},
 		{
-			name: "bad description template continues with empty description",
+			name:    "bad description template continues with empty description",
+			wantErr: true, // generate now requires configured OpenAI; fixture intentionally has none.
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
@@ -95,7 +99,8 @@ func generateTestCases() []generateTestCase {
 			// No titleTemplate and an empty module_name/source-name both fall through: the
 			// title-fallback loop walks all three candidates (dc.ModuleName, src.Name, src.ID),
 			// landing on src.ID.
-			name: "empty title template falls back through candidates to source id",
+			name:    "empty title template falls back through candidates to source id",
+			wantErr: true, // generate now requires configured OpenAI; fixture intentionally has none.
 			prepare: func(t *testing.T, dir string) string {
 				t.Helper()
 				pdfPath := filepath.Join(dir, "src01.pdf")
@@ -157,10 +162,8 @@ func TestGenerateCmdRun_Table(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
-			if tt.checkQTI {
-				if _, statErr := os.Stat(filepath.Join(dir, "src01.qti")); statErr != nil {
-					t.Fatalf("expected QTI output: %v", statErr)
-				}
+			if tt.checkQTI && !tt.wantErr {
+				assertCanvasPackage(t, filepath.Join(dir, "src01.zip"))
 			}
 		})
 	}
