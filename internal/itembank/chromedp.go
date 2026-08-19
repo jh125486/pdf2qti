@@ -18,6 +18,7 @@ type ChromedpImporter struct {
 	location      func(context.Context) (string, error)
 	bankTitle     func(context.Context) (string, error)
 	bankItemCount func(context.Context) (int, error)
+	renameBank    func(context.Context, string, string) error
 	quizLocation  func(context.Context) (string, error)
 	quizExists    func(context.Context, string) (bool, error)
 }
@@ -131,6 +132,22 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if bankTitle != req.ExpectedBankName {
 			return Result{}, fmt.Errorf("imported Item Bank title = %q, want %q", bankTitle, req.ExpectedBankName)
 		}
+		// Canvas names a New Quizzes Item Bank after the imported QTI
+		// package's assessment title, discarding req.BankName even when
+		// importing into an existing, correctly-named bank. Rename it back
+		// to what was requested so --bank-name is actually honored.
+		if req.BankName != "" && bankTitle != req.BankName {
+			var renameErr error
+			if c.renameBank != nil {
+				renameErr = c.renameBank(browser, bankTitle, req.BankName)
+			} else {
+				renameErr = renameBankUI(browser, run, base.String(), bankTitle, req.BankName)
+			}
+			if renameErr != nil {
+				return Result{}, fmt.Errorf("rename Item Bank %q to %q: %w", bankTitle, req.BankName, renameErr)
+			}
+			bankTitle = req.BankName
+		}
 	}
 	itemCount := 0
 	if req.ExpectedItemCount > 0 {
@@ -138,7 +155,10 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if c.bankItemCount != nil {
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
-			countErr = run(browser, chromedp.Evaluate(bankItemCountJS, &itemCount))
+			countErr = run(browser,
+				chromedp.Poll(bankItemCountMatchesJS(req.ExpectedItemCount), nil, chromedp.WithPollingTimeout(30*time.Second)),
+				chromedp.Evaluate(bankItemCountJS, &itemCount),
+			)
 		}
 		if countErr != nil {
 			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)
@@ -270,6 +290,36 @@ func validateQuizRequest(req *QuizRequest, requireBankID bool) error {
 	return nil
 }
 
+// renameBankUI renames an Item Bank through the Banks list's "Edit bank"
+// dialog, then reopens the bank under its new title so callers land back on
+// the bank detail page they were on before the rename.
+func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newTitle string) error {
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+		return fmt.Errorf("open Item Banks: %w", err)
+	}
+	editSelector := "//button[@aria-label=" + xpathString("Edit bank "+oldTitle) + "]"
+	if err := run(ctx, chromedp.Click(editSelector, chromedp.BySearch)); err != nil {
+		return fmt.Errorf("open edit bank dialog: %w", err)
+	}
+	if err := run(ctx, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
+		return fmt.Errorf("wait for bank-name field: %w", err)
+	}
+	if err := run(ctx,
+		chromedp.Click("[role=dialog] input", chromedp.ByQuery, chromedp.NodeVisible),
+		chromedp.SetValue("[role=dialog] input", "", chromedp.ByQuery),
+		chromedp.SendKeys("[role=dialog] input", newTitle, chromedp.ByQuery),
+	); err != nil {
+		return fmt.Errorf("set bank name: %w", err)
+	}
+	if err := run(ctx, clickTextInDialog("Save Changes"), chromedp.Sleep(500*time.Millisecond)); err != nil {
+		return fmt.Errorf("save bank name: %w", err)
+	}
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery), clickText(newTitle)); err != nil {
+		return fmt.Errorf("reopen renamed Item Bank: %w", err)
+	}
+	return nil
+}
+
 func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRun, title string) error {
 	var collision bool
 	var err error
@@ -338,6 +388,10 @@ const (
 
 func bankTitleMatchesJS(title string) string {
 	return `(() => { const h = document.querySelector('h1'); return Boolean(h && h.innerText.trim() === ` + jsString(title) + `); })()`
+}
+
+func bankItemCountMatchesJS(count int) string {
+	return fmt.Sprintf("(%s) === %d", bankItemCountJS, count)
 }
 
 func clickTextInsensitive(text string) chromedp.Action {

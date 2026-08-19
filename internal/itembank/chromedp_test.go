@@ -141,6 +141,59 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 	}
 }
 
+func TestChromedpImporterImport_RenamesBankToRequestedName(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                         string
+		reqBankName, canvasTitle     string
+		renameErr                    error
+		wantErr                      string
+		wantRenameCalled             bool
+		wantOld, wantNew, wantResult string
+	}{
+		{name: "canvas renamed bank to QTI title, renamed back", reqBankName: "Module 1: Vectors and Matrices", canvasTitle: "Chapter 1 Quiz", wantRenameCalled: true, wantOld: "Chapter 1 Quiz", wantNew: "Module 1: Vectors and Matrices", wantResult: "Module 1: Vectors and Matrices"},
+		{name: "already matches, no rename needed", reqBankName: "Bank", canvasTitle: "Bank", wantResult: "Bank"},
+		{name: "rename fails", reqBankName: "Module 1: Vectors and Matrices", canvasTitle: "Chapter 1 Quiz", renameErr: errors.New("edit dialog unavailable"), wantErr: `rename Item Bank "Chapter 1 Quiz" to "Module 1: Vectors and Matrices": edit dialog unavailable`, wantRenameCalled: true, wantOld: "Chapter 1 Quiz", wantNew: "Module 1: Vectors and Matrices"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var renameCalled bool
+			var gotOld, gotNew string
+			importer := ChromedpImporter{
+				run:       func(context.Context, ...chromedp.Action) error { return nil },
+				findBank:  func(context.Context, string) (bool, error) { return true, nil },
+				bankTitle: func(context.Context) (string, error) { return tt.canvasTitle, nil },
+				renameBank: func(_ context.Context, oldTitle, newTitle string) error {
+					renameCalled = true
+					gotOld, gotNew = oldTitle, newTitle
+					return tt.renameErr
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+			}
+			result, err := importer.Import(context.Background(), &Request{
+				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7",
+				BankName: tt.reqBankName, Package: "quiz.zip", OnExisting: ExistingAppend,
+				ExpectedBankName: tt.canvasTitle,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+			}
+			if renameCalled != tt.wantRenameCalled {
+				t.Fatalf("renameBank called = %v, want %v", renameCalled, tt.wantRenameCalled)
+			}
+			if tt.wantRenameCalled && (gotOld != tt.wantOld || gotNew != tt.wantNew) {
+				t.Fatalf("renameBank(%q, %q), want (%q, %q)", gotOld, gotNew, tt.wantOld, tt.wantNew)
+			}
+			if tt.wantErr == "" && result.BankName != tt.wantResult {
+				t.Fatalf("Import() result.BankName = %q, want %q", result.BankName, tt.wantResult)
+			}
+		})
+	}
+}
+
 func TestChromedpImporterImport_InvalidRequest_Table(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
