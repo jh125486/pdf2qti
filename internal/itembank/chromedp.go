@@ -390,12 +390,20 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		{"open Item Bank picker", clickTextInsensitive("Add from item bank")},
 		{"select Item Bank", clickBank(req.BankName)},
 		{"add Item Bank to quiz", clickTextInsensitive("Add this bank to quiz")},
-		// Recorded live: there is no "Edit bank group" control. The added
-		// bank group instead exposes an "All / Random" toggle directly.
-		{"edit Item Bank group", clickTextInsensitive("All / Random")},
-		{"enable random questions", clickTextInsensitive("Randomly select questions")},
-		{"wait for question count", chromedp.WaitVisible(randomCountSelector, chromedp.ByQuery)},
-		{"set question count", chromedp.SetValue(randomCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery)},
+		// The bank group's edit control doesn't render until the panel
+		// finishes settling after the bank is added.
+		{"let bank group render", chromedp.Sleep(3 * time.Second)},
+		{"edit Item Bank group", clickEditBankGroup()},
+		{"let edit panel open", chromedp.Sleep(2 * time.Second)},
+		{"enable random questions", clickRadioLabel("Randomly select questions")},
+		// The "Number of questions" field only exists after the radio above
+		// switches the panel into random-selection mode.
+		{"let panel update after enabling random", chromedp.Sleep(500 * time.Millisecond)},
+		{"locate question count field", chromedp.Evaluate(markQuestionCountInputJS(), nil)},
+		{"set question count", chromedp.Tasks{
+			chromedp.Click(questionCountSelector, chromedp.ByQuery),
+			chromedp.SendKeys(questionCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery),
+		}},
 		{"save Item Bank group", clickTextInsensitive("Done")},
 		{"verify random group", chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second))},
 	}
@@ -529,10 +537,42 @@ func bankIDFromURL(raw string) string {
 	return ""
 }
 
+// questionCountMarkerAttr flags the "Number of questions" input once located
+// by markQuestionCountInputJS, so a subsequent chromedp.Click/SendKeys can
+// select it by a stable attribute instead of Instructure UI's dynamically
+// numbered ids (e.g. "NumberInput___1"), which aren't reproducible.
+const questionCountMarkerAttr = "data-pdf2qti-question-count"
+
+// questionCountSelector selects the input questionCountMarkerAttr flagged.
+const questionCountSelector = `input[` + questionCountMarkerAttr + `]`
+
+// markQuestionCountInputJS finds the "Number of questions" field by its
+// label text, not a selector: recorded live, this panel is not a dialog (no
+// role="dialog" wrapper) and has multiple plain input[type=text] fields
+// (source bank picker, question count, points per question), all with
+// Instructure-generated ids whose numeric suffix does not reflect visual
+// order. The label is a <span>, not a <label> element. The field itself is
+// the sole <input> inside the smallest ancestor that contains exactly one.
+func markQuestionCountInputJS() string {
+	return `(() => {
+		const span = Array.from(document.querySelectorAll('span')).find(s => s.children.length === 0 && s.textContent.trim() === 'Number of questions');
+		if (!span) return false;
+		let cur = span.parentElement;
+		for (let i = 0; i < 5 && cur; i++) {
+			const inputs = cur.querySelectorAll('input');
+			if (inputs.length === 1) {
+				inputs[0].setAttribute('` + questionCountMarkerAttr + `', '1');
+				return true;
+			}
+			cur = cur.parentElement;
+		}
+		return false;
+	})()`
+}
+
 const (
-	quizTitleSelector   = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
-	randomCountSelector = `[role="dialog"] input[type="number"]`
-	bankTitleJS         = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
+	quizTitleSelector = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
+	bankTitleJS       = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
 	// Each question card's type label reads e.g. "Multiple Choice | Question
 	// Question 18" (recorded live on the bank detail page; Canvas has no
 	// data-testid or stable class on these cards). Counting matches of that
@@ -581,6 +621,38 @@ func clickTextInsensitive(text string) chromedp.Action {
 // /banks/{id}-patterned href to match on, just plain link text.
 func clickBank(bankName string) chromedp.Action {
 	return chromedp.Click("//*[self::button or self::a or @role='button'][normalize-space()="+xpathString(strings.TrimSpace(bankName))+"]", chromedp.BySearch)
+}
+
+// clickEditBankGroup matches the per-group "Edit Bank containing questions N
+// through M." control that appears on a bank group after it's added to a
+// quiz. Recorded live: the "All / Random" button visible at the top of the
+// panel is a separate *add more content* action (adds another bank/group),
+// not this group's edit toggle — clicking it does not reach the "Randomly
+// select questions" configuration this needs. It dispatches a JS .click()
+// rather than chromedp.Click's real mouse-event dispatch: recorded live, a
+// hit-test-based click at this element's computed center silently misses it
+// (no panel opens, no error), while a direct .click() call reliably reaches
+// its handler.
+func clickEditBankGroup() chromedp.Action {
+	return chromedp.Evaluate(`(() => {
+		const target = Array.from(document.querySelectorAll('[role="button"], button')).find(e => e.textContent.trim().startsWith('Edit Bank containing questions'));
+		if (target) { target.click(); return true; }
+		return false;
+	})()`, nil)
+}
+
+// clickRadioLabel clicks the <label> whose text matches (case-insensitive),
+// via JS .click() rather than clickTextInsensitive's XPath. Instructure's
+// radio buttons render their clickable text inside a <label>, not a
+// button/a/[role=button] — the tag set clickTextInsensitive's XPath matches
+// — so it never finds these controls at all.
+func clickRadioLabel(text string) chromedp.Action {
+	lower := strings.ToLower(text)
+	return chromedp.Evaluate(`(() => {
+		const target = Array.from(document.querySelectorAll('label')).find(l => l.textContent.trim().toLowerCase().includes(`+jsString(lower)+`));
+		if (target) { target.click(); return true; }
+		return false;
+	})()`, nil)
 }
 
 func quizExistsJS(title string) string {

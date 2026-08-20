@@ -119,7 +119,7 @@ live Canvas session and is created with `0700` permissions; treat it with the
 same care as a bearer token.
 
 Recorded UNT UI flow (Aug 18 2026, updated Aug 20 2026 against live headless
-runs — see "Known gap" below for what's still unverified):
+runs):
 
 1. `/courses/{course}/banks` → `Create Bank` → `Item Bank` dialog →
    `Bank Name` → `Create Bank`.
@@ -129,14 +129,16 @@ runs — see "Known gap" below for what's still unverified):
    bank` → bank (matched by exact link text, no `data-bank-id`/`href` to key
    off) → `Add this bank to quiz`. This adds the bank as an "all questions"
    group.
-5. **Known gap:** the added group exposes an `All / Random` control, but it
-   turned out (recorded live) to be an *add more content* action, not an
-   edit toggle for the group just added — clicking it does not open the
-   "Randomly select questions" / "Number of questions" configuration this
-   tool needs. `CreateRandomQuiz` reaches this point successfully but the
-   next selector is unverified; needs a dedicated discovery pass (record
-   what actually configures an existing group's random-selection count)
-   before this step can be trusted.
+5. The visible `All / Random` control at the top of the panel is a separate
+   *add more content* action (adds another bank/group) — not this group's
+   edit toggle. The real per-group control is `Edit Bank containing
+   questions N through M.` (a `role="button"` element with a pencil icon).
+   Click it → `Randomly select questions` → `Number of questions` → `Done`.
+   The "Number of questions" field's label is a `<span>`, not a `<label>`,
+   and its Instructure-generated `id` (e.g. `NumberInput___1`) doesn't
+   reliably reflect visual/DOM order against sibling fields (points per
+   question, source bank picker), so it's located by walking up from the
+   label span to the smallest ancestor containing exactly one `<input>`.
 
 ## Browser-adapter design
 
