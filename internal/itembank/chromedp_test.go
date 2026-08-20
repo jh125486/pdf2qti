@@ -215,6 +215,127 @@ func TestChromedpImporterImport_InvalidRequest_Table(t *testing.T) {
 	}
 }
 
+func TestNewBrowserContext_RequiresProfileDirWhenHeadless(t *testing.T) {
+	t.Parallel()
+	_, _, err := newBrowserContext(context.Background(), "", "")
+	if err == nil || !strings.Contains(err.Error(), "chrome profile directory is required") {
+		t.Fatalf("newBrowserContext() error = %v, want profile-dir requirement", err)
+	}
+	ctx, cancel, err := newBrowserContext(context.Background(), "http://127.0.0.1:9222", "")
+	if err != nil {
+		t.Fatalf("newBrowserContext() with BrowserURL set = %v, want no error", err)
+	}
+	cancel()
+	if ctx == nil {
+		t.Fatal("newBrowserContext() returned nil context")
+	}
+}
+
+func TestChromedpImporterEnsureSession_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name                  string
+		loginPage             bool
+		loginPageErr          error
+		username, password    string
+		submitLoginErr        error
+		wantErr               string
+		wantSubmitLoginCalled bool
+	}{
+		{name: "already authenticated, no login attempted", loginPage: false},
+		{name: "login page detection error", loginPageErr: errors.New("evaluate failed"), wantErr: "check Canvas login state"},
+		{name: "login page but no credentials", loginPage: true, wantErr: "set CANVAS_USERNAME and CANVAS_PASSWORD"},
+		{name: "login page, credentials submitted", loginPage: true, username: "eagle", password: "hunter2", wantSubmitLoginCalled: true},
+		{name: "login submission fails", loginPage: true, username: "eagle", password: "hunter2", submitLoginErr: errors.New("invalid credentials"), wantErr: "invalid credentials", wantSubmitLoginCalled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var submitLoginCalled bool
+			var gotUser, gotPass string
+			importer := ChromedpImporter{
+				run:               func(context.Context, ...chromedp.Action) error { return nil },
+				loginPageDetected: func(context.Context) (bool, error) { return tt.loginPage, tt.loginPageErr },
+				submitLogin: func(_ context.Context, user, pass string) error {
+					submitLoginCalled = true
+					gotUser, gotPass = user, pass
+					return tt.submitLoginErr
+				},
+			}
+			err := importer.ensureSession(context.Background(), func(context.Context, ...chromedp.Action) error { return nil },
+				"https://canvas.example.edu", tt.username, tt.password)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("ensureSession() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("ensureSession() error = %v, want %q", err, tt.wantErr)
+			}
+			if submitLoginCalled != tt.wantSubmitLoginCalled {
+				t.Fatalf("submitLogin called = %v, want %v", submitLoginCalled, tt.wantSubmitLoginCalled)
+			}
+			if tt.wantSubmitLoginCalled && (gotUser != tt.username || gotPass != tt.password) {
+				t.Fatalf("submitLogin(%q, %q), want (%q, %q)", gotUser, gotPass, tt.username, tt.password)
+			}
+		})
+	}
+}
+
+func TestChromedpImporterImport_HeadlessEnsuresSession(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name             string
+		chromeProfileDir string
+		loginPage        bool
+		username         string
+		password         string
+		wantErr          string
+	}{
+		{name: "missing profile dir fails before any browser action", wantErr: "chrome profile directory is required"},
+		{name: "already authenticated profile proceeds headlessly", chromeProfileDir: "/tmp/canvas-profile"},
+		{name: "expired session logs in then proceeds", chromeProfileDir: "/tmp/canvas-profile", loginPage: true, username: "eagle", password: "hunter2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var loginChecked, loggedIn bool
+			importer := ChromedpImporter{
+				run:      func(context.Context, ...chromedp.Action) error { return nil },
+				findBank: func(context.Context, string) (bool, error) { return true, nil },
+				loginPageDetected: func(context.Context) (bool, error) {
+					loginChecked = true
+					return tt.loginPage, nil
+				},
+				submitLogin: func(context.Context, string, string) error {
+					loggedIn = true
+					return nil
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+			}
+			_, err := importer.Import(context.Background(), &Request{
+				BaseURL: "https://canvas.example.edu", ChromeProfileDir: tt.chromeProfileDir,
+				Username: tt.username, Password: tt.password,
+				CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+				}
+				if loginChecked {
+					t.Fatal("ensureSession ran despite missing profile dir")
+				}
+				return
+			}
+			if !loginChecked {
+				t.Fatal("headless Import() never checked Canvas login state")
+			}
+			if loggedIn != tt.loginPage {
+				t.Fatalf("submitLogin called = %v, want %v", loggedIn, tt.loginPage)
+			}
+		})
+	}
+}
+
 func TestXPathString_Table(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct{ input, want string }{
@@ -265,17 +386,17 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 		wantTitle     string
 		expectedCalls int
 	}{
-		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
-		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
 		{name: "invalid request", wantErr: "request is required"},
 		{name: "invalid count", count: 0, wantErr: "must be positive"},
 		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
 		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
-		{name: "set title", count: 2, failAt: 6, expectedCalls: 6, wantErr: "set quiz title"},
-		{name: "build quiz", count: 2, failAt: 7, expectedCalls: 7, wantErr: "build quiz"},
-		{name: "save group", count: 2, failAt: 16, expectedCalls: 16, wantErr: "save Item Bank group"},
-		{name: "verify group", count: 2, failAt: 17, expectedCalls: 17, wantErr: "verify random group"},
-		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 17, wantErr: "read quiz URL"},
+		{name: "set title", count: 2, failAt: 7, expectedCalls: 7, wantErr: "set quiz title"},
+		{name: "build quiz", count: 2, failAt: 8, expectedCalls: 8, wantErr: "build quiz"},
+		{name: "save group", count: 2, failAt: 18, expectedCalls: 18, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 19, expectedCalls: 19, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 19, wantErr: "read quiz URL"},
 		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
 		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
 	}

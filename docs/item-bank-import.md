@@ -34,12 +34,20 @@ for choice questions even though QTI permits omission.
 
 ## Browser command
 
-`import-bank` uses Chromedp against existing authenticated Chrome debugging
-session. It drives Canvas UI only; no private Canvas endpoints.
+`import-bank` uses Chromedp. It drives Canvas UI only; no private Canvas
+endpoints.
+
+By default it launches headless Chrome itself against a persisted profile
+directory (`--chrome-profile-dir`, default a `pdf2qti` directory under the OS
+user-config dir) — no visible window. If that profile's session has expired
+or never existed, it logs in from `CANVAS_USERNAME`/`CANVAS_PASSWORD` before
+continuing; if the session is already valid (the common case once a profile
+exists), login is skipped entirely. Set credentials via a password manager
+rather than a literal value in shell history, e.g.:
 
 ```sh
-# Start separate profile, sign into Canvas, leave Chrome running.
-open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/private/tmp/pdf2qti-canvas-profile
+export CANVAS_USERNAME=you@example.edu
+export CANVAS_PASSWORD="$(op read op://Private/Canvas/password)"
 
 pdf2qti import-bank \
   --course-id 147966 \
@@ -48,16 +56,41 @@ pdf2qti import-bank \
   --on-existing append
 ```
 
+This only works when Canvas login has no MFA step in front of it — a
+scripted credential submit cannot complete a push/TOTP/hardware-key prompt.
+If MFA is ever added, use the manual-attach escape hatch instead: launch
+Chrome yourself with a separate profile and remote debugging enabled, sign in
+by hand, and pass `--browser-url`:
+
+```sh
+open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/private/tmp/pdf2qti-canvas-profile
+
+pdf2qti import-bank --browser-url http://127.0.0.1:9222 \
+  --course-id 147966 --bank-name '2120: Chapter 1 Quiz' \
+  --package /absolute/path/ch01_qti.zip --on-existing append
+```
+
+Recorded login form (UNT, Aug 20 2026, Canvas's newer React "new_login" UI,
+not the classic `pseudonym_session_*` form): username field
+`input[data-testid="username-input"]`, password field
+`input[data-testid="password-input"]`, submit button
+`button[data-testid="login-button"]`. These are Canvas's own accessibility
+test hooks and more stable than the surrounding theming; re-verify them (in
+an incognito window, not a signed-in profile) if login automation starts
+failing on a Canvas theme update.
+
 Append `--create-random-quiz=N` to create an unpublished New Quiz after import.
 The quiz uses exactly `N` randomly selected questions from the imported bank.
 Its title is the final Item Bank title with ` Quiz` appended, unless that title
 already ends with the whole word `Quiz` (case-insensitive).
 
-`--bank-name` is the initial Canvas lookup/create name. Canvas may rename that
-bank to the QTI assessment title during import. The command intentionally
-supports those two names: it passes `--bank-name` to the importer, verifies the
-post-import bank title against the QTI title, then uses that final title for
-random-quiz collision preflight and quiz creation.
+`--bank-name` is the exact final bank name — Canvas renames a New Quizzes
+Item Bank to the imported QTI package's assessment title during import even
+when importing into an existing, correctly-named bank; the importer detects
+that mismatch and renames the bank back to `--bank-name` through the Banks
+list's "Edit bank" dialog before returning, so callers (including
+`--create-random-quiz`) can rely on `--bank-name` being the bank's actual
+final name.
 
 ```sh
 pdf2qti import-bank \
@@ -70,22 +103,34 @@ pdf2qti import-bank \
 
 Use `--dry-run` first. Default `--on-existing=fail` protects existing banks;
 `append` imports into exact matching bank. Command validates ZIP and root
-`imsmanifest.xml` before browser connection. With `--create-random-quiz`, it
-also validates the manifest-referenced assessment title and item count, rejects
-`N` greater than that count, and checks for an exact quiz-title collision before
-importing. It never publishes the quiz or overwrites an existing quiz.
+`imsmanifest.xml` before browser connection. It always validates the
+manifest-referenced assessment title and item count (needed to detect and
+correct the Canvas rename above, regardless of `--create-random-quiz`); with
+`--create-random-quiz` it additionally rejects `N` greater than that count and
+checks for an exact quiz-title collision before importing. It never publishes
+the quiz or overwrites an existing quiz. The profile directory persists a
+live Canvas session and is created with `0700` permissions; treat it with the
+same care as a bearer token.
 
-Recorded UNT UI flow (Aug 18 2026):
+Recorded UNT UI flow (Aug 18 2026, updated Aug 20 2026 against live headless
+runs — see "Known gap" below for what's still unverified):
 
 1. `/courses/{course}/banks` → `Create Bank` → `Item Bank` dialog →
    `Bank Name` → `Create Bank`.
 2. Open bank → `More Item Banking Actions` → `Import Content`.
 3. Attach ZIP, submit `Import`, wait for visible completion.
-4. Quiz builder → `Add from item bank` → bank → `Add this bank to quiz`.
-5. Edit bank group → `Randomly select questions` → `Number of questions` → `Done`.
-
-`Add this bank to quiz` initially adds all questions. Configure random count in
-bank-group editor afterward.
+4. Quiz builder (button text is `Quiz/Survey`, not `+ Quiz`) → `Add from item
+   bank` → bank (matched by exact link text, no `data-bank-id`/`href` to key
+   off) → `Add this bank to quiz`. This adds the bank as an "all questions"
+   group.
+5. **Known gap:** the added group exposes an `All / Random` control, but it
+   turned out (recorded live) to be an *add more content* action, not an
+   edit toggle for the group just added — clicking it does not open the
+   "Randomly select questions" / "Number of questions" configuration this
+   tool needs. `CreateRandomQuiz` reaches this point successfully but the
+   next selector is unverified; needs a dedicated discovery pass (record
+   what actually configures an existing group's random-selection count)
+   before this step can be trusted.
 
 ## Browser-adapter design
 
@@ -104,12 +149,23 @@ Command inputs:
 - `--on-existing=fail|append` (default `fail`)
 - `--create-random-quiz=N` (optional; create an unpublished random bank group)
 - `--dry-run`
+- `CANVAS_USERNAME` / `CANVAS_PASSWORD` env vars, or `--username`/`--password`
+  (used to log headless Chrome in when the persisted profile's session has
+  expired)
+- `--chrome-profile-dir` (persisted headless Chrome profile; default a
+  `pdf2qti` directory under the OS user-config dir)
+- `--browser-url` (manual-attach escape hatch; skips headless launch and login
+  entirely, assumes the target session is already authenticated)
 
 Do not accept `--replace` until behavior is explicitly designed: deletion could
 remove shared banks/items and is irreversible from this tool's perspective.
 
 Browser adapter state machine:
 
+0. Ensure session: navigate to Canvas; if the login form is present (stale or
+   nonexistent profile), fill it from `CANVAS_USERNAME`/`CANVAS_PASSWORD` and
+   wait for the redirect back into the app. Skipped when `--browser-url` is
+   set (manual-attach mode assumes the session is already authenticated).
 1. Open course New Quizzes entry point with authenticated browser profile.
 2. Open Item Banks; verify New Quizzes and edit permission are present.
 3. Find exact bank name. On absent: create bank. On present: obey
@@ -118,7 +174,9 @@ Browser adapter state machine:
 5. Wait for visible completed/failed state. Never treat file chooser close as
    success.
 6. Verify bank title, bank URL, and count increased by expected question count
-   when UI exposes a count. Return those facts in audit log.
+   when UI exposes a count. If Canvas renamed the bank to the QTI package's
+   title, rename it back to `--bank-name` through the Banks list's "Edit
+   bank" dialog before returning. Return those facts in audit log.
 
 All selectors belong in one adapter file. Prefer stable accessibility roles/names
 over CSS classes. Capture sanitized screenshot plus DOM excerpt on state failure;

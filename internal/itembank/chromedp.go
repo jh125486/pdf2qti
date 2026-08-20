@@ -8,43 +8,160 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 )
 
-// ChromedpImporter drives only documented Canvas UI actions in an existing,
-// authenticated Chrome instance started with remote debugging enabled.
+// ChromedpImporter drives only documented Canvas UI actions. When BrowserURL
+// is set on a request it attaches to an existing, already-authenticated
+// Chrome debugging session (manual escape hatch); otherwise it launches
+// headless Chrome against a persisted profile directory and logs in itself
+// (see ensureSession) if that profile's session is stale or nonexistent.
 type ChromedpImporter struct {
-	run           chromedpRun
-	findBank      func(context.Context, string) (bool, error)
-	location      func(context.Context) (string, error)
-	bankTitle     func(context.Context) (string, error)
-	bankItemCount func(context.Context) (int, error)
-	renameBank    func(context.Context, string, string) error
-	quizLocation  func(context.Context) (string, error)
-	quizExists    func(context.Context, string) (bool, error)
+	run               chromedpRun
+	findBank          func(context.Context, string) (bool, error)
+	location          func(context.Context) (string, error)
+	bankTitle         func(context.Context) (string, error)
+	bankItemCount     func(context.Context) (int, error)
+	renameBank        func(context.Context, string, string) error
+	quizLocation      func(context.Context) (string, error)
+	quizExists        func(context.Context, string) (bool, error)
+	loginPageDetected func(context.Context) (bool, error)
+	submitLogin       func(context.Context, string, string) error
 }
 
 type chromedpRun func(context.Context, ...chromedp.Action) error
 
 const buildQuizStep = "build quiz"
 
-func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, error) { //nolint:gocyclo // browser UI state machine
+// runResilient retries action a few times if it fails with a CDP error
+// indicating the execution context was torn down mid-evaluate by a
+// navigation the previous action triggered — a timing race, not a selector
+// or logic bug, and a fixed pre-emptive sleep before the next action isn't
+// reliably long enough. Any other error (including everything unit tests
+// inject) returns immediately on the first attempt, so this is a no-op
+// outside that one specific race.
+func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action) error {
+	var lastErr error
+	for range 4 {
+		lastErr = run(ctx, action)
+		if lastErr == nil {
+			return nil
+		}
+		msg := lastErr.Error()
+		if !strings.Contains(msg, "context with specified id") && !strings.Contains(msg, "navigated or closed") {
+			return lastErr
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return lastErr
+}
+
+// newBrowserContext creates a chromedp browser context. When browserURL is
+// set it attaches to that existing debugging session (manual escape hatch,
+// assumed already authenticated). Otherwise it launches headless Chrome
+// against profileDir, a persisted profile directory: Canvas session cookies
+// saved there by a prior successful login carry over, so most runs need no
+// login at all.
+func newBrowserContext(ctx context.Context, browserURL, profileDir string) (context.Context, context.CancelFunc, error) {
+	var allocCtx context.Context
+	var allocCancel context.CancelFunc
+	if browserURL != "" {
+		allocCtx, allocCancel = chromedp.NewRemoteAllocator(ctx, browserURL)
+	} else {
+		if strings.TrimSpace(profileDir) == "" {
+			return nil, nil, fmt.Errorf("chrome profile directory is required for headless Canvas automation")
+		}
+		opts := append(append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...),
+			chromedp.UserDataDir(profileDir),
+			chromedp.Flag("headless", "new"),
+			// Headless Chrome's default viewport is small enough to trip
+			// Canvas's responsive/mobile layout, which hides desktop
+			// controls (e.g. "Create Bank") behind a collapsed menu the
+			// desktop-oriented selectors in this file don't look for.
+			chromedp.WindowSize(1440, 1024),
+		)
+		allocCtx, allocCancel = chromedp.NewExecAllocator(ctx, opts...)
+	}
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+	return browserCtx, func() {
+		browserCancel()
+		allocCancel()
+	}, nil
+}
+
+// ensureSession makes sure the browser is authenticated with Canvas before
+// any UI automation runs. It navigates to base and, only if Canvas presents
+// its login form (a stale or nonexistent headless-profile session), fills it
+// from username/password and waits for the redirect back into the app. It is
+// a no-op once the profile's session is valid, so most invocations pay only
+// the cost of the initial navigate+check.
+func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, base, username, password string) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if err := run(ctx, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+		return fmt.Errorf("open Canvas: %w", err)
+	}
+	var loginPage bool
+	var checkErr error
+	if c.loginPageDetected != nil {
+		loginPage, checkErr = c.loginPageDetected(ctx)
+	} else {
+		checkErr = run(ctx, chromedp.Evaluate(loginPageDetectedJS, &loginPage))
+	}
+	if checkErr != nil {
+		return fmt.Errorf("check Canvas login state: %w", checkErr)
+	}
+	if !loginPage {
+		return nil
+	}
+	if username == "" || password == "" {
+		return fmt.Errorf("canvas session expired or missing; set CANVAS_USERNAME and CANVAS_PASSWORD to log in automatically")
+	}
+	if c.submitLogin != nil {
+		return c.submitLogin(ctx, username, password)
+	}
+	if err := run(ctx,
+		chromedp.WaitVisible(usernameSelector, chromedp.ByQuery),
+		chromedp.SendKeys(usernameSelector, username, chromedp.ByQuery),
+		chromedp.SendKeys(passwordSelector, password, chromedp.ByQuery),
+		chromedp.Click(loginButtonSelector, chromedp.ByQuery),
+		// Submitting triggers a real navigation (often through an SSO
+		// redirect chain); evaluating JS in the same instant the execution
+		// context is torn down for that navigation intermittently fails
+		// with a CDP "target navigated or closed" error. Let the new
+		// document settle and become ready before polling its state.
+		chromedp.Sleep(2*time.Second),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+	); err != nil {
+		return fmt.Errorf("submit Canvas login: %w", err)
+	}
+	if err := runResilient(ctx, run, chromedp.Poll(loginSucceededJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+		return fmt.Errorf("log in to Canvas (check CANVAS_USERNAME / CANVAS_PASSWORD): %w", err)
+	}
+	return nil
+}
+
+func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, error) { //nolint:gocyclo,gocritic // browser UI state machine; ChromedpImporter passed by value throughout this file
 	if req == nil {
 		return Result{}, fmt.Errorf("item bank import request is required")
 	}
-	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
+	base, err := url.Parse(req.BaseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return Result{}, fmt.Errorf("invalid Canvas base URL %q", req.BaseURL)
+	}
+	browser, cancel, err := newBrowserContext(ctx, req.BrowserURL, req.ChromeProfileDir)
+	if err != nil {
+		return Result{}, err
+	}
 	defer cancel()
-	browser, cancel := chromedp.NewContext(allocator)
-	defer cancel()
-	browser, cancel = context.WithTimeout(browser, 90*time.Second)
-	defer cancel()
+	browser, workCancel := context.WithTimeout(browser, 150*time.Second)
+	defer workCancel()
 	run := c.run
 	if run == nil {
 		run = chromedp.Run
 	}
-
-	base, err := url.Parse(req.BaseURL)
-	if err != nil || base.Scheme == "" || base.Host == "" {
-		return Result{}, fmt.Errorf("invalid Canvas base URL %q", req.BaseURL)
+	if req.BrowserURL == "" {
+		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
+			return Result{}, err
+		}
 	}
 	base.Path = "/courses/" + url.PathEscape(req.CourseID) + "/banks"
 	base.RawQuery = ""
@@ -182,7 +299,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 
 // PreflightRandomQuiz checks that the derived quiz title is available before
 // Item Bank import mutates Canvas.
-func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequest) error {
+func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequest) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	if err := validateQuizRequest(req, false); err != nil {
 		return err
 	}
@@ -190,15 +307,21 @@ func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequ
 	if err != nil {
 		return err
 	}
-	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
+	browser, cancel, err := newBrowserContext(ctx, req.BrowserURL, req.ChromeProfileDir)
+	if err != nil {
+		return err
+	}
 	defer cancel()
-	browser, cancel := chromedp.NewContext(allocator)
-	defer cancel()
-	browser, cancel = context.WithTimeout(browser, 30*time.Second)
-	defer cancel()
+	browser, workCancel := context.WithTimeout(browser, 90*time.Second)
+	defer workCancel()
 	run := c.run
 	if run == nil {
 		run = chromedp.Run
+	}
+	if req.BrowserURL == "" {
+		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
+			return err
+		}
 	}
 	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("open Quizzes: %w", err)
@@ -209,7 +332,7 @@ func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequ
 // CreateRandomQuiz drives Canvas's New Quizzes builder. Canvas does not expose
 // creation of Item Bank-backed quiz groups through its public API, so this
 // intentionally uses only visible UI controls in an authenticated browser.
-func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest) (QuizResult, error) { //nolint:gocyclo // browser UI state machine
+func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest) (QuizResult, error) { //nolint:gocyclo,gocritic // browser UI state machine; ChromedpImporter passed by value throughout this file
 	if err := validateQuizRequest(req, true); err != nil {
 		return QuizResult{}, err
 	}
@@ -217,15 +340,21 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	if err != nil {
 		return QuizResult{}, err
 	}
-	allocator, cancel := chromedp.NewRemoteAllocator(ctx, req.BrowserURL)
+	browser, cancel, err := newBrowserContext(ctx, req.BrowserURL, req.ChromeProfileDir)
+	if err != nil {
+		return QuizResult{}, err
+	}
 	defer cancel()
-	browser, cancel := chromedp.NewContext(allocator)
-	defer cancel()
-	browser, cancel = context.WithTimeout(browser, 120*time.Second)
-	defer cancel()
+	browser, workCancel := context.WithTimeout(browser, 180*time.Second)
+	defer workCancel()
 	run := c.run
 	if run == nil {
 		run = chromedp.Run
+	}
+	if req.BrowserURL == "" {
+		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
+			return QuizResult{}, err
+		}
 	}
 
 	quizTitle := QuizTitle(req.BankName)
@@ -239,17 +368,30 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		label  string
 		action chromedp.Action
 	}{
-		{"open quiz creator", clickTextInsensitive("+ Quiz")},
+		// The visible "+" is a separate icon, not part of the button's
+		// textContent (recorded live: the actual text is "Quiz/Survey").
+		{"open quiz creator", clickTextInsensitive("Quiz/Survey")},
+		// Clicking navigates to the quiz builder; evaluating JS in the same
+		// instant the execution context is torn down for that navigation
+		// intermittently fails with a CDP "context not found" error. Let the
+		// new document settle before polling its state (same race as the
+		// Canvas login submit in ensureSession).
+		{"let quiz builder navigation settle", chromedp.Sleep(2 * time.Second)},
 		{"wait for quiz setup", chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second))},
 		{"select New Quizzes if prompted", chromedp.Evaluate(selectNewQuizEngineJS, nil)},
 		{"wait for quiz title", chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery)},
 		{"set quiz title", chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery)},
 		{buildQuizStep, clickTextInsensitive("Build")},
+		// Same navigation race as above: "Build" navigates to the quiz's
+		// build page.
+		{"let quiz build navigation settle", chromedp.Sleep(2 * time.Second)},
 		{"wait for Item Bank action", chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second))},
 		{"open Item Bank picker", clickTextInsensitive("Add from item bank")},
-		{"select Item Bank", clickBank(req.BankID, req.BankName)},
+		{"select Item Bank", clickBank(req.BankName)},
 		{"add Item Bank to quiz", clickTextInsensitive("Add this bank to quiz")},
-		{"edit Item Bank group", clickTextInsensitive("Edit bank group")},
+		// Recorded live: there is no "Edit bank group" control. The added
+		// bank group instead exposes an "All / Random" toggle directly.
+		{"edit Item Bank group", clickTextInsensitive("All / Random")},
 		{"enable random questions", clickTextInsensitive("Randomly select questions")},
 		{"wait for question count", chromedp.WaitVisible(randomCountSelector, chromedp.ByQuery)},
 		{"set question count", chromedp.SetValue(randomCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery)},
@@ -257,7 +399,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		{"verify random group", chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second))},
 	}
 	for _, step := range steps {
-		if err := run(browser, step.action); err != nil {
+		if err := runResilient(browser, run, step.action); err != nil {
 			return QuizResult{}, fmt.Errorf("%s: %w", step.label, err)
 		}
 	}
@@ -297,17 +439,24 @@ func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newT
 	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
 		return fmt.Errorf("open Item Banks: %w", err)
 	}
-	editSelector := "//button[@aria-label=" + xpathString("Edit bank "+oldTitle) + "]"
-	if err := run(ctx, chromedp.Click(editSelector, chromedp.BySearch)); err != nil {
+	// The accessible name ("Edit bank {title}") comes from a visually-hidden
+	// text node inside the button, not a literal aria-label attribute, so
+	// this matches on text content like the rest of this file's helpers do.
+	if err := run(ctx, clickText("Edit bank "+oldTitle)); err != nil {
 		return fmt.Errorf("open edit bank dialog: %w", err)
 	}
 	if err := run(ctx, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
 		return fmt.Errorf("wait for bank-name field: %w", err)
 	}
+	// chromedp.Clear sets the DOM value directly, which this React-controlled
+	// input ignores (its own onChange-tracked state is untouched, so a
+	// following SendKeys appends to the old title instead of replacing it).
+	// Deterministically move to the end and backspace the known old title
+	// length instead, then type: real key events React's handlers see.
+	clearOldTitle := strings.Repeat(kb.Backspace, len(oldTitle))
 	if err := run(ctx,
-		chromedp.Click("[role=dialog] input", chromedp.ByQuery, chromedp.NodeVisible),
-		chromedp.SetValue("[role=dialog] input", "", chromedp.ByQuery),
-		chromedp.SendKeys("[role=dialog] input", newTitle, chromedp.ByQuery),
+		chromedp.Click("[role=dialog] input", chromedp.ByQuery),
+		chromedp.SendKeys("[role=dialog] input", kb.End+clearOldTitle+newTitle, chromedp.ByQuery),
 	); err != nil {
 		return fmt.Errorf("set bank name: %w", err)
 	}
@@ -320,7 +469,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newT
 	return nil
 }
 
-func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRun, title string) error {
+func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRun, title string) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var collision bool
 	var err error
 	if c.quizExists != nil {
@@ -377,13 +526,36 @@ func bankIDFromURL(raw string) string {
 }
 
 const (
-	quizTitleSelector     = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
-	randomCountSelector   = `[role="dialog"] input[type="number"]`
-	bankTitleJS           = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
-	bankItemCountJS       = `(() => { const selectors = ['[data-testid*="item-bank-item"]', '[data-testid*="item-bank-question"]', '[data-testid*="question"]', '[class*="item-bank-item"]']; for (const selector of selectors) { const count = document.querySelectorAll(selector).length; if (count > 0) return count; } const match = document.body.innerText.match(/(\d+)\s+(?:questions|items)\b/i); return match ? Number(match[1]) : 0; })()`
+	quizTitleSelector   = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
+	randomCountSelector = `[role="dialog"] input[type="number"]`
+	bankTitleJS         = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
+	// Each question card's type label reads e.g. "Multiple Choice | Question
+	// Question 18" (recorded live on the bank detail page; Canvas has no
+	// data-testid or stable class on these cards). Counting matches of that
+	// repeated "Question Question N" fragment in the page's rendered text is
+	// more reliable than any single selector, since the question list is
+	// virtualized and not every card selector matches every render.
+	bankItemCountJS       = `(document.body.innerText.match(/Question Question \d+/g) || []).length`
 	selectNewQuizEngineJS = `(() => { const nodes = Array.from(document.querySelectorAll('label,button,[role="radio"]')); const engine = nodes.find(el => el.innerText.trim().toLowerCase() === 'new quizzes'); if (!engine) return false; engine.click(); const submit = Array.from(document.querySelectorAll('button')).find(el => /^(submit|continue)$/i.test(el.innerText.trim())); if (submit) submit.click(); return true; })()`
 	quizSetupReadyJS      = `Boolean(document.querySelector('input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]')) || document.body.innerText.toLowerCase().includes('new quizzes')`
 	addFromBankReadyJS    = `document.body.innerText.toLowerCase().includes('add from item bank')`
+
+	// Recorded live against UNT's Canvas instance (unt.instructure.com), which
+	// can present either of two different login forms depending on how the
+	// session got there: navigating straight to /login/canvas renders
+	// Canvas's own React "new_login" UI (data-testid attributes, Canvas's own
+	// test hooks); navigating to a protected course URL while unauthenticated
+	// instead redirects through UNT's actual Shibboleth SSO gateway
+	// (sso.unt.edu), a plain server-rendered form with no data-testid at all.
+	// Both happen to use the same plain #username/#password ids for their
+	// fields, so selecting on those ids (rather than data-testid, which only
+	// one of the two forms has) works across both.
+	usernameSelector    = `#username`
+	passwordSelector    = `#password`
+	loginButtonSelector = `form button[type="submit"]`
+
+	loginPageDetectedJS = `Boolean(document.querySelector('#username'))`
+	loginSucceededJS    = `!document.querySelector('#username')`
 )
 
 func bankTitleMatchesJS(title string) string {
@@ -400,8 +572,11 @@ func clickTextInsensitive(text string) chromedp.Action {
 	return chromedp.Click("//*[self::button or self::a or @role='button'][contains("+translate+", "+xpathString(lower)+")]", chromedp.BySearch)
 }
 
-func clickBank(bankID, bankName string) chromedp.Action {
-	return chromedp.Click("//*[self::button or self::a or @role='button'][@data-bank-id="+xpathString(bankID)+" or contains(@href, "+xpathString("/banks/"+bankID)+")][contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "+xpathString(strings.ToLower(strings.TrimSpace(bankName)))+")]", chromedp.BySearch)
+// clickBank matches an Item Bank entry in the "Add from item bank" picker by
+// its exact name text. Recorded live: entries there carry no data-bank-id or
+// /banks/{id}-patterned href to match on, just plain link text.
+func clickBank(bankName string) chromedp.Action {
+	return chromedp.Click("//*[self::button or self::a or @role='button'][normalize-space()="+xpathString(strings.TrimSpace(bankName))+"]", chromedp.BySearch)
 }
 
 func quizExistsJS(title string) string {

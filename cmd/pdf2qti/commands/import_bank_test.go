@@ -229,6 +229,48 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 	}
 }
 
+func TestImportBankCmdRun_HeadlessProfileAndCredentials(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quiz.zip")
+	writeQTIPackage(t, path, "Bank", 3, "imsmanifest.xml")
+	profileDir := filepath.Join(dir, "chrome-profile")
+
+	fake := &fakeItemBankImporter{result: itembank.Result{
+		BankURL: "https://canvas/banks/1", BankID: "1", BankName: "Bank", QuestionCount: 3,
+	}}
+	cmd := &ImportBankCmd{
+		CourseID: "7", BankName: "Bank", Package: path,
+		BaseURL: "https://canvas.example.edu", ChromeProfileDir: profileDir,
+		Username: "eagle", Password: "hunter2", OnExisting: "append",
+		importer: fake,
+	}
+	if err := cmd.Run(context.Background(), &CLI{}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if fake.got == nil {
+		t.Fatal("Import() request = nil")
+	}
+	if fake.got.BrowserURL != "" || fake.got.ChromeProfileDir != profileDir ||
+		fake.got.Username != "eagle" || fake.got.Password != "hunter2" {
+		t.Fatalf("Import() request = %+v", fake.got)
+	}
+	if info, err := os.Stat(profileDir); err != nil || !info.IsDir() {
+		t.Fatalf("Chrome profile directory not created: stat err = %v", err)
+	}
+}
+
+func TestDefaultChromeProfileDir(t *testing.T) {
+	t.Parallel()
+	dir, err := defaultChromeProfileDir()
+	if err != nil {
+		t.Fatalf("defaultChromeProfileDir() error = %v", err)
+	}
+	if !strings.HasSuffix(dir, filepath.Join("pdf2qti", "chrome-profile")) {
+		t.Fatalf("defaultChromeProfileDir() = %q, want suffix %q", dir, filepath.Join("pdf2qti", "chrome-profile"))
+	}
+}
+
 func TestInspectQTIPackage_Table(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
