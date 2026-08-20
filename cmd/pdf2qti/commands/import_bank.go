@@ -15,17 +15,31 @@ import (
 )
 
 type ImportBankCmd struct {
-	CourseID         string `help:"Canvas course ID."                                                                   required:""`
-	BankName         string `help:"Exact Item Bank name."                                                               required:""`
-	Package          string `help:"QTI ZIP package."                                                                    required:""                                       type:"path"`
-	BaseURL          string `default:"https://unt.instructure.com"                                                      help:"Canvas base URL."`
-	BrowserURL       string `default:"http://127.0.0.1:9222"                                                            help:"Authenticated Chrome remote-debugging URL."`
-	OnExisting       string `default:"fail"                                                                             enum:"fail,append"                                help:"Existing bank behavior."`
+	CourseID         string `help:"Canvas course ID."                                                                                                 required:""`
+	BankName         string `help:"Exact Item Bank name."                                                                                             required:""`
+	Package          string `help:"QTI ZIP package."                                                                                                  required:""                                                                                                     type:"path"`
+	BaseURL          string `default:"https://unt.instructure.com"                                                                                    help:"Canvas base URL."`
+	Username         string `env:"CANVAS_USERNAME"                                                                                                    help:"Canvas login username, used to log in headless Chrome if the persisted session has expired."`
+	Password         string `env:"CANVAS_PASSWORD"                                                                                                    help:"Canvas login password, used to log in headless Chrome if the persisted session has expired."`
+	ChromeProfileDir string `env:"PDF2QTI_CHROME_PROFILE_DIR"                                                                                         help:"Persisted headless Chrome profile directory (default: a pdf2qti directory under the OS user-config dir)."`
+	BrowserURL       string `help:"Attach to an existing Chrome remote-debugging session instead of launching headless Chrome (manual escape hatch)."`
+	OnExisting       string `default:"fail"                                                                                                           enum:"fail,append"                                                                                              help:"Existing bank behavior."`
 	DryRun           bool   `help:"Validate package and report action without browser changes."`
 	CreateRandomQuiz int    `help:"Create a New Quiz selecting this many random questions from the imported Item Bank."`
 
 	importer    itembank.Importer
 	quizCreator itembank.RandomQuizCreator
+}
+
+// defaultChromeProfileDir is where headless Chrome's Canvas session persists
+// across runs when --chrome-profile-dir isn't set, so most invocations need
+// no login at all.
+func defaultChromeProfileDir() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve default Chrome profile directory: %w", err)
+	}
+	return filepath.Join(configDir, "pdf2qti", "chrome-profile"), nil
 }
 
 func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocyclo // validates and coordinates optional browser workflows
@@ -55,12 +69,34 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 		}
 		return nil
 	}
+	profileDir := c.ChromeProfileDir
+	if c.BrowserURL == "" && profileDir == "" {
+		var err error
+		profileDir, err = defaultChromeProfileDir()
+		if err != nil {
+			return err
+		}
+	}
+	if c.BrowserURL == "" {
+		// The profile directory persists a live Canvas session; restrict it to
+		// the current user, matching the same care given to bearer tokens.
+		// MkdirAll's mode only applies when it creates the directory, so a
+		// pre-existing directory (e.g. left group/world-readable by another
+		// tool) needs its permissions tightened explicitly too.
+		if err := os.MkdirAll(profileDir, 0o700); err != nil {
+			return fmt.Errorf("create Chrome profile directory %q: %w", profileDir, err)
+		}
+		if err := os.Chmod(profileDir, 0o700); err != nil { //nolint:gosec // 0700 is correct for a directory: execute bit required to traverse it, not a permissiveness bug
+			return fmt.Errorf("restrict Chrome profile directory %q to the current user: %w", profileDir, err)
+		}
+	}
 	creator := c.quizCreator
 	if creator == nil {
 		creator = itembank.ChromedpImporter{}
 	}
 	quizRequest := &itembank.QuizRequest{
-		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, CourseID: c.CourseID,
+		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, ChromeProfileDir: profileDir,
+		Username: c.Username, Password: c.Password, CourseID: c.CourseID,
 		BankName: c.BankName, QuestionCount: c.CreateRandomQuiz,
 	}
 	if c.CreateRandomQuiz > 0 {
@@ -73,7 +109,8 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 		importer = itembank.ChromedpImporter{}
 	}
 	result, err := importer.Import(ctx, &itembank.Request{
-		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, CourseID: c.CourseID,
+		BaseURL: c.BaseURL, BrowserURL: c.BrowserURL, ChromeProfileDir: profileDir,
+		Username: c.Username, Password: c.Password, CourseID: c.CourseID,
 		BankName: c.BankName, Package: c.Package, ExpectedBankName: packageInfo.Title,
 		ExpectedItemCount: packageInfo.ItemCount,
 		OnExisting:        itembank.Existing(c.OnExisting),
