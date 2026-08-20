@@ -80,8 +80,14 @@ func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocycl
 	if c.BrowserURL == "" {
 		// The profile directory persists a live Canvas session; restrict it to
 		// the current user, matching the same care given to bearer tokens.
+		// MkdirAll's mode only applies when it creates the directory, so a
+		// pre-existing directory (e.g. left group/world-readable by another
+		// tool) needs its permissions tightened explicitly too.
 		if err := os.MkdirAll(profileDir, 0o700); err != nil {
 			return fmt.Errorf("create Chrome profile directory %q: %w", profileDir, err)
+		}
+		if err := os.Chmod(profileDir, 0o700); err != nil { //nolint:gosec // 0700 is correct for a directory: execute bit required to traverse it, not a permissiveness bug
+			return fmt.Errorf("restrict Chrome profile directory %q to the current user: %w", profileDir, err)
 		}
 	}
 	creator := c.quizCreator

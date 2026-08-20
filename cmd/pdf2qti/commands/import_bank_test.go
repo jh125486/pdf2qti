@@ -169,7 +169,7 @@ func TestImportBankCmdRun_Table(t *testing.T) { //nolint:gocyclo // table covers
 				OnExisting: "append", DryRun: tt.dryRun, CreateRandomQuiz: tt.quizCount,
 				importer: fake, quizCreator: quiz,
 			}
-			err := cmd.Run(context.Background(), &CLI{})
+			err := cmd.Run(t.Context(), &CLI{})
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("Run() error = %v", err)
 			}
@@ -245,7 +245,7 @@ func TestImportBankCmdRun_HeadlessProfileAndCredentials(t *testing.T) {
 		Username: "eagle", Password: "hunter2", OnExisting: "append",
 		importer: fake,
 	}
-	if err := cmd.Run(context.Background(), &CLI{}); err != nil {
+	if err := cmd.Run(t.Context(), &CLI{}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if fake.got == nil {
@@ -268,6 +268,60 @@ func TestDefaultChromeProfileDir(t *testing.T) {
 	}
 	if !strings.HasSuffix(dir, filepath.Join("pdf2qti", "chrome-profile")) {
 		t.Fatalf("defaultChromeProfileDir() = %q, want suffix %q", dir, filepath.Join("pdf2qti", "chrome-profile"))
+	}
+}
+
+func TestDefaultChromeProfileDir_ResolveError(t *testing.T) {
+	// Not t.Parallel(): mutates the process-wide HOME env var.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if _, err := defaultChromeProfileDir(); err == nil {
+		t.Fatal("defaultChromeProfileDir() error = nil, want resolve error with no HOME set")
+	}
+}
+
+func TestImportBankCmdRun_DefaultProfileDirResolveError(t *testing.T) {
+	// Not t.Parallel(): mutates the process-wide HOME env var.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quiz.zip")
+	writeQTIPackage(t, path, "Bank", 3, "imsmanifest.xml")
+
+	cmd := &ImportBankCmd{
+		CourseID: "7", BankName: "Bank", Package: path,
+		BaseURL: "https://canvas.example.edu", OnExisting: "append",
+		importer: &fakeItemBankImporter{},
+	}
+	err := cmd.Run(t.Context(), &CLI{})
+	if err == nil || !strings.Contains(err.Error(), "resolve default Chrome profile directory") {
+		t.Fatalf("Run() error = %v, want default-profile-dir resolution failure", err)
+	}
+}
+
+func TestImportBankCmdRun_ChromeProfileDirErrors(t *testing.T) {
+	// Not t.Parallel(): TestDefaultChromeProfileDir_ResolveError-style env
+	// mutation isn't needed here, but MkdirAll failure needs an isolated dir.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quiz.zip")
+	writeQTIPackage(t, path, "Bank", 5, "imsmanifest.xml")
+
+	// A file where the profile directory should be makes MkdirAll fail.
+	blockedProfileDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockedProfileDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeItemBankImporter{result: itembank.Result{
+		BankURL: "https://canvas/banks/1", BankID: "1", BankName: "Bank", QuestionCount: 3,
+	}}
+	cmd := &ImportBankCmd{
+		CourseID: "7", BankName: "Bank", Package: path,
+		BaseURL: "https://canvas.example.edu", ChromeProfileDir: blockedProfileDir,
+		OnExisting: "append", importer: fake,
+	}
+	err := cmd.Run(t.Context(), &CLI{})
+	if err == nil || !strings.Contains(err.Error(), "create Chrome profile directory") {
+		t.Fatalf("Run() error = %v, want Chrome profile directory creation failure", err)
 	}
 }
 

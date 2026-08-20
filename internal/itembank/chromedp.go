@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
@@ -453,7 +454,10 @@ func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newT
 	// following SendKeys appends to the old title instead of replacing it).
 	// Deterministically move to the end and backspace the known old title
 	// length instead, then type: real key events React's handlers see.
-	clearOldTitle := strings.Repeat(kb.Backspace, len(oldTitle))
+	// One Backspace per character, not per byte: a byte count would send too
+	// few (or too many, when it also overcounts) key events for a
+	// non-ASCII title and leave stale characters behind.
+	clearOldTitle := strings.Repeat(kb.Backspace, utf8.RuneCountInString(oldTitle))
 	if err := run(ctx,
 		chromedp.Click("[role=dialog] input", chromedp.ByQuery),
 		chromedp.SendKeys("[role=dialog] input", kb.End+clearOldTitle+newTitle, chromedp.ByQuery),

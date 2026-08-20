@@ -70,14 +70,20 @@ pdf2qti import-bank --browser-url http://127.0.0.1:9222 \
   --package /absolute/path/ch01_qti.zip --on-existing append
 ```
 
-Recorded login form (UNT, Aug 20 2026, Canvas's newer React "new_login" UI,
-not the classic `pseudonym_session_*` form): username field
-`input[data-testid="username-input"]`, password field
-`input[data-testid="password-input"]`, submit button
-`button[data-testid="login-button"]`. These are Canvas's own accessibility
-test hooks and more stable than the surrounding theming; re-verify them (in
-an incognito window, not a signed-in profile) if login automation starts
-failing on a Canvas theme update.
+Recorded login forms (UNT, Aug 20 2026) — Canvas can present either
+depending on how the session got there. Navigating straight to
+`/login/canvas` renders Canvas's own React "new_login" UI (not the classic
+`pseudonym_session_*` form), which has `data-testid` accessibility hooks:
+`input[data-testid="username-input"]`, `input[data-testid="password-input"]`,
+`button[data-testid="login-button"]`. Navigating to a protected course URL
+while unauthenticated instead redirects through UNT's actual Shibboleth SSO
+gateway (`sso.unt.edu`), a plain server-rendered form with no `data-testid`
+at all. Both forms happen to use the same plain `#username`/`#password` ids
+for their fields, so the implementation selects on those ids rather than
+`data-testid` (which only one of the two forms has) — see the constants and
+comment above `usernameSelector` in `internal/itembank/chromedp.go`.
+Re-verify live (in an incognito window, not a signed-in profile) if login
+automation starts failing on a Canvas theme update.
 
 Append `--create-random-quiz=N` to create an unpublished New Quiz after import.
 The quiz uses exactly `N` randomly selected questions from the imported bank.
