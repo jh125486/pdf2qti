@@ -5,7 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html"
-	"regexp"
+	"strings"
 
 	"github.com/jh125486/pdf2qti/internal/render"
 )
@@ -239,9 +239,6 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 	return a, nil
 }
 
-// codeSpanRe matches markdown backtick code spans, e.g. `create_vector`.
-var codeSpanRe = regexp.MustCompile("`([^`]+)`")
-
 // wrapCodeSpans converts markdown backtick code spans into <code> tags.
 // MathJax's default skipHtmlTags config excludes <code>/<pre>, so this keeps
 // code identifiers (e.g. create_vector) out of its LaTeX subscript parsing
@@ -249,11 +246,64 @@ var codeSpanRe = regexp.MustCompile("`([^`]+)`")
 // backticks through as literal text/html left them exposed to it (recorded
 // live: an underscored identifier immediately before a \(...\) span got
 // swept into the math and rendered as a garbled subscript expression).
+//
+// Follows CommonMark's delimiter-run rule rather than assuming every span
+// is exactly one backtick wide: a span opens with a run of N backticks and
+// closes at the next run of exactly N backticks, so content containing a
+// literal backtick can use a longer run (e.g. ``foo`bar``) without breaking
+// the match.
 func wrapCodeSpans(text string) string {
-	return codeSpanRe.ReplaceAllStringFunc(text, func(span string) string {
-		inner := span[1 : len(span)-1]
-		return "<code>" + html.EscapeString(inner) + "</code>"
-	})
+	var buf strings.Builder
+	n := len(text)
+	for i := 0; i < n; {
+		if text[i] != '`' {
+			buf.WriteByte(text[i])
+			i++
+			continue
+		}
+		openStart := i
+		for i < n && text[i] == '`' {
+			i++
+		}
+		openLen := i - openStart
+		closeStart, closeEnd := -1, -1
+		for j := i; j < n; {
+			if text[j] != '`' {
+				j++
+				continue
+			}
+			runStart := j
+			for j < n && text[j] == '`' {
+				j++
+			}
+			if j-runStart == openLen {
+				closeStart, closeEnd = runStart, j
+				break
+			}
+		}
+		if closeStart == -1 {
+			// No matching close: the backticks aren't a code span, emit
+			// them as literal text.
+			buf.WriteString(text[openStart:i])
+			continue
+		}
+		buf.WriteString("<code>")
+		buf.WriteString(html.EscapeString(trimCodeSpanPadding(text[i:closeStart])))
+		buf.WriteString("</code>")
+		i = closeEnd
+	}
+	return buf.String()
+}
+
+// trimCodeSpanPadding applies CommonMark's code-span whitespace rule: if the
+// content begins and ends with a space (and isn't all spaces), one leading
+// and one trailing space are stripped — this is what lets a span start or
+// end with a backtick itself, e.g. `` `foo `` for a leading backtick.
+func trimCodeSpanPadding(s string) string {
+	if len(s) >= 2 && s[0] == ' ' && s[len(s)-1] == ' ' && strings.TrimSpace(s) != "" {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 func htmlMaterial(text string) Material {

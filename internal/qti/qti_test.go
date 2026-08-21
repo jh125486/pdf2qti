@@ -287,6 +287,21 @@ func TestMarshalWrapsCodeSpans_Table(t *testing.T) {
 			text: "`a < b && c`",
 			want: "<code>a &lt; b &amp;&amp; c</code>",
 		},
+		{
+			name: "double-backtick span containing a literal backtick",
+			text: "Run ``foo`bar`` to see it.",
+			want: "Run <code>foo`bar</code> to see it.",
+		},
+		{
+			name: "padding space is stripped when span starts with a backtick",
+			text: "`` `foo ``",
+			want: "<code>`foo</code>",
+		},
+		{
+			name: "unmatched backtick run is left as literal text",
+			text: "``foo` stays literal",
+			want: "``foo` stays literal",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
