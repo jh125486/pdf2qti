@@ -118,7 +118,7 @@ the quiz or overwrites an existing quiz. The profile directory persists a
 live Canvas session and is created with `0700` permissions; treat it with the
 same care as a bearer token.
 
-Recorded UNT UI flow (Aug 18 2026, updated Aug 20 2026 against live headless
+Recorded UNT UI flow (Aug 18 2026, updated Aug 21 2026 against live headless
 runs):
 
 1. `/courses/{course}/banks` → `Create Bank` → `Item Bank` dialog →
@@ -128,17 +128,31 @@ runs):
 4. Quiz builder (button text is `Quiz/Survey`, not `+ Quiz`) → `Add from item
    bank` → bank (matched by exact link text, no `data-bank-id`/`href` to key
    off) → `Add this bank to quiz`. This adds the bank as an "all questions"
-   group.
+   group. This button is waited-for-enabled (`chromedp.WaitEnabled`, the same
+   pattern used for the QTI-package `Import` button) before it's clicked: a
+   CDP click on a disabled button reports success but adds nothing, which is
+   one of the ways this flow previously produced a quiz with zero content.
 5. The visible `All / Random` control at the top of the panel is a separate
    *add more content* action (adds another bank/group) — not this group's
    edit toggle. The real per-group control is `Edit Bank containing
    questions N through M.` (a `role="button"` element with a pencil icon).
-   Click it → `Randomly select questions` → `Number of questions` → `Done`.
-   The "Number of questions" field's label is a `<span>`, not a `<label>`,
-   and its Instructure-generated `id` (e.g. `NumberInput___1`) doesn't
-   reliably reflect visual/DOM order against sibling fields (points per
-   question, source bank picker), so it's located by walking up from the
-   label span to the smallest ancestor containing exactly one `<input>`.
+   The flow polls for this control to actually appear before trying to
+   configure it, and errors hard if it never does, rather than proceeding
+   against a panel that never rendered. Click it → `Randomly select
+   questions` → `Number of questions` → `Done`. The "Number of questions"
+   field's label is a `<span>`, not a `<label>`, and its Instructure-generated
+   `id` (e.g. `NumberInput___1`) doesn't reliably reflect visual/DOM order
+   against sibling fields (points per question, source bank picker), so it's
+   located by walking up from the label span to the smallest ancestor
+   containing exactly one `<input>`.
+6. After clicking `Done`, the tool re-navigates (a fresh `Navigate`, not a
+   `Reload`) to the created quiz's URL and re-checks, from that fresh
+   document, that the random-selection Item Bank group and question count are
+   actually present — retrying a few times if not. The in-page check
+   immediately after `Done` alone is not sufficient: Canvas's UI can show the
+   group as added optimistically before its backend autosave has actually
+   persisted it, and this gap is exactly what produced a quiz that reported
+   success, had a valid URL, and contained zero questions.
 
 ## Browser-adapter design
 

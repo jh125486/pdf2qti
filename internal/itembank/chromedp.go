@@ -28,6 +28,12 @@ type ChromedpImporter struct {
 	quizExists        func(context.Context, string) (bool, error)
 	loginPageDetected func(context.Context) (bool, error)
 	submitLogin       func(context.Context, string, string) error
+	// evalBool overrides evaluateBool's default chromedp.Evaluate(js, &ok)
+	// path. Production leaves this nil; tests set it because the mocked
+	// `run` field never populates out-parameters passed to chromedp actions,
+	// so any check that reads a boolean result must go through this hook to
+	// be observable under test (same reasoning as quizExists/quizLocation).
+	evalBool func(context.Context, string) (bool, error)
 }
 
 type chromedpRun func(context.Context, ...chromedp.Action) error
@@ -346,7 +352,9 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		return QuizResult{}, err
 	}
 	defer cancel()
-	browser, workCancel := context.WithTimeout(browser, 180*time.Second)
+	// 180s was too tight once persistence confirmation (re-navigate + two
+	// polls, up to 3 attempts) was added after the in-page checks below.
+	browser, workCancel := context.WithTimeout(browser, 240*time.Second)
 	defer workCancel()
 	run := c.run
 	if run == nil {
@@ -366,49 +374,125 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		return QuizResult{}, err
 	}
 	steps := []struct {
-		label  string
-		action chromedp.Action
+		label string
+		do    func(context.Context) error
 	}{
 		// The visible "+" is a separate icon, not part of the button's
 		// textContent (recorded live: the actual text is "Quiz/Survey").
-		{"open quiz creator", clickTextInsensitive("Quiz/Survey")},
+		{"open quiz creator", func(ctx context.Context) error {
+			return runResilient(ctx, run, clickTextInsensitive("Quiz/Survey"))
+		}},
 		// Clicking navigates to the quiz builder; evaluating JS in the same
 		// instant the execution context is torn down for that navigation
 		// intermittently fails with a CDP "context not found" error. Let the
 		// new document settle before polling its state (same race as the
 		// Canvas login submit in ensureSession).
-		{"let quiz builder navigation settle", chromedp.Sleep(2 * time.Second)},
-		{"wait for quiz setup", chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second))},
-		{"select New Quizzes if prompted", chromedp.Evaluate(selectNewQuizEngineJS, nil)},
-		{"wait for quiz title", chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery)},
-		{"set quiz title", chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery)},
-		{buildQuizStep, clickTextInsensitive("Build")},
+		{"let quiz builder navigation settle", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
+		}},
+		{"wait for quiz setup", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second)))
+		}},
+		// Not checked via evaluateBool: Canvas doesn't always prompt for an
+		// engine choice (only some courses/quizzes hit this dialog), so a
+		// false/no-op result here is expected and not an error.
+		{"select New Quizzes if prompted", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Evaluate(selectNewQuizEngineJS, nil))
+		}},
+		{"wait for quiz title", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery))
+		}},
+		{"set quiz title", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery))
+		}},
+		{buildQuizStep, func(ctx context.Context) error {
+			return runResilient(ctx, run, clickTextInsensitive("Build"))
+		}},
 		// Same navigation race as above: "Build" navigates to the quiz's
 		// build page.
-		{"let quiz build navigation settle", chromedp.Sleep(2 * time.Second)},
-		{"wait for Item Bank action", chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second))},
-		{"open Item Bank picker", clickTextInsensitive("Add from item bank")},
-		{"select Item Bank", clickBank(req.BankName)},
-		{"add Item Bank to quiz", clickTextInsensitive("Add this bank to quiz")},
+		{"let quiz build navigation settle", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
+		}},
+		{"wait for Item Bank action", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+		}},
+		{"open Item Bank picker", func(ctx context.Context) error {
+			return runResilient(ctx, run, clickTextInsensitive("Add from item bank"))
+		}},
+		{"select Item Bank", func(ctx context.Context) error {
+			return runResilient(ctx, run, clickBank(req.BankName))
+		}},
+		// Mirrors the Import-button pattern above: wait for the button to
+		// actually become enabled before clicking it. A CDP click on a
+		// disabled button reports success but adds nothing — this is one of
+		// the root causes of quizzes being created with zero content.
+		{"add Item Bank to quiz", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Tasks{
+				chromedp.WaitEnabled(textXPathInsensitive("Add this bank to quiz"), chromedp.BySearch),
+				chromedp.Click(textXPathInsensitive("Add this bank to quiz"), chromedp.BySearch),
+			})
+		}},
 		// The bank group's edit control doesn't render until the panel
 		// finishes settling after the bank is added.
-		{"let bank group render", chromedp.Sleep(3 * time.Second)},
-		{"edit Item Bank group", clickEditBankGroup()},
-		{"let edit panel open", chromedp.Sleep(2 * time.Second)},
-		{"enable random questions", clickRadioLabel("Randomly select questions")},
+		{"let bank group render", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Sleep(1*time.Second))
+		}},
+		{"wait for bank group to appear", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+		}},
+		{"edit Item Bank group", func(ctx context.Context) error {
+			ok, err := c.evaluateBool(ctx, run, clickEditBankGroupJS)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`the per-group "Edit Bank containing questions..." control was not found`)
+			}
+			return nil
+		}},
+		{"let edit panel open", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
+		}},
+		{"enable random questions", func(ctx context.Context) error {
+			ok, err := c.evaluateBool(ctx, run, clickRadioLabelJS("Randomly select questions"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`the "Randomly select questions" option was not found`)
+			}
+			return nil
+		}},
 		// The "Number of questions" field only exists after the radio above
 		// switches the panel into random-selection mode.
-		{"let panel update after enabling random", chromedp.Sleep(500 * time.Millisecond)},
-		{"locate question count field", chromedp.Evaluate(markQuestionCountInputJS(), nil)},
-		{"set question count", chromedp.Tasks{
-			chromedp.Click(questionCountSelector, chromedp.ByQuery),
-			chromedp.SendKeys(questionCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery),
+		{"let panel update after enabling random", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Sleep(500*time.Millisecond))
 		}},
-		{"save Item Bank group", clickTextInsensitive("Done")},
-		{"verify random group", chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second))},
+		{"locate question count field", func(ctx context.Context) error {
+			ok, err := c.evaluateBool(ctx, run, markQuestionCountInputJS())
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`the "Number of questions" field was not found`)
+			}
+			return nil
+		}},
+		{"set question count", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Tasks{
+				chromedp.Click(questionCountSelector, chromedp.ByQuery),
+				chromedp.SendKeys(questionCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery),
+			})
+		}},
+		{"save Item Bank group", func(ctx context.Context) error {
+			return runResilient(ctx, run, clickTextInsensitive("Done"))
+		}},
+		{"verify random group", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second)))
+		}},
 	}
 	for _, step := range steps {
-		if err := runResilient(browser, run, step.action); err != nil {
+		if err := step.do(browser); err != nil {
 			return QuizResult{}, fmt.Errorf("%s: %w", step.label, err)
 		}
 	}
@@ -422,7 +506,50 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	if locationErr != nil {
 		return QuizResult{}, fmt.Errorf("read quiz URL: %w", locationErr)
 	}
+	if strings.TrimSpace(quizURL) == "" {
+		return QuizResult{}, fmt.Errorf("quiz URL is empty after creation; cannot confirm it was persisted")
+	}
+	// The in-page "verify random group" poll above can be satisfied by
+	// Canvas's optimistic UI before its backend autosave has actually
+	// persisted the Item Bank group — this is exactly what produced a quiz
+	// that reported success, had a valid URL, and contained zero questions.
+	// Re-navigate fresh (not Reload) and re-check from scratch before
+	// reporting success.
+	if err := c.confirmQuizPersisted(browser, run, quizURL, req.BankName, req.QuestionCount); err != nil {
+		return QuizResult{}, err
+	}
 	return QuizResult{QuizURL: quizURL, Title: quizTitle, QuestionCount: req.QuestionCount}, nil
+}
+
+// confirmQuizPersisted re-navigates to the just-created quiz (a real
+// Navigate, not Reload — a reload can be served from bfcache/client-side
+// router state and so wouldn't disprove the optimistic-UI theory) and
+// re-checks, from that fresh document, that the Item Bank random-selection
+// group is actually present. It retries a few times since Canvas's autosave
+// can lag slightly behind the UI action that triggered it.
+func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedpRun, quizURL, bankName string, count int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	var lastErr error
+	for range 3 {
+		if err := runResilient(ctx, run, chromedp.Tasks{
+			chromedp.Sleep(2 * time.Second),
+			chromedp.Navigate(quizURL),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+			chromedp.Sleep(2 * time.Second),
+		}); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := runResilient(ctx, run, chromedp.Poll(randomGroupJS(bankName, count), nil, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("quiz was created but Canvas did not persist its Item Bank group (re-navigated to %s, no random group for %q with %d questions): %w", quizURL, bankName, count, lastErr)
 }
 
 func validateQuizRequest(req *QuizRequest, requireBankID bool) error {
@@ -496,6 +623,20 @@ func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRu
 		return fmt.Errorf("quiz %q already exists", title)
 	}
 	return nil
+}
+
+// evaluateBool runs a JS boolean-returning expression and reports its
+// result. Production evaluates js directly via chromedp; tests inject
+// evalBool because the mocked `run` field never populates out-parameters
+// passed to chromedp.Evaluate, so any check reading a boolean result out of
+// the page must go through this hook to be observable under test.
+func (c ChromedpImporter) evaluateBool(ctx context.Context, run chromedpRun, js string) (bool, error) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if c.evalBool != nil {
+		return c.evalBool(ctx, js)
+	}
+	var ok bool
+	err := runResilient(ctx, run, chromedp.Evaluate(js, &ok))
+	return ok, err
 }
 
 func canvasURL(rawBase, courseID, path string) (string, error) {
@@ -583,6 +724,11 @@ const (
 	selectNewQuizEngineJS = `(() => { const nodes = Array.from(document.querySelectorAll('label,button,[role="radio"]')); const engine = nodes.find(el => el.innerText.trim().toLowerCase() === 'new quizzes'); if (!engine) return false; engine.click(); const submit = Array.from(document.querySelectorAll('button')).find(el => /^(submit|continue)$/i.test(el.innerText.trim())); if (submit) submit.click(); return true; })()`
 	quizSetupReadyJS      = `Boolean(document.querySelector('input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]')) || document.body.innerText.toLowerCase().includes('new quizzes')`
 	addFromBankReadyJS    = `document.body.innerText.toLowerCase().includes('add from item bank')`
+	// bankGroupPresentJS checks for the same structural marker
+	// clickEditBankGroupJS keys on — the per-group "Edit Bank containing
+	// questions N through M." control that only renders once Canvas has
+	// actually added the bank group to the quiz's page.
+	bankGroupPresentJS = `Array.from(document.querySelectorAll('[role="button"], button')).some(e => e.textContent.trim().startsWith('Edit Bank containing questions'))`
 
 	// Recorded live against UNT's Canvas instance (unt.instructure.com), which
 	// can present either of two different login forms depending on how the
@@ -610,10 +756,17 @@ func bankItemCountMatchesJS(count int) string {
 	return fmt.Sprintf("(%s) === %d", bankItemCountJS, count)
 }
 
-func clickTextInsensitive(text string) chromedp.Action {
+// textXPathInsensitive builds the case-insensitive text-match XPath expression
+// shared by clickTextInsensitive and the "add Item Bank to quiz" step, which
+// also needs to WaitEnabled on the identical node before clicking it.
+func textXPathInsensitive(text string) string {
 	lower := strings.ToLower(text)
 	translate := "translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
-	return chromedp.Click("//*[self::button or self::a or @role='button'][contains("+translate+", "+xpathString(lower)+")]", chromedp.BySearch)
+	return "//*[self::button or self::a or @role='button'][contains(" + translate + ", " + xpathString(lower) + ")]"
+}
+
+func clickTextInsensitive(text string) chromedp.Action {
+	return chromedp.Click(textXPathInsensitive(text), chromedp.BySearch)
 }
 
 // clickBank matches an Item Bank entry in the "Add from item bank" picker by
@@ -623,8 +776,8 @@ func clickBank(bankName string) chromedp.Action {
 	return chromedp.Click("//*[self::button or self::a or @role='button'][normalize-space()="+xpathString(strings.TrimSpace(bankName))+"]", chromedp.BySearch)
 }
 
-// clickEditBankGroup matches the per-group "Edit Bank containing questions N
-// through M." control that appears on a bank group after it's added to a
+// clickEditBankGroupJS matches the per-group "Edit Bank containing questions
+// N through M." control that appears on a bank group after it's added to a
 // quiz. Recorded live: the "All / Random" button visible at the top of the
 // panel is a separate *add more content* action (adds another bank/group),
 // not this group's edit toggle — clicking it does not reach the "Randomly
@@ -632,27 +785,29 @@ func clickBank(bankName string) chromedp.Action {
 // rather than chromedp.Click's real mouse-event dispatch: recorded live, a
 // hit-test-based click at this element's computed center silently misses it
 // (no panel opens, no error), while a direct .click() call reliably reaches
-// its handler.
-func clickEditBankGroup() chromedp.Action {
-	return chromedp.Evaluate(`(() => {
-		const target = Array.from(document.querySelectorAll('[role="button"], button')).find(e => e.textContent.trim().startsWith('Edit Bank containing questions'));
-		if (target) { target.click(); return true; }
-		return false;
-	})()`, nil)
-}
+// its handler. Returns its own boolean success signal (found-and-clicked or
+// not) so callers can go through evaluateBool and error out instead of
+// silently no-oping on a selector miss.
+const clickEditBankGroupJS = `(() => {
+	const target = Array.from(document.querySelectorAll('[role="button"], button')).find(e => e.textContent.trim().startsWith('Edit Bank containing questions'));
+	if (target) { target.click(); return true; }
+	return false;
+})()`
 
-// clickRadioLabel clicks the <label> whose text matches (case-insensitive),
+// clickRadioLabelJS clicks the <label> whose text matches (case-insensitive),
 // via JS .click() rather than clickTextInsensitive's XPath. Instructure's
 // radio buttons render their clickable text inside a <label>, not a
 // button/a/[role=button] — the tag set clickTextInsensitive's XPath matches
-// — so it never finds these controls at all.
-func clickRadioLabel(text string) chromedp.Action {
+// — so it never finds these controls at all. Returns its own boolean success
+// signal so callers can go through evaluateBool and error out instead of
+// silently no-oping on a selector miss.
+func clickRadioLabelJS(text string) string {
 	lower := strings.ToLower(text)
-	return chromedp.Evaluate(`(() => {
-		const target = Array.from(document.querySelectorAll('label')).find(l => l.textContent.trim().toLowerCase().includes(`+jsString(lower)+`));
+	return `(() => {
+		const target = Array.from(document.querySelectorAll('label')).find(l => l.textContent.trim().toLowerCase().includes(` + jsString(lower) + `));
 		if (target) { target.click(); return true; }
 		return false;
-	})()`, nil)
+	})()`
 }
 
 func quizExistsJS(title string) string {
