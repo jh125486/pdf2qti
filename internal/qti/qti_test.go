@@ -264,3 +264,48 @@ func TestMarshalPreservesLaTeXInRichText(t *testing.T) {
 		}
 	}
 }
+
+func TestMarshalWrapsCodeSpans_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "single code span",
+			text: "`create_vector(components)` returns a list.",
+			want: "<code>create_vector(components)</code> returns a list.",
+		},
+		{
+			name: "code span adjacent to LaTeX math",
+			text: `For ` + "`v = create_vector([3, -1, 4])`" + `, ` + "`vector_dimension(v)`" + ` returns \(3\).`,
+			want: `For <code>v = create_vector([3, -1, 4])</code>, <code>vector_dimension(v)</code> returns \(3\).`,
+		},
+		{
+			name: "code span content is HTML-escaped",
+			text: "`a < b && c`",
+			want: "<code>a &lt; b &amp;&amp; c</code>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			draft := &render.QuizDraft{
+				Title:       "Code",
+				MCQuestions: []render.Question{{Number: 1, Text: tt.text, Options: []render.Option{{Text: "ok", IsCorrect: true}}}},
+			}
+			assessment, err := qti.BuildAssessment(draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			xmlBytes, err := qti.Marshal(assessment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(xmlBytes), tt.want) {
+				t.Fatalf("marshaled XML = %s, want it to contain %q", xmlBytes, tt.want)
+			}
+		})
+	}
+}

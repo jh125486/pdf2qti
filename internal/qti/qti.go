@@ -4,6 +4,8 @@ package qti
 import (
 	"encoding/xml"
 	"fmt"
+	"html"
+	"regexp"
 
 	"github.com/jh125486/pdf2qti/internal/render"
 )
@@ -237,8 +239,25 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 	return a, nil
 }
 
+// codeSpanRe matches markdown backtick code spans, e.g. `create_vector`.
+var codeSpanRe = regexp.MustCompile("`([^`]+)`")
+
+// wrapCodeSpans converts markdown backtick code spans into <code> tags.
+// MathJax's default skipHtmlTags config excludes <code>/<pre>, so this keeps
+// code identifiers (e.g. create_vector) out of its LaTeX subscript parsing
+// when they sit next to \(...\) math in the same text — passing raw
+// backticks through as literal text/html left them exposed to it (recorded
+// live: an underscored identifier immediately before a \(...\) span got
+// swept into the math and rendered as a garbled subscript expression).
+func wrapCodeSpans(text string) string {
+	return codeSpanRe.ReplaceAllStringFunc(text, func(span string) string {
+		inner := span[1 : len(span)-1]
+		return "<code>" + html.EscapeString(inner) + "</code>"
+	})
+}
+
 func htmlMaterial(text string) Material {
-	return Material{MatText: MatText{Text: text, TextType: "text/html"}}
+	return Material{MatText: MatText{Text: wrapCodeSpans(text), TextType: "text/html"}}
 }
 
 func materialPtr(text string) *Material {
