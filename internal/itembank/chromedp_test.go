@@ -364,6 +364,13 @@ func TestQuizExistsJS_Table(t *testing.T) {
 	}
 }
 
+func TestBankGroupPresentJS(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(bankGroupPresentJS, "Edit Bank containing questions") {
+		t.Fatalf("bankGroupPresentJS = %q, want it to check for the per-group edit control", bankGroupPresentJS)
+	}
+}
+
 func TestChromedpImporterEnsureSession_Table(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -584,28 +591,49 @@ func TestBankIDAndQuizTitle_Table(t *testing.T) {
 func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo // table covers browser state-machine failures
 	t.Parallel()
 	tests := []struct {
-		name          string
-		count         int
-		failAt        int
-		locationErr   error
-		collision     bool
-		collisionErr  error
-		wantErr       string
-		wantURL       string
-		wantTitle     string
-		expectedCalls int
+		name         string
+		count        int
+		failAt       int // fails exactly this one call.
+		failFrom     int // fails this call and every call after it.
+		locationErr  error
+		locationURL  string
+		collision    bool
+		collisionErr error
+		// evalBoolFailOn/evalBoolErrOn match a substring of the JS passed to
+		// evaluateBool; when matched the mock evalBool returns (false, nil)
+		// or (false, err) respectively instead of the (true, nil) default.
+		evalBoolFailOn string
+		evalBoolErrOn  string
+		wantErr        string
+		wantURL        string
+		wantTitle      string
+		wantEmptyURL   bool
+		expectedCalls  int
 	}{
-		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 22},
-		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 22},
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 23},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 23},
 		{name: "invalid request", wantErr: "request is required"},
 		{name: "invalid count", count: 0, wantErr: "must be positive"},
 		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
 		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
 		{name: "set title", count: 2, failAt: 7, expectedCalls: 7, wantErr: "set quiz title"},
 		{name: "build quiz", count: 2, failAt: 8, expectedCalls: 8, wantErr: "build quiz"},
-		{name: "save group", count: 2, failAt: 21, expectedCalls: 21, wantErr: "save Item Bank group"},
-		{name: "verify group", count: 2, failAt: 22, expectedCalls: 22, wantErr: "verify random group"},
-		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 22, wantErr: "read quiz URL"},
+		{name: "add bank not enabled", count: 2, failAt: 13, expectedCalls: 13, wantErr: "add Item Bank to quiz"},
+		{name: "bank group never appears", count: 2, failAt: 15, expectedCalls: 15, wantErr: "wait for bank group to appear"},
+		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 15, wantErr: "Edit Bank containing questions"},
+		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 16, wantErr: "Randomly select questions"},
+		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 17, wantErr: "Number of questions"},
+		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 15, wantErr: "evalBool boom"},
+		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 16, wantErr: "evalBool boom"},
+		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 17, wantErr: "evalBool boom"},
+		{name: "save group", count: 2, failAt: 19, expectedCalls: 19, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 20, expectedCalls: 20, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 20, wantErr: "read quiz URL"},
+		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 20, wantErr: "quiz URL is empty", wantEmptyURL: true},
+		{name: "persistence not confirmed", count: 2, failFrom: 21, expectedCalls: 23, wantErr: "did not persist", wantEmptyURL: true},
+		{name: "persistence retries then succeeds", count: 3, failAt: 21, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 24},
+		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 22, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 25},
+		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 23, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 26},
 		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
 		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
 	}
@@ -616,15 +644,32 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 			creator := ChromedpImporter{
 				run: func(_ context.Context, _ ...chromedp.Action) error {
 					calls++
-					if calls == tt.failAt {
+					if tt.failAt != 0 && calls == tt.failAt {
+						return errors.New("browser failed")
+					}
+					if tt.failFrom != 0 && calls >= tt.failFrom {
 						return errors.New("browser failed")
 					}
 					return nil
 				},
 				quizLocation: func(context.Context) (string, error) {
-					return "https://canvas.example.edu/courses/7/quizzes/9", tt.locationErr
+					url := "https://canvas.example.edu/courses/7/quizzes/9"
+					if tt.locationURL != "" {
+						url = tt.locationURL
+					}
+					return url, tt.locationErr
 				},
 				quizExists: func(context.Context, string) (bool, error) { return tt.collision, tt.collisionErr },
+				evalBool: func(_ context.Context, js string) (bool, error) {
+					lower := strings.ToLower(js)
+					if tt.evalBoolErrOn != "" && strings.Contains(lower, strings.ToLower(tt.evalBoolErrOn)) {
+						return false, errors.New("evalBool boom")
+					}
+					if tt.evalBoolFailOn != "" && strings.Contains(lower, strings.ToLower(tt.evalBoolFailOn)) {
+						return false, nil
+					}
+					return true, nil
+				},
 			}
 			req := &QuizRequest{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankID: "42", BankName: "Bank", QuestionCount: tt.count}
 			if tt.name == "existing quiz suffix" {
@@ -650,6 +695,35 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 				if result.QuizURL != tt.wantURL || result.Title != tt.wantTitle {
 					t.Fatalf("CreateRandomQuiz() result = %+v, want URL %q/title %q", result, tt.wantURL, tt.wantTitle)
 				}
+			}
+			if tt.wantEmptyURL && result.QuizURL != "" {
+				t.Fatalf("CreateRandomQuiz() result.QuizURL = %q, want empty on failure", result.QuizURL)
+			}
+		})
+	}
+}
+
+func TestChromedpImporterEvaluateBool_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		runErr  error
+		wantErr string
+	}{
+		{name: "no evalBool hook, run succeeds"},
+		{name: "no evalBool hook, run fails", runErr: errors.New("run boom"), wantErr: "run boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := ChromedpImporter{}
+			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			_, err := c.evaluateBool(context.Background(), run, "true")
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("evaluateBool() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("evaluateBool() error = %v, want %q", err, tt.wantErr)
 			}
 		})
 	}
