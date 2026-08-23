@@ -1,10 +1,12 @@
 # pdf2qti
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/jh125486/pdf2qti)](https://pkg.go.dev/github.com/jh125486/pdf2qti)
+
 [![Tests](https://github.com/jh125486/pdf2qti/actions/workflows/test.yaml/badge.svg)](https://github.com/jh125486/pdf2qti/actions/workflows/test.yaml)
 [![CodeQL](https://github.com/jh125486/pdf2qti/actions/workflows/codeql.yml/badge.svg)](https://github.com/jh125486/pdf2qti/actions/workflows/codeql.yml)
 [![Codecov](https://codecov.io/gh/jh125486/pdf2qti/branch/main/graph/badge.svg)](https://codecov.io/gh/jh125486/pdf2qti)
 [![Sonar Coverage](https://sonarcloud.io/api/project_badges/measure?project=jh125486_pdf2qti&metric=coverage)](https://sonarcloud.io/summary/overall?id=jh125486_pdf2qti)
+
 [![Mutation score](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jh125486/pdf2qti/gh-pages/mutation-score.json)](https://github.com/jh125486/pdf2qti/actions/workflows/mutation-badge.yml)
 [![Mutants](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jh125486/pdf2qti/gh-pages/mutants-count.json)](https://github.com/jh125486/pdf2qti/actions/workflows/mutation-badge.yml)
 
