@@ -252,6 +252,18 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 // closes at the next run of exactly N backticks, so content containing a
 // literal backtick can use a longer run (e.g. ``foo`bar``) without breaking
 // the match.
+// backtickRunEnd returns the index just past the run of backticks beginning at
+// i, which callers must guarantee is a backtick. It starts scanning at i+1, so
+// its result is always strictly greater than i — that is the forward-progress
+// invariant the scanning loops in wrapCodeSpans depend on to terminate.
+func backtickRunEnd(s string, i int) int {
+	j := i + 1
+	for j < len(s) && s[j] == '`' {
+		j++
+	}
+	return j
+}
+
 func wrapCodeSpans(text string) string {
 	var buf strings.Builder
 	n := len(text)
@@ -262,9 +274,7 @@ func wrapCodeSpans(text string) string {
 			continue
 		}
 		openStart := i
-		for i < n && text[i] == '`' {
-			i++
-		}
+		i = backtickRunEnd(text, openStart)
 		openLen := i - openStart
 		closeStart, closeEnd := -1, -1
 		for j := i; j < n; {
@@ -273,9 +283,7 @@ func wrapCodeSpans(text string) string {
 				continue
 			}
 			runStart := j
-			for j < n && text[j] == '`' {
-				j++
-			}
+			j = backtickRunEnd(text, runStart)
 			if j-runStart == openLen {
 				closeStart, closeEnd = runStart, j
 				break
