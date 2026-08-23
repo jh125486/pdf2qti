@@ -576,7 +576,7 @@ func addPresentationRelationship(data []byte, rID, target string) ([]byte, error
 func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 	entry := fmt.Sprintf(`<p:sldId id=%q r:id=%q/>`, newID, newRID)
 
-	marker := []byte(fmt.Sprintf(`r:id=%q/>`, afterRID))
+	marker := fmt.Appendf(nil, `r:id=%q/>`, afterRID)
 	idx := bytes.Index(data, marker)
 	if idx == -1 {
 		return bytes.Replace(data, []byte("</p:sldIdLst>"), append([]byte(entry), []byte("</p:sldIdLst>")...), 1)

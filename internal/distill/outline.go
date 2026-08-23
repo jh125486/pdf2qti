@@ -86,10 +86,7 @@ func expandOutline(ctx context.Context, llm LLM, chapters []ProtoChapterInput, o
 	n++
 
 	for start := 0; start < len(outline.Outline); start += expandBatchSize {
-		end := start + expandBatchSize
-		if end > len(outline.Outline) {
-			end = len(outline.Outline)
-		}
+		end := min(start+expandBatchSize, len(outline.Outline))
 		batch := outline.Outline[start:end]
 
 		bullets, err := expandBatch(ctx, llm, chapterByTag, batch)
