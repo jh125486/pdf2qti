@@ -65,12 +65,12 @@ func buildManifest(assessmentFilename string) ([]byte, error) {
 	if err := xml.EscapeText(&escaped, []byte(assessmentFilename)); err != nil {
 		return nil, fmt.Errorf("escape assessment filename: %w", err)
 	}
-	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	return fmt.Appendf(nil, `<?xml version="1.0" encoding="UTF-8"?>
 <manifest identifier="MANIFEST-%[1]s" xmlns="http://www.imsglobal.org/xsd/imscp_v1p1" xmlns:imsmd="http://www.imsglobal.org/xsd/imsmd_v1p2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.imsglobal.org/xsd/imscp_v1p1 http://www.imsglobal.org/xsd/imscp_v1p1.xsd http://www.imsglobal.org/xsd/imsmd_v1p2 http://www.imsglobal.org/xsd/imsmd_v1p2p2.xsd">
   <metadata><schema>IMS Content</schema><schemaversion>1.1.3</schemaversion></metadata>
   <organizations/>
   <resources><resource identifier="%[1]s_res" type="imsqti_xmlv1p2"><file href="%[2]s"/></resource></resources>
-</manifest>`, assessmentID, escaped.String())), nil
+</manifest>`, assessmentID, escaped.String()), nil
 }
 
 func writeZipFile(zw archiveWriter, name string, content []byte) error {

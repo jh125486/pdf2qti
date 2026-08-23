@@ -64,10 +64,7 @@ func AutoSlideRange(chapters []ProtoChapterInput) (minSlides, maxSlides int) {
 
 	target := totalChars / charsPerContentSlide
 	minContent := clamp(target*85/100, minContentSlides, maxContentSlides)
-	maxContent := clamp(target*125/100, minContentSlides, maxContentSlides)
-	if maxContent < minContent {
-		maxContent = minContent
-	}
+	maxContent := max(clamp(target*125/100, minContentSlides, maxContentSlides), minContent)
 
 	// +2 for the deck's fixed agenda and summary slides, which minSlides/maxSlides count
 	// alongside content slides (see GenerateProtoDeck).
@@ -207,7 +204,7 @@ func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Sl
 
 // firstHeading returns the text of the first "# " line in block, or "" if none.
 func firstHeading(block string) string {
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		line = strings.TrimSpace(line)
 		if after, ok := strings.CutPrefix(line, "# "); ok {
 			return strings.TrimSpace(after)
@@ -223,7 +220,7 @@ func firstHeading(block string) string {
 // bullet) with only that leading indent distinguishing a sub-bullet from a top-level one.
 func bulletLines(block string) []string {
 	var bullets []string
-	for _, line := range strings.Split(block, "\n") {
+	for line := range strings.SplitSeq(block, "\n") {
 		trimmedRight := strings.TrimRight(line, " \t")
 		trimmed := strings.TrimLeft(trimmedRight, " \t")
 		after, ok := strings.CutPrefix(trimmed, "- ")

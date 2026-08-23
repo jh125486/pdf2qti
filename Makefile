@@ -1,4 +1,4 @@
-.PHONY: help init update-deps update-tools test tidy check static lint update-lint vuln-check modernize outdated fmt vet build clean install
+.PHONY: help init update-deps update-tools test tidy check static lint update-lint vuln-check fix outdated fmt vet build clean install
 .DEFAULT_GOAL := help
 
 # Variables
@@ -36,7 +36,7 @@ tidy:
 	@echo "Go modules tidied ✓"
 
 ## static: Run all linting tools
-static: tidy vet lint vuln-check modernize
+static: tidy vet lint vuln-check fix
 	@echo "All linting completed ✓"
 
 ## lint: Run golangci-lint with auto-fix enabled
@@ -55,7 +55,6 @@ update-tools:
 	@echo "Updating tools/go.mod managed tools..."
 	@go get -tool -modfile=tools/go.mod gotest.tools/gotestsum@latest
 	@go get -tool -modfile=tools/go.mod golang.org/x/vuln/cmd/govulncheck@latest
-	@go get -tool -modfile=tools/go.mod golang.org/x/tools/gopls/internal/analysis/modernize/cmd/modernize@latest
 	@go mod edit -modfile=tools/go.mod -droprequire github.com/alecthomas/kong || true
 
 vuln-check:
@@ -63,10 +62,10 @@ vuln-check:
 	@go tool -modfile=tools/go.mod govulncheck -version
 	@go tool -modfile=tools/go.mod govulncheck ./...
 
-modernize:
-	@echo "Running modernize analysis..."
-	@go tool -modfile=tools/go.mod modernize -V=full
-	@go tool -modfile=tools/go.mod modernize -fix -test ./...
+## fix: Apply go fix modernizers (replaces the deprecated standalone modernize tool)
+fix:
+	@echo "Running go fix..."
+	@go fix ./...
 
 outdated:
 	@echo "Checking for outdated direct dependencies..."

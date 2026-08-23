@@ -136,8 +136,8 @@ func repairDecodedArtifacts(v reflect.Value) {
 			}
 		}
 	case reflect.Struct:
-		for i := range v.NumField() {
-			repairDecodedArtifacts(v.Field(i))
+		for _, field := range v.Fields() {
+			repairDecodedArtifacts(field)
 		}
 	case reflect.Slice, reflect.Array:
 		for i := range v.Len() {

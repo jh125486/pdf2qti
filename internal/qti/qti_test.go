@@ -384,7 +384,7 @@ func verifySequentialItemIndices(t *testing.T, a *qti.Assessment) {
 	if len(items) != 14 {
 		t.Fatalf("expected 14 items, got %d", len(items))
 	}
-	for k := 0; k < 14; k++ {
+	for k := range 14 {
 		wantIdent := fmt.Sprintf("q%d", k+1)
 		wantTitle := fmt.Sprintf("Question %d", k+1)
 		if items[k].Ident != wantIdent {

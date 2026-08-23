@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -178,9 +179,7 @@ func mergeModelParams(req chatRequest, extra json.RawMessage) ([]byte, error) {
 	if err := json.Unmarshal(extra, &extraFields); err != nil {
 		return nil, fmt.Errorf("invalid modelParams: %w", err)
 	}
-	for k, v := range extraFields {
-		merged[k] = v
-	}
+	maps.Copy(merged, extraFields)
 	return json.Marshal(merged)
 }
 
