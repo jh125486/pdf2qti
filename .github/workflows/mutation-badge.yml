@@ -11,6 +11,13 @@ name: Mutation badges
 # schedule/manual dispatch, never per-push or per-PR — same reasoning as
 # turango's own dogfooding workflow (github.com/jh125486/turango
 # .github/workflows/mutation-badge.yml), which this file is adapted from.
+#
+# The sweep is sharded across a job matrix (below) purely to cut wall-clock
+# time by running shards on separate runners concurrently. Each shard still
+# runs turango with the default -mutatescope=full, i.e. still reruns the
+# *whole module's* `go test ./...` per mutant — sharding only changes which
+# runner classifies which mutant, not how a mutant is classified, so the
+# aggregate score is the same as a single-job run would produce.
 on:
   schedule:
     # Weekly. The mutation score changes only when source or tests change,
@@ -21,13 +28,26 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  mutation-score:
+  mutation-shard:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # contents:write is required to push the generated badge JSON to
-    # gh-pages via peaceiris/actions-gh-pages; cannot be downgraded to read.
-    permissions:
-      contents: write
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Package groups sized to balance wall-clock per shard, not package
+        # count — cmd/... and internal/qti/... are large/slow packages so
+        # each gets its own shard rather than being bundled with others.
+        include:
+          - name: cmd-config-page
+            packages: ./cmd/... ./internal/config/... ./internal/page/...
+          - name: qti
+            packages: ./internal/qti/...
+          - name: audit-canvas-distill-extract
+            packages: ./internal/audit/... ./internal/canvas/... ./internal/distill/... ./internal/extract/...
+          - name: generate-merge-openai-pptx-render-validate
+            packages: >-
+              ./internal/generate/... ./internal/merge/... ./internal/openai/...
+              ./internal/pptx/... ./internal/render/... ./internal/validate/...
     steps:
       - name: Check out code
         uses: actions/checkout@v7
@@ -41,46 +61,55 @@ jobs:
         run: go install github.com/jh125486/turango/cmd/turango@latest
 
       # Verdicts are cached across scheduled runs, keyed on the hash of
-      # every source/test file the run below covers: an unrelated doc-only
-      # change still gets a full cache hit next Monday, and a real source
-      # edit invalidates only the mutants it affects, not the whole run.
+      # every source/test file in the repo (a mutant classification under
+      # -mutatescope=full can depend on any package's tests, not just the
+      # mutated one, so the cache key can't be narrowed to this shard's
+      # packages) plus the shard name, so shards never share or clobber
+      # each other's cache entries.
       - name: Restore mutation verdict cache
         uses: actions/cache@v4
         with:
           path: mutation-cache
-          key: mutation-cache-${{ hashFiles('cmd/**/*.go', 'internal/**/*.go') }}
+          key: mutation-cache-${{ matrix.name }}-${{ hashFiles('cmd/**/*.go', 'internal/**/*.go') }}
           restore-keys: |
-            mutation-cache-
+            mutation-cache-${{ matrix.name }}-
 
-      - name: Run turango against pdf2qti's conversion/parsing packages
+      - name: Run turango against this shard's packages
         run: |
           mkdir -p mutation-report mutation-cache
           turango test -mutate=. \
-            -mutatescope=package \
             -mutateoutput=mutation-report \
             -mutatecache=mutation-cache \
-            ./cmd/... \
-            ./internal/audit/... \
-            ./internal/canvas/... \
-            ./internal/config/... \
-            ./internal/distill/... \
-            ./internal/extract/... \
-            ./internal/generate/... \
-            ./internal/merge/... \
-            ./internal/openai/... \
-            ./internal/page/... \
-            ./internal/pptx/... \
-            ./internal/qti/... \
-            ./internal/render/... \
-            ./internal/validate/...
+            ${{ matrix.packages }}
 
-      - name: Compute mutation metrics
+      - name: Upload shard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report-${{ matrix.name }}
+          path: mutation-report/mutate-report.json
+
+  publish-badges:
+    needs: mutation-shard
+    runs-on: ubuntu-latest
+    # contents:write is required to push the generated badge JSON to
+    # gh-pages via peaceiris/actions-gh-pages; cannot be downgraded to read.
+    permissions:
+      contents: write
+    steps:
+      - name: Download all shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-report-*
+          path: mutation-reports
+          merge-multiple: false
+
+      - name: Merge shard reports and compute mutation metrics
         id: score
         run: |
-          report=mutation-report/mutate-report.json
-          mutants=$(jq '.Mutants | length' "$report")
-          killed=$(jq '[.Mutants[] | select(.Status=="killed")] | length' "$report")
-          survived=$(jq '[.Mutants[] | select(.Status=="survived")] | length' "$report")
+          reports=$(find mutation-reports -name mutate-report.json)
+          mutants=$(jq -s '[.[].Mutants[]] | length' $reports)
+          killed=$(jq -s '[.[].Mutants[] | select(.Status=="killed")] | length' $reports)
+          survived=$(jq -s '[.[].Mutants[] | select(.Status=="survived")] | length' $reports)
           viable=$((killed + survived))
 
           if [ "$viable" -eq 0 ]; then
