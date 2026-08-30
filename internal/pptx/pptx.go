@@ -944,7 +944,42 @@ var reMathSpan = regexp.MustCompile(`\\\((.+?)\\\)|\\\[(.+?)\\\]`)
 // reBold matches "**bold**" markdown spans.
 var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
 
-// runsXML renders text as one or more <a:r>/math runs. Bold spans are split first, before math
+// reCodeSpan matches "`code`" inline markdown code spans.
+var reCodeSpan = regexp.MustCompile("`(.+?)`")
+
+// runsXML renders text as one or more <a:r>/math runs. Code spans are extracted first, ahead of
+// bold-splitting and math extraction (see boldAwareRunsXML), so a code span's content is always
+// rendered literally as a single monospace run — its markers ("**", "\(...\)") are never
+// reinterpreted as bold or math. This matches CommonMark's precedence rule that code spans bind
+// tighter than emphasis, and it's the right call for the actual use case: bullets use code spans
+// for git commands, YAML keys, and template strings like "${{ secrets.MY_SECRET }}", none of
+// which should have stray "**" or "\(...\)" inside them swept into markdown. The accepted
+// tradeoff is that a bold-wrapped code span like "**`git status`**" doesn't render bold — the
+// outer "**" markers end up as literal plain-text runs on either side of the code run, because
+// bold-splitting only ever sees the text around the extracted span, not through it. That case
+// hasn't shown up in practice (code spans mark up commands/config on their own, not emphasized
+// prose), so it's left unhandled rather than adding another layer of precedence-juggling for it.
+func runsXML(text string, warnings *mathWarnings) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range reCodeSpan.FindAllStringSubmatchIndex(text, -1) {
+		if loc[0] > last {
+			b.WriteString(boldAwareRunsXML(text[last:loc[0]], warnings))
+		}
+		b.WriteString(codeRunXML(text[loc[2]:loc[3]]))
+		last = loc[1]
+	}
+	if last < len(text) {
+		b.WriteString(boldAwareRunsXML(text[last:], warnings))
+	}
+	if b.Len() == 0 {
+		b.WriteString(runXML(text, false))
+	}
+	return b.String()
+}
+
+// boldAwareRunsXML renders text (assumed free of code-span backticks — runsXML extracts those
+// before calling this) as one or more <a:r>/math runs. Bold spans are split first, before math
 // extraction runs on each resulting segment — the reverse of this package's original order.
 // LLM output routinely bolds a phrase that also contains inline math ("**\(n\)-tuple**", not just
 // a formula bolded on its own), and extracting math spans across the whole string before bold-
@@ -960,7 +995,7 @@ var reBold = regexp.MustCompile(`\*\*(.+?)\*\*`)
 // (forcing bold onto pandoc-generated OMML output isn't worth the complexity for how rarely a
 // bolded formula appears at all, and this matches the pre-existing behavior for a formula bolded
 // on its own).
-func runsXML(text string, warnings *mathWarnings) string {
+func boldAwareRunsXML(text string, warnings *mathWarnings) string {
 	var b strings.Builder
 	last := 0
 	for _, loc := range reBold.FindAllStringSubmatchIndex(text, -1) {
@@ -972,9 +1007,6 @@ func runsXML(text string, warnings *mathWarnings) string {
 	}
 	if last < len(text) {
 		b.WriteString(mathAwareRunsXML(text[last:], false, warnings))
-	}
-	if b.Len() == 0 {
-		b.WriteString(runXML(text, false))
 	}
 	return b.String()
 }
@@ -1010,6 +1042,14 @@ func runXML(text string, bold bool) string {
 		rPr = `<a:rPr lang="en-US" b="1" dirty="0"/>`
 	}
 	return `<a:r>` + rPr + `<a:t>` + xmlTextReplacer.Replace(text) + `</a:t></a:r>`
+}
+
+// codeRunXML renders a single <a:r> run for an inline "`code`" span, in the Consolas monospace
+// font. Content goes through the same xmlTextReplacer escaping as any other run — a code span's
+// "<", ">", and "&" are exactly as unsafe in <a:t> as they'd be in plain text, so this reuses
+// runXML's escaping path rather than reimplementing it.
+func codeRunXML(text string) string {
+	return `<a:r><a:rPr lang="en-US" dirty="0"><a:latin typeface="Consolas"/></a:rPr><a:t>` + xmlTextReplacer.Replace(text) + `</a:t></a:r>`
 }
 
 // bulletLine is one bullet's text and indentation level (0 = top-level, 1 = an indented

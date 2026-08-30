@@ -192,8 +192,10 @@ pdf2qti slides ch01 -o custom.md   # override the output path
 
 Calls the configured LLM to turn `<outDir>/<id>_context.json` into a proto-deck: one slide per
 `<!-- meta -->`-tagged section with a `#` heading and bullet points, `---` between slides.
-LaTeX math is written inline as `\(...\)` and `\begin{bmatrix}...\end{bmatrix}` — these are hand
--editable Markdown, so review/tweak content before rendering to PPTX. Writes
+LaTeX math is written inline as `\(...\)` and `\begin{bmatrix}...\end{bmatrix}`, `**bold**` marks
+key terms, and single backticks (`` `code` ``) mark inline code (commands, config keys, template
+strings) rendered in a monospace font — these are hand-editable Markdown, so review/tweak content
+before rendering to PPTX. See [`slides.md`](slides.md) for the full format. Writes
 `<outDir>/<id>_slides.md` unless `--output` is given.
 
 Slide topics are planned one textbook section at a time (from the context's `sections`), not in a
