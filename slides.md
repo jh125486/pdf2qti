@@ -43,6 +43,10 @@ Every non-agenda, non-summary slide is tagged with the source chapter it came fr
 - Bullet text is a short phrase or fragment, not a full sentence — 11 words or fewer (LaTeX
   formulas don't count toward the limit). Wrap only key vocabulary/terms in `**bold**` inline where
   they're first introduced; never bold an entire bullet.
+- Wrap literal commands, config keys, and identifiers (git commands, YAML keys like `on:`,
+  template strings like `${{ secrets.MY_SECRET }}`, Dockerfile instructions) in single backticks —
+  `` `git worktree add ../foo branch` `` — instead of `**bold**`. `pptx` renders a backtick span as
+  a monospace (Consolas) run rather than bolding it.
 - A worked example that's a system of equations or a multi-row matrix (`\begin{aligned}`,
   `\begin{cases}`, `\begin{bmatrix}`, etc.) is broken into one level-1 sub-bullet per row, instead
   of one oversized bullet holding the whole block.
@@ -53,6 +57,15 @@ LaTeX is written inline using `\(...\)` for inline math and `\[...\]` for displa
 `_`/`^` outside math mode). `pptx` converts each formula to native PowerPoint math (OMML) via a
 pandoc round-trip when rendering, falling back to the escaped LaTeX text if pandoc isn't available
 or a formula fails to convert.
+
+### Code spans
+
+Single backticks (`` `code` ``) mark inline code — commands, config keys, template strings —
+rendered as a monospace (Consolas) run. A code span's content is always taken literally: it's
+extracted before `**bold**`/math parsing runs, so a stray `**` or `\(...\)` inside a code span
+never gets reinterpreted as markdown. The one tradeoff is that wrapping a code span itself in
+`**bold**` (`` **`code`** ``) does not render bold — code spans aren't expected to double as
+emphasized text, so this is left unhandled.
 
 ## Example
 

@@ -240,6 +240,55 @@ func renderTestCases() []renderTestCase {
 			},
 		},
 		{
+			name:    "inline code span renders a Consolas run",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nRun `git status` to check."),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				mustContainAll(t, "code run", contentSlide,
+					`<a:rPr lang="en-US" dirty="0"><a:latin typeface="Consolas"/></a:rPr><a:t>git status</a:t>`)
+				mustContainAll(t, "surrounding plain runs", contentSlide, "Run ", " to check.")
+				if strings.Contains(contentSlide, "`") {
+					t.Fatalf("literal backtick leaked into output: %s", contentSlide)
+				}
+			},
+		},
+		{
+			// Code spans are extracted before bold-splitting (see runsXML's doc comment), so a
+			// literal "**" inside a code span must render as plain text within the Consolas
+			// run, never reinterpreted as a bold marker.
+			name:    "code span content is not reinterpreted as bold markdown",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nSet `**not-bold**` in the config."),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				mustContainAll(t, "code run with literal asterisks", contentSlide,
+					`<a:rPr lang="en-US" dirty="0"><a:latin typeface="Consolas"/></a:rPr><a:t>**not-bold**</a:t>`)
+				if strings.Contains(contentSlide, `b="1"`) {
+					t.Fatalf("code span content was bolded, should have stayed plain: %s", contentSlide)
+				}
+			},
+		},
+		{
+			// XML-sensitive characters inside a code span (angle brackets, ampersand) must go
+			// through the same escaping as any other run's <a:t> content. The content here avoids
+			// "{{"/"}}" — that's Go template syntax, and slide XML is rendered through
+			// text/template before runsXML ever sees it (see the parse-template failure this
+			// caused when the case used "${{ secrets.MY_SECRET }}").
+			name:    "code span escapes XML-sensitive characters",
+			entries: baseTemplateEntries,
+			dc:      renderFirstContentSlideDC("Point 1\nUse `a < b && b > c` <here> & there."),
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				contentSlide := string(outEntries["ppt/slides/slide2.xml"])
+				mustContainAll(t, "code run with escaped operators", contentSlide,
+					`<a:latin typeface="Consolas"/></a:rPr><a:t>a &lt; b &amp;&amp; b &gt; c</a:t>`)
+				mustContainAll(t, "escaped plain text around it", contentSlide, "&lt;here&gt;", "&amp; there.")
+			},
+		},
+		{
 			name:    "blank lines between bullets are skipped",
 			entries: baseTemplateEntries,
 			dc:      renderFirstContentSlideDC("Point 1\n\n\nPoint 2"),
