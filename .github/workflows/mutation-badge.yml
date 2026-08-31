@@ -67,7 +67,7 @@ jobs:
       # packages) plus the shard name, so shards never share or clobber
       # each other's cache entries.
       - name: Restore mutation verdict cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: mutation-cache
           key: mutation-cache-${{ matrix.name }}-${{ hashFiles('cmd/**/*.go', 'internal/**/*.go') }}
@@ -83,7 +83,7 @@ jobs:
             ${{ matrix.packages }}
 
       - name: Upload shard report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutation-report-${{ matrix.name }}
           path: mutation-report/mutate-report.json
@@ -97,7 +97,7 @@ jobs:
       contents: write
     steps:
       - name: Download all shard reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: mutation-report-*
           path: mutation-reports
