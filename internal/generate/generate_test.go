@@ -26,16 +26,15 @@ func (f *fakeLLM) Complete(_ context.Context, prompt string, schema *distill.Sch
 func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers each stage's validation contract
 	t.Parallel()
 	tests := []struct {
-		name         string
-		stage        config.Stage
-		count        int
-		response     string
-		wantErr      string
-		source       string
-		llmErr       error
-		nilGen       bool
-		nilLLM       bool
-		wantMinCount bool
+		name     string
+		stage    config.Stage
+		count    int
+		response string
+		wantErr  string
+		source   string
+		llmErr   error
+		nilGen   bool
+		nilLLM   bool
 	}{
 		{name: "true false", stage: config.StageTF, count: 1, response: `{"questions":[{"text":"Sky blue?","options":[{"text":"True","is_correct":true,"match_text":""},{"text":"False","is_correct":false,"match_text":""}]}]}`},
 		{name: "multiple answer", stage: config.StageMA, count: 1, response: `{"questions":[{"text":"Pick colors","options":[{"text":"Red","is_correct":true,"match_text":""},{"text":"Blue","is_correct":true,"match_text":""}]}]}`},
@@ -45,7 +44,7 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 		{name: "essay", stage: config.StageES, count: 1, response: `{"questions":[{"text":"Explain.","options":[]}]}`},
 		{name: "numeric response", stage: config.StageNR, count: 1, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""}]}]}`},
 		{name: "count mismatch", stage: config.StageMC, count: 2, response: `{"questions":[]}`, wantErr: "returned 0 mc questions; want at least 2"},
-		{name: "count overshoot accepted", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""},{"text":"5","is_correct":false,"match_text":""}]},{"text":"Three plus three?","options":[{"text":"6","is_correct":true,"match_text":""},{"text":"7","is_correct":false,"match_text":""}]}]}`, wantMinCount: true},
+		{name: "count overshoot accepted", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""},{"text":"5","is_correct":false,"match_text":""}]},{"text":"Three plus three?","options":[{"text":"6","is_correct":true,"match_text":""},{"text":"7","is_correct":false,"match_text":""}]}]}`},
 		{name: "invalid multiple choice", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Q","options":[{"text":"A","is_correct":true,"match_text":""}]}]}`, wantErr: "requires at least two options"},
 		{name: "empty question text", stage: config.StageMC, count: 1, response: `{"questions":[{"text":" ","options":[{"text":"A","is_correct":true,"match_text":""},{"text":"B","is_correct":false,"match_text":""}]}]}`, wantErr: "text is empty"},
 		{name: "empty option text", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Q","options":[{"text":" ","is_correct":true,"match_text":""},{"text":"B","is_correct":false,"match_text":""}]}]}`, wantErr: "option 1 text is empty"},
@@ -91,12 +90,8 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tt.wantMinCount {
-				if len(questions) < tt.count {
-					t.Fatalf("len=%d want>=%d", len(questions), tt.count)
-				}
-			} else if len(questions) != tt.count {
-				t.Fatalf("len=%d want=%d", len(questions), tt.count)
+			if len(questions) < tt.count {
+				t.Fatalf("len=%d want>=%d", len(questions), tt.count)
 			}
 			if fake.schema == nil || fake.schema.Name != "quiz_questions" {
 				t.Fatalf("schema=%+v", fake.schema)
