@@ -2,6 +2,7 @@ package pptx
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	_ "image/png" // registers the PNG format with image.DecodeConfig, used to sanity-check mmdc's output
@@ -10,7 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
+
+// mermaidRenderTimeout bounds a single mmdc invocation: mmdc drives a headless Chromium, and a
+// malformed diagram or a stalled/crashed browser process would otherwise block Render
+// indefinitely — defeating the whole point of the graceful-fallback contract below, which assumes
+// a render attempt eventually finishes one way or the other.
+const mermaidRenderTimeout = 30 * time.Second
 
 // mermaidRenderer shells out to mmdc (mermaid-cli) to rasterize a Mermaid diagram source into a
 // PNG, mirroring mathConverter's (math.go) shape: a package-level, mutex-guarded cache keyed by
@@ -63,8 +71,13 @@ func (r *mermaidRenderer) renderPNG(source string) ([]byte, error) {
 		return nil, fmt.Errorf("write mermaid source: %w", err)
 	}
 
-	cmd := exec.Command(mmdc, "-i", inPath, "-o", outPath, "-b", "transparent", "-s", "2") //nolint:gosec // mmdc resolved via exec.LookPath, not user input
+	ctx, cancel := context.WithTimeout(context.Background(), mermaidRenderTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, mmdc, "-i", inPath, "-o", outPath, "-b", "transparent", "-s", "2") //nolint:gosec // mmdc resolved via exec.LookPath, not user input
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("run mmdc: timed out after %s: %w", mermaidRenderTimeout, ctx.Err())
+		}
 		return nil, fmt.Errorf("run mmdc: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
