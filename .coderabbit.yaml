@@ -1,0 +1,10 @@
+reviews:
+  pre_merge_checks:
+    docstrings:
+      # This repo enforces doc comments on exported identifiers via
+      # golangci-lint's revive "exported" rule (.golangci.yml), scoped to
+      # what Go convention actually asks for. CodeRabbit's docstring
+      # coverage check has no exported-only scoping option and counts every
+      # function including small, deliberately uncommented unexported
+      # helpers, so it can't be tuned to match that convention.
+      mode: off

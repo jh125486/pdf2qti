@@ -14,6 +14,8 @@ import (
 	"github.com/jh125486/pdf2qti/internal/itembank"
 )
 
+// ImportBankCmd imports a QTI package into a Canvas New Quizzes Item Bank,
+// optionally creating a random-selection New Quiz from it afterward.
 type ImportBankCmd struct {
 	CourseID         string `help:"Canvas course ID."                                                                                                 required:""`
 	BankName         string `help:"Exact Item Bank name."                                                                                             required:""`
@@ -42,6 +44,8 @@ func defaultChromeProfileDir() (string, error) {
 	return filepath.Join(configDir, "pdf2qti", "chrome-profile"), nil
 }
 
+// Run validates the package and CLI flags, then drives the Item Bank import
+// (and, if requested, the random-quiz creation) through itembank.Importer.
 func (c *ImportBankCmd) Run(ctx context.Context, _ *CLI) error { //nolint:gocyclo // validates and coordinates optional browser workflows
 	if c.CreateRandomQuiz < 0 {
 		return fmt.Errorf("--create-random-quiz must be non-negative: %d", c.CreateRandomQuiz)

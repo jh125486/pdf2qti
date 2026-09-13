@@ -3,13 +3,18 @@ package itembank
 
 import "context"
 
+// Existing controls how Import behaves when req.BankName already exists.
 type Existing string
 
 const (
-	ExistingFail   Existing = "fail"
+	// ExistingFail makes Import return an error if the named bank exists.
+	ExistingFail Existing = "fail"
+	// ExistingAppend makes Import upload into the named bank if it exists.
 	ExistingAppend Existing = "append"
 )
 
+// Request describes an Item Bank import: the QTI package to upload, the
+// target bank, and the Canvas session to drive it with.
 type Request struct {
 	BaseURL           string
 	BrowserURL        string
@@ -24,6 +29,7 @@ type Request struct {
 	OnExisting        Existing
 }
 
+// Result reports the Item Bank an Import call created or appended to.
 type Result struct {
 	BankURL       string
 	BankID        string
@@ -41,6 +47,8 @@ type Importer interface {
 	Import(context.Context, *Request) (Result, error)
 }
 
+// QuizRequest describes a New Quiz to create from random questions in an
+// existing Item Bank, and the Canvas session to drive it with.
 type QuizRequest struct {
 	BaseURL          string
 	BrowserURL       string
@@ -54,6 +62,7 @@ type QuizRequest struct {
 	QuestionCount    int
 }
 
+// QuizResult reports the New Quiz a CreateRandomQuiz call created.
 type QuizResult struct {
 	QuizURL       string
 	Title         string
