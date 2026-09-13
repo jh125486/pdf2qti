@@ -458,28 +458,37 @@ func fillContentSlideBody(prototypeXML []byte, slide distill.Slide, index int, g
 }
 
 // deckSlideKind holds everything specific to one of the two prototype slides (Content or Diagram)
-// duplicateDeckSlides works with — its part name, whether it's been used in place yet, the
-// original .rels a clone starts from, and the box/geometry its fill step needs — so the per-slide
-// loop can pick "the right kind" for a given distill.Slide once and operate on it generically,
-// instead of branching on isDiagram at every step.
+// duplicateDeckSlides works with — its part name, whether it's been used in place yet, its
+// never-filled XML and original .rels a clone starts from, and the box/geometry its fill step
+// needs — so the per-slide loop can pick "the right kind" for a given distill.Slide once and
+// operate on it generically, instead of branching on isDiagram at every step.
 type deckSlideKind struct {
 	proto         string
 	used          bool
 	origRels      []byte
+	pristine      []byte
 	contentGeom   bodyGeometry
 	contentGeomOK bool
 	diagramBox    picBox
 }
 
-// newDeckSlideKind captures proto's original .rels (before any mutation) and, if proto is
-// non-empty, its layout's body geometry or picture-placeholder box (whichever isDiagramKind calls
-// for) up front — every duplicate of this kind shares that same geometry/box.
+// newDeckSlideKind captures proto's original .rels and its raw, never-filled XML (before any
+// mutation), and, if proto is non-empty, its layout's body geometry or picture-placeholder box
+// (whichever isDiagramKind calls for) up front — every duplicate of this kind shares that same
+// geometry/box.
+//
+// pristine is why every clone (see cloneDeckSlide) starts from this snapshot rather than proto's
+// current value in parts: fillDiagramSlide structurally REMOVES a Diagram slide's picture
+// placeholder (replacePicPlaceholder) on first use, a one-way edit, so a second diagram cloned
+// from the first one's already-filled XML would find no placeholder left and fail. A Content
+// slide's fill is just a repeatable text replacement either way, so pristine costs it nothing.
 func newDeckSlideKind(parts map[string][]byte, proto string, isDiagramKind bool) deckSlideKind {
 	k := deckSlideKind{proto: proto, diagramBox: defaultPicBox}
 	if proto == "" {
 		return k
 	}
 	k.origRels = append([]byte(nil), parts[relsPartFor(proto)]...)
+	k.pristine = append([]byte(nil), parts[proto]...)
 	layoutPart, ok := slideLayoutPart(parts, proto)
 	if !ok {
 		return k
@@ -519,18 +528,18 @@ type slideIDCounters struct {
 	nextSldID    int
 }
 
-// cloneDeckSlide clones proto into a brand-new slide part positioned right after prevRID in
-// document order: a new slide+rels part (starting from kind's original, content-specific-mutation-
-// free .rels), a [Content_Types].xml override, a presentation relationship, and a <p:sldId> entry
-// in presData. It returns the clone's part name (for fillDeckSlide), its own new sldId (for the
-// caller's sldIDs/Sections bookkeeping) and rID (the new prevRID anchor for the next iteration),
-// and presData with the new sldId spliced in.
-func cloneDeckSlide(parts map[string][]byte, order *[]string, proto string, kind *deckSlideKind, presRelsPart, prevRID string, presData []byte, c *slideIDCounters) (slidePart, rID, sldID string, newPresData []byte, err error) {
+// cloneDeckSlide clones kind's pristine, never-filled prototype XML into a brand-new slide part
+// positioned right after prevRID in document order: a new slide+rels part (starting from kind's
+// original, content-specific-mutation-free .rels), a [Content_Types].xml override, a presentation
+// relationship, and a <p:sldId> entry in presData. It returns the clone's part name (for
+// fillDeckSlide), its own new sldId (for the caller's sldIDs/Sections bookkeeping) and rID (the
+// new prevRID anchor for the next iteration), and presData with the new sldId spliced in.
+func cloneDeckSlide(parts map[string][]byte, order *[]string, kind *deckSlideKind, presRelsPart, prevRID string, presData []byte, c *slideIDCounters) (slidePart, rID, sldID string, newPresData []byte, err error) {
 	slidePart = fmt.Sprintf("ppt/slides/slide%d.xml", c.nextSlideNum)
 	relsPart := relsPartFor(slidePart)
 	c.nextSlideNum++
 
-	parts[slidePart] = parts[proto]
+	parts[slidePart] = kind.pristine
 	parts[relsPart] = append([]byte(nil), kind.origRels...)
 	*order = append(*order, slidePart, relsPart)
 
@@ -618,7 +627,7 @@ func duplicateDeckSlides(parts map[string][]byte, order *[]string, contentProto,
 			kind.used = true
 			rID, sldID, presData, err = reusePrototypeInPlace(parts, presRelsPart, kind.proto, presData, prevRID)
 		} else {
-			slidePart, rID, sldID, presData, err = cloneDeckSlide(parts, order, kind.proto, kind, presRelsPart, prevRID, presData, counters)
+			slidePart, rID, sldID, presData, err = cloneDeckSlide(parts, order, kind, presRelsPart, prevRID, presData, counters)
 			relsPart = relsPartFor(slidePart)
 		}
 		if err != nil {
@@ -647,6 +656,22 @@ func duplicateDeckSlides(parts map[string][]byte, order *[]string, contentProto,
 	}
 
 	return sldIDs, nil
+}
+
+// nextUnusedMediaPart claims the next "ppt/media/diagramN.png" name not already present in parts
+// — a valid template can already ship its own ppt/media/diagram1.png (used by some other slide or
+// layout), so a naive always-start-at-1 counter would silently overwrite that unrelated media part
+// the first time this deck renders a diagram. *counter is advanced past every name tried,
+// including ones skipped for colliding, so a deck's Nth diagram never retries a name an earlier
+// diagram in the same Render call already claimed.
+func nextUnusedMediaPart(parts map[string][]byte, counter *int) string {
+	for {
+		*counter++
+		candidate := fmt.Sprintf("ppt/media/diagram%d.png", *counter)
+		if _, exists := parts[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 // fillDiagramSlide fills slidePart's title and caption placeholders from slide (unconditionally),
@@ -678,8 +703,7 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 
 	mediaPart, ok := mediaBySource[slide.Diagram.Source]
 	if !ok {
-		*mediaCounter++
-		mediaPart = fmt.Sprintf("ppt/media/diagram%d.png", *mediaCounter)
+		mediaPart = nextUnusedMediaPart(parts, mediaCounter)
 		mediaBySource[slide.Diagram.Source] = mediaPart
 		parts[mediaPart] = png
 		*order = append(*order, mediaPart)
@@ -813,9 +837,14 @@ func addImageRelationship(data []byte, id, target string) ([]byte, error) {
 	return bytes.Replace(data, []byte("</Relationships>"), append([]byte(entry), []byte("</Relationships>")...), 1), nil
 }
 
-// reHasPNGDefault detects an existing <Default Extension="png" .../> in [Content_Types].xml, so
-// addPNGDefaultIfMissing doesn't add a duplicate one when a template already declares it.
-var reHasPNGDefault = regexp.MustCompile(`<Default\s+Extension="[Pp][Nn][Gg]"`)
+// reHasPNGDefault detects an existing <Default .../> for the png extension in
+// [Content_Types].xml, so addPNGDefaultIfMissing doesn't add a duplicate one when a template
+// already declares it. Extension="png" is matched anywhere in the element rather than only
+// immediately after <Default, so attribute order (e.g.
+// <Default ContentType="image/png" Extension="png"/>) doesn't matter — this still assumes the
+// double-quoted, no-surrounding-space form every OOXML producer this package has seen emits, not
+// every attribute syntax XML itself permits (single quotes, spaces around "=").
+var reHasPNGDefault = regexp.MustCompile(`<Default\b[^>]*\bExtension="[Pp][Nn][Gg]"`)
 
 // addPNGDefaultIfMissing adds a <Default Extension="png" ContentType="image/png"/> to
 // [Content_Types].xml if it doesn't already declare one — this package's own testdata template

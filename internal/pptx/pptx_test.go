@@ -4,6 +4,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
@@ -83,6 +86,57 @@ func diagramSlideXML() string {
 		`<p:sp><p:nvSpPr><p:cNvPr id="9" name="Picture Placeholder"/><p:nvPr><p:ph idx="10" type="pic"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>` +
 		`</p:spTree></p:cSld></p:sld>`
 }
+
+// stubMmdc puts an executable named "mmdc" on a fresh PATH-only directory and points PATH at it,
+// mirroring math_test.go's stubPandoc for the same external-tool-stubbing purpose. script is a
+// full shell script body — e.g. one that inspects "$@" for its own "-o" argument to know where
+// mmdc would have written a PNG. Not usable from a t.Parallel() test: mutates PATH via t.Setenv.
+func stubMmdc(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mmdc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+}
+
+// writePNGFixture encodes a trivial 1x1 PNG to path, for a stubbed "mmdc" script to `cp` into
+// place as its fake rendered output — a real PNG is required since fillDiagramSlide decodes it
+// (pngDimensions) to size the picture.
+func writePNGFixture(t *testing.T, path string) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mmdcCopyFixtureScript is a stubMmdc script that copies fixturePath to whatever "-o" path it's
+// invoked with, simulating a successful mmdc render deterministically (no real Mermaid rendering
+// involved) — for tests that need a render to succeed, not fail.
+func mmdcCopyFixtureScript(fixturePath string) string {
+	// /bin/cp by absolute path, not "cp": stubMmdc points PATH at nothing but this script's own
+	// directory, so a bare "cp" wouldn't resolve inside the script's own subshell.
+	return fmt.Sprintf(`#!/bin/sh
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+/bin/cp %q "$out"
+`, fixturePath)
+}
+
+// existingTemplateAsset stands in for unrelated media a template ships with, in
+// TestRender_MermaidDiagramMmdcScenarios's media-name-collision case.
+const existingTemplateAsset = "not-a-real-png-but-a-stand-in-for-unrelated-template-artwork"
 
 func mustContainAll(t *testing.T, label, haystack string, needles ...string) {
 	t.Helper()
@@ -834,7 +888,10 @@ func TestRender_MermaidDiagram(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	if len(warnings) != 0 {
-		t.Skipf("mmdc installed but unusable in test environment: %v", warnings)
+		// mmdc is confirmed on PATH (see the LookPath check above), so a warning here means the
+		// mmdc invocation, PNG validation, or slide embedding actually broke — a real regression
+		// this integration test exists to catch, not an environment quirk to shrug off.
+		t.Fatalf("mmdc is on PATH; render should not have produced a diagram warning: %v", warnings)
 	}
 	out, err := readZip(outputPath)
 	if err != nil {
@@ -853,6 +910,173 @@ func TestRender_MermaidDiagram(t *testing.T) {
 	}
 	if !strings.Contains(string(out["[Content_Types].xml"]), `Extension="png" ContentType="image/png"`) {
 		t.Fatal("expected PNG content type")
+	}
+}
+
+// TestRender_MermaidDiagramMmdcScenarios is a justified exception to the single-table-function
+// convention above: every case needs its own t.Setenv-stubbed "mmdc" binary, and t.Setenv forbids
+// t.Parallel() on the test that calls it (see go-test-conventions) — so neither this function nor
+// its subtests can run in parallel, unlike TestRender_MermaidDiagram's real-mmdc integration test.
+// The three scenarios below are still folded into one table rather than three separate top-level
+// functions, per that same convention's guidance to prefer sharing a table when cases share a
+// setup shape instead of proliferating standalone functions:
+//   - "render failure falls back to title/caption": the fallback path (title/caption slide
+//     shipped, warning returned, picture omitted) otherwise has no deterministic coverage — a
+//     machine either lacks mmdc (TestRender_MermaidDiagram skips) or has a working one (never
+//     exercises the failure branch).
+//   - "two diagrams in one deck": a regression test for the deckSlideKind.pristine bug (see its
+//     doc comment in pptx.go).
+//   - "diagram media name collides with an existing template asset": a regression test for the
+//     nextUnusedMediaPart bug (see its doc comment in pptx.go).
+// Every case's Diagram.Source below must be unique across this whole table (and across every
+// other test in this package): defaultMermaidRenderer's PNG cache is package-level and keyed by
+// source text alone, so a source reused from a test that already rendered it successfully would
+// serve that old cached PNG here instead of ever invoking this test's stubbed mmdc — silently
+// making the stub, and whatever behavior it's meant to force (a render failure, in particular),
+// a no-op.
+func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
+	tests := []struct {
+		name string
+		// script builds the stubbed mmdc's body; fixture is a real PNG file path a
+		// mmdcCopyFixtureScript-based script can `cp` into place to simulate a successful render.
+		script          func(fixture string) string
+		templateEntries func() map[string][]byte
+		dc              func() *distill.DistilledContext
+		wantWarnings    int
+		verify          func(t *testing.T, out map[string][]byte)
+	}{
+		{
+			name:            "render failure falls back to title/caption",
+			script:          func(string) string { return "#!/bin/sh\nexit 1\n" },
+			templateEntries: diagramTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Lifecycle",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{
+								Source:  "flowchart LR\n  A --> B --> C",
+								Alt:     "A leads to B, which leads to C.",
+								Caption: "A short pipeline.",
+							},
+						},
+					},
+				}
+			},
+			wantWarnings: 1,
+			verify: func(t *testing.T, out map[string][]byte) {
+				t.Helper()
+				diagram := string(out["ppt/slides/slide9.xml"])
+				mustContainAll(t, "diagram slide fallback", diagram, `<a:t>Lifecycle</a:t>`, `<a:t>A short pipeline.</a:t>`)
+				if strings.Contains(diagram, "<p:pic>") {
+					t.Fatalf("expected no <p:pic> when mmdc render fails: %q", diagram)
+				}
+				if _, ok := out["ppt/media/diagram1.png"]; ok {
+					t.Fatal("expected no media part when mmdc render fails")
+				}
+			},
+		},
+		{
+			name:            "two diagrams in one deck",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "First",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  A --> B", Alt: "A leads to B.", Caption: "First diagram."},
+						},
+						{
+							Title: "Second",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  X --> Y", Alt: "X leads to Y.", Caption: "Second diagram."},
+						},
+					},
+				}
+			},
+			verify: func(t *testing.T, out map[string][]byte) {
+				t.Helper()
+				first := string(out["ppt/slides/slide9.xml"])
+				mustContainAll(t, "first diagram slide", first, `<a:t>First</a:t>`, `<a:t>First diagram.</a:t>`, `<p:pic>`)
+				second := string(out["ppt/slides/slide10.xml"])
+				mustContainAll(t, "second diagram slide", second, `<a:t>Second</a:t>`, `<a:t>Second diagram.</a:t>`, `<p:pic>`)
+				if _, ok := out["ppt/media/diagram1.png"]; !ok {
+					t.Fatal("expected first diagram's media part")
+				}
+				if _, ok := out["ppt/media/diagram2.png"]; !ok {
+					t.Fatal("expected second diagram's media part")
+				}
+			},
+		},
+		{
+			name:   "diagram media name collides with an existing template asset",
+			script: mmdcCopyFixtureScript,
+			templateEntries: func() map[string][]byte {
+				e := diagramTemplateEntries()
+				e["ppt/media/diagram1.png"] = []byte(existingTemplateAsset)
+				return e
+			},
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Lifecycle",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  P --> Q", Alt: "P leads to Q.", Caption: "A single step."},
+						},
+					},
+				}
+			},
+			verify: func(t *testing.T, out map[string][]byte) {
+				t.Helper()
+				if got := string(out["ppt/media/diagram1.png"]); got != existingTemplateAsset {
+					t.Fatalf("template's own diagram1.png was overwritten: got %q, want unchanged %q", got, existingTemplateAsset)
+				}
+				if _, ok := out["ppt/media/diagram2.png"]; !ok {
+					t.Fatal("expected the new diagram to be written as diagram2.png, since diagram1.png was already taken")
+				}
+				// Not just that diagram2.png exists, but that the diagram slide's own relationship
+				// actually points at it — a bug that wrote the new PNG's bytes under the new name
+				// while still relating the slide to diagram1.png (i.e. displaying the template's
+				// unrelated artwork) would otherwise pass the two checks above.
+				mustContainAll(t, "diagram slide rels", string(out["ppt/slides/_rels/slide9.xml.rels"]), `Target="../media/diagram2.png"`)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fixture := filepath.Join(dir, "fixture.png")
+			writePNGFixture(t, fixture)
+			stubMmdc(t, tc.script(fixture))
+
+			templatePath := filepath.Join(dir, "template.pptx")
+			outputPath := filepath.Join(dir, "out.pptx")
+			if err := writeZip(templatePath, tc.templateEntries()); err != nil {
+				t.Fatal(err)
+			}
+			warnings, err := pptx.Render(templatePath, tc.dc(), "", nil, outputPath)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if len(warnings) != tc.wantWarnings {
+				t.Fatalf("got %d warnings, want %d: %v", len(warnings), tc.wantWarnings, warnings)
+			}
+			out, err := readZip(outputPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.verify(t, out)
+		})
 	}
 }
 

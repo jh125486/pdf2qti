@@ -231,7 +231,7 @@ func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Sl
 // reAltComment matches a "<!-- alt: ... -->" screen-reader alt-text comment line, a diagram
 // block's own convention (see parseDiagramBlock), distinct from the "<!-- meta: N tag -->" marker
 // reProtoMeta reads.
-var reAltComment = regexp.MustCompile(`(?m)^<!--\s*alt:\s*(.*?)\s*-->\s*$`)
+var reAltComment = regexp.MustCompile(`(?m)^<!--[ \t]*alt:[ \t]*(.*?)[ \t]*-->[ \t\r]*$`)
 
 // errNoMermaidFence is parseDiagramBlock's internal sentinel for "block has no mermaid fence at
 // all" — the ordinary, far more common case, which ParseProtoDeck treats as "not a diagram block,

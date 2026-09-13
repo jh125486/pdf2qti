@@ -73,11 +73,12 @@ flowchart LR
 ```
 ````
 
-The `<!-- alt: ... -->` line is the image's screen-reader description, embedded on the rendered
-PNG for PowerPoint accessibility — keep it structural and specific, naming the diagram's actual
-nodes, arrows, and direction, since a reader can't see the picture. The `> ` blockquote is the
-caption a sighted viewer reads alongside the diagram — keep that one focused on the teaching
-takeaway instead. The two rarely make good stand-ins for each other.
+The `<!-- alt: ... -->` line is the image's screen-reader description, stored in the PPTX slide's
+own image metadata (not the rasterized PNG itself) for PowerPoint accessibility — keep it
+structural and specific, naming the diagram's actual nodes, arrows, and direction, since a reader
+can't see the picture. The `> ` blockquote is the caption a sighted viewer reads alongside the
+diagram — keep that one focused on the teaching takeaway instead. The two rarely make good
+stand-ins for each other.
 
 A template only needs a `Diagram` slide layout when a deck actually contains a diagram slide —
 existing Title/Agenda/Content-only templates stay valid for decks without one. That layout needs
