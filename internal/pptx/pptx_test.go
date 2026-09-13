@@ -928,6 +928,8 @@ func TestRender_MermaidDiagram(t *testing.T) {
 //     doc comment in pptx.go).
 //   - "diagram media name collides with an existing template asset": a regression test for the
 //     nextUnusedMediaPart bug (see its doc comment in pptx.go).
+//   - "removing an unused prototype cleans up a template's own Sections": a regression test for
+//     the removeDanglingSectionSldID bug (see removeSlide's doc comment in pptx.go).
 // Every case's Diagram.Source below must be unique across this whole table (and across every
 // other test in this package): defaultMermaidRenderer's PNG cache is package-level and keyed by
 // source text alone, so a source reused from a test that already rendered it successfully would
@@ -1049,6 +1051,49 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				// while still relating the slide to diagram1.png (i.e. displaying the template's
 				// unrelated artwork) would otherwise pass the two checks above.
 				mustContainAll(t, "diagram slide rels", string(out["ppt/slides/_rels/slide9.xml.rels"]), `Target="../media/diagram2.png"`)
+			},
+		},
+		{
+			name:   "removing an unused prototype cleans up a template's own Sections",
+			script: mmdcCopyFixtureScript,
+			templateEntries: func() map[string][]byte {
+				e := diagramTemplateEntries()
+				// Content prototype's own sldId (see diagramTemplateEntries' presentation.xml:
+				// rId3 -> slide2.xml -> sldId 257) is referenced by a Section the template already
+				// ships, unrelated to anything this package's own addSections (sections.go) adds.
+				// This deck uses only diagram slides, so the Content prototype goes unused and gets
+				// removeSlide'd — which must also clean up this dangling reference.
+				const preexistingSectionExt = `<p:extLst><p:ext uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}">` +
+					`<p14:sectionLst xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">` +
+					`<p14:section name="Legacy" id="{00000000-0000-0000-0000-000000000001}">` +
+					`<p14:sldIdLst><p14:sldId id="257"/></p14:sldIdLst></p14:section>` +
+					`</p14:sectionLst></p:ext></p:extLst>`
+				e["ppt/presentation.xml"] = bytes.Replace(e["ppt/presentation.xml"],
+					[]byte("</p:presentation>"), []byte(preexistingSectionExt+"</p:presentation>"), 1)
+				return e
+			},
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Lifecycle",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  M --> N", Alt: "M leads to N.", Caption: "One more step."},
+						},
+					},
+				}
+			},
+			verify: func(t *testing.T, out map[string][]byte) {
+				t.Helper()
+				pres := string(out["ppt/presentation.xml"])
+				if strings.Contains(pres, `<p14:sldId id="257"`) {
+					t.Fatalf("dangling reference to the removed Content prototype's sldId survived: %q", pres)
+				}
+				if strings.Contains(pres, `name="Legacy"`) {
+					t.Fatalf("the now-empty \"Legacy\" section should have been dropped entirely: %q", pres)
+				}
 			},
 		},
 	}

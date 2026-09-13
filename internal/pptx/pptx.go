@@ -697,7 +697,7 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 
 	png, err := defaultMermaidRenderer.renderPNG(slide.Diagram.Source)
 	if err != nil {
-		diagW.add(slide.Diagram.Source, err)
+		diagW.add(slide.Title, slide.Diagram.Source, err)
 		return nil
 	}
 
@@ -717,7 +717,7 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 
 	natW, natH, err := pngDimensions(png)
 	if err != nil {
-		diagW.add(slide.Diagram.Source, err)
+		diagW.add(slide.Title, slide.Diagram.Source, err)
 		return nil
 	}
 	offX, offY, cx, cy := fitBox(natW, natH, box)
@@ -864,7 +864,11 @@ func addPNGDefaultIfMissing(data []byte) ([]byte, error) {
 // removeSlide deletes an unused prototype slide part (and its _rels part) from parts and order,
 // plus its [Content_Types].xml Override, its ppt/_rels/presentation.xml.rels Relationship, and its
 // ppt/presentation.xml <p:sldId> entry, so it doesn't ship as a stray, empty slide (see
-// duplicateDeckSlides — this is what happens to whichever of Content/Diagram never got used).
+// duplicateDeckSlides — this is what happens to whichever of Content/Diagram never got used). It
+// also strips that numeric sldId out of any PowerPoint Section a template already shipped in its
+// own <p14:sectionLst> (see removeDanglingSectionSldID) — addSections (sections.go) only ever
+// appends a fresh sectionLst for this render's own slides, it never touches a pre-existing one, so
+// a template-authored section referencing the slide being deleted here would otherwise dangle.
 // presData is threaded through explicitly, like the rest of this package's slide-mutation
 // helpers, rather than re-read from parts, since a caller iterating over multiple removals has a
 // more current in-memory copy than what's already been written back into parts.
@@ -886,8 +890,27 @@ func removeSlide(parts map[string][]byte, order *[]string, presData []byte, slid
 	relEl := regexp.MustCompile(`<Relationship\b[^>]*\bId="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
 	parts["ppt/_rels/presentation.xml.rels"] = relEl.ReplaceAll(parts["ppt/_rels/presentation.xml.rels"], nil)
 
-	sldIDEl := regexp.MustCompile(`<p:sldId id="\d+" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
-	return sldIDEl.ReplaceAll(presData, nil), nil
+	sldIDEl := regexp.MustCompile(`<p:sldId id="(\d+)" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
+	m := sldIDEl.FindSubmatch(presData)
+	presData = sldIDEl.ReplaceAll(presData, nil)
+	if m != nil {
+		presData = removeDanglingSectionSldID(presData, string(m[1]))
+	}
+	return presData, nil
+}
+
+// reEmptySection matches a <p14:section> left with no <p14:sldId> children at all, the shape
+// removeDanglingSectionSldID's own reference-stripping can produce — an empty section is exactly
+// as invalid to PowerPoint as a dangling reference, so it's dropped too, not left behind.
+var reEmptySection = regexp.MustCompile(`<p14:section\b[^>]*>\s*<p14:sldIdLst>\s*</p14:sldIdLst>\s*</p14:section>`)
+
+// removeDanglingSectionSldID strips any "<p14:sldId id=\"sldID\"/>" reference to a just-deleted
+// slide out of presData's PowerPoint Sections, then drops any section left with no slides at all
+// as a result — see removeSlide's doc comment for why this exists at all.
+func removeDanglingSectionSldID(presData []byte, sldID string) []byte {
+	ref := regexp.MustCompile(`<p14:sldId id="` + regexp.QuoteMeta(sldID) + `"\s*/>`)
+	presData = ref.ReplaceAll(presData, nil)
+	return reEmptySection.ReplaceAll(presData, nil)
 }
 
 // removeFromOrder returns order with every name in names removed, preserving the relative order of

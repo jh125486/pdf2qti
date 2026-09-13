@@ -29,7 +29,7 @@ func TestDiagramWarnings_AddAndWarnings(t *testing.T) {
 			run: func(t *testing.T) {
 				t.Helper()
 				var w *diagramWarnings
-				w.add("flowchart LR\n  A --> B", errUnrenderable) // must not panic
+				w.add("Lifecycle", "flowchart LR\n  A --> B", errUnrenderable) // must not panic
 				if got := w.warnings(); got != nil {
 					t.Fatalf("got %v, want nil", got)
 				}
@@ -50,7 +50,7 @@ func TestDiagramWarnings_AddAndWarnings(t *testing.T) {
 			run: func(t *testing.T) {
 				t.Helper()
 				w := &diagramWarnings{}
-				w.add("flowchart LR\n  A --> B", errUnrenderable)
+				w.add("Lifecycle", "flowchart LR\n  A --> B", errUnrenderable)
 				got := w.warnings()
 				if len(got) != 1 {
 					t.Fatalf("got %d warnings, want 1: %v", len(got), got)
@@ -61,12 +61,28 @@ func TestDiagramWarnings_AddAndWarnings(t *testing.T) {
 			},
 		},
 		{
+			name: "warning names which slide failed, not just the error",
+			run: func(t *testing.T) {
+				t.Helper()
+				w := &diagramWarnings{}
+				w.add("Order Lifecycle", "flowchart LR\n  A --> B", errUnrenderable)
+				got := w.warnings()
+				if len(got) != 1 {
+					t.Fatalf("got %d warnings, want 1: %v", len(got), got)
+				}
+				if !strings.Contains(got[0], "Order Lifecycle") {
+					t.Fatalf("warning %q missing slide title %q — two different diagrams failing for the "+
+						"same reason would otherwise be indistinguishable", got[0], "Order Lifecycle")
+				}
+			},
+		},
+		{
 			name: "duplicate source is deduped, not reported twice",
 			run: func(t *testing.T) {
 				t.Helper()
 				w := &diagramWarnings{}
-				w.add("flowchart LR\n  A --> B", errUnrenderable)
-				w.add("flowchart LR\n  A --> B", errUnrenderable)
+				w.add("Lifecycle", "flowchart LR\n  A --> B", errUnrenderable)
+				w.add("Lifecycle", "flowchart LR\n  A --> B", errUnrenderable)
 				if got := w.warnings(); len(got) != 1 {
 					t.Fatalf("got %d warnings, want 1 (deduped): %v", len(got), got)
 				}
@@ -77,8 +93,8 @@ func TestDiagramWarnings_AddAndWarnings(t *testing.T) {
 			run: func(t *testing.T) {
 				t.Helper()
 				w := &diagramWarnings{}
-				w.add("flowchart LR\n  A --> B", errUnrenderable)
-				w.add("sequenceDiagram\n  A->>B: hi", errUnrenderable)
+				w.add("Lifecycle", "flowchart LR\n  A --> B", errUnrenderable)
+				w.add("Sequence", "sequenceDiagram\n  A->>B: hi", errUnrenderable)
 				got := w.warnings()
 				if len(got) != 2 {
 					t.Fatalf("got %d warnings, want 2: %v", len(got), got)

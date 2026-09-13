@@ -108,9 +108,14 @@ type diagramWarnings struct {
 	list []string
 }
 
-// add records source as having failed to render, with err's message, unless the same source was
-// already recorded on this collector. Appends in call order, matching mathWarnings.add.
-func (w *diagramWarnings) add(source string, err error) {
+// add records source as having failed to render, with slideTitle and err's message, unless the
+// same source was already recorded on this collector — so an author with two different diagrams
+// failing for the same underlying reason (e.g. mmdc missing) still gets two distinguishable
+// warnings naming which slide needs attention, not two identical, unattributed ones. Deduping
+// stays keyed on source rather than slideTitle: an identical diagram repeated verbatim on several
+// slides (see mediaBySource in pptx.go) only needs reporting once. Appends in call order, matching
+// mathWarnings.add.
+func (w *diagramWarnings) add(slideTitle, source string, err error) {
 	if w == nil {
 		return
 	}
@@ -123,7 +128,7 @@ func (w *diagramWarnings) add(source string, err error) {
 		return
 	}
 	w.seen[source] = true
-	w.list = append(w.list, fmt.Sprintf("diagram failed to render, slide emitted without its picture: %v", err))
+	w.list = append(w.list, fmt.Sprintf("diagram on slide %q failed to render, slide emitted without its picture: %v", slideTitle, err))
 }
 
 // warnings returns every diagram-render failure recorded so far, in the order first encountered.
