@@ -286,6 +286,14 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			baselineItemCount = n
 		}
 	}
+	// An unknown baseline on an existing bank can't be told apart from 0
+	// when computing the append target below (baseline + package count), so
+	// a false 0 would let a bad expected-total check pass or fail
+	// incorrectly. Abort before mutating anything rather than uploading a
+	// package this run can't verify.
+	if found && baselineItemCount < 0 && req.ExpectedItemCount > 0 {
+		return Result{}, fmt.Errorf("could not read existing Item Bank %q's baseline question count; refusing to import without a way to verify the result", req.BankName)
+	}
 
 	if err := run(browser, chromedp.Click(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
 		return Result{}, fmt.Errorf("open import actions: %w", err)
@@ -375,9 +383,9 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// total, but ExistingAppend imports onto a bank that already had
 		// content — the bank's rendered total after import is the pre-import
 		// baseline plus the package count, not the package count alone. A
-		// baseline read that failed (-1) can't be added meaningfully; fall
-		// back to the package count alone rather than corrupting the target
-		// with a negative offset.
+		// negative (unknown) baseline can't reach here: the guard above
+		// already aborted before upload rather than let this compute the
+		// wrong target.
 		expectedTotal := req.ExpectedItemCount
 		if baselineItemCount > 0 {
 			expectedTotal += baselineItemCount

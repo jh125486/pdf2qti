@@ -326,6 +326,41 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 	}
 }
 
+// TestChromedpImporterImport_AbortsOnUnknownBaseline covers a bug found in
+// review: an unverifiable baseline on an existing bank must not silently
+// fall back to a fresh-bank expected total (which can pass or fail
+// incorrectly depending on whether the totals happen to coincide). Import()
+// must abort before ever uploading the package.
+func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	importer := ChromedpImporter{
+		run:      func(context.Context, ...chromedp.Action) error { calls++; return nil },
+		findBank: func(context.Context, string) (bool, error) { return true, nil }, // existing bank
+		// Two disagreeing reads make stableBankItemCount report unknown.
+		bankItemCount: func() func(context.Context) (int, error) {
+			reads := 0
+			return func(context.Context) (int, error) {
+				reads++
+				return reads, nil // 1, then 2: never agree
+			}
+		}(),
+	}
+	_, err := importer.Import(context.Background(), &Request{
+		BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7",
+		BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedItemCount: 3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "could not read existing Item Bank") {
+		t.Fatalf("Import() error = %v, want baseline-unknown error", err)
+	}
+	// Aborts right after the failed baseline read (navigate, open bank, wait
+	// for actions, settle sleep between the two stabilizing reads), before
+	// ever opening the import actions menu or touching the upload dialog.
+	if calls != 4 {
+		t.Fatalf("browser action batches = %d, want 4 (aborted before upload)", calls)
+	}
+}
+
 func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
