@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -24,7 +25,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		wantURL       string
 	}{
 		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
-		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 8, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
 		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
@@ -101,6 +102,185 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 	}
 }
 
+func TestImportTimeout_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name              string
+		expectedItemCount int
+		want              time.Duration
+	}{
+		{name: "no expected count", expectedItemCount: 0, want: 150 * time.Second},
+		{name: "small bank", expectedItemCount: 20, want: 150 * time.Second},
+		{name: "large bank scales", expectedItemCount: 60, want: 190 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := importTimeout(tt.expectedItemCount); got != tt.want {
+				t.Fatalf("importTimeout(%d) = %v, want %v", tt.expectedItemCount, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsTimeoutLike_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "context deadline exceeded", err: errors.New("context deadline exceeded"), want: true},
+		{name: "poll timeout", err: errors.New("waiting for function failed: timeout"), want: true},
+		{name: "poll JS exception is not a timeout", err: errors.New("waiting for function failed: SyntaxError: Unexpected token"), want: false},
+		{name: "unrelated error", err: errors.New("browser failed"), want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTimeoutLike(tt.err); got != tt.want {
+				t.Fatalf("isTimeoutLike(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers covers a
+// bug found in review: a failed pre-upload baseline read must not silently
+// fall back to treating the bank as empty. Defaulting to 0 would let an
+// ExistingAppend onto a bank that already had content report "recovered" as
+// soon as that pre-existing content became visible again, even though this
+// run's own upload never completed.
+func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *testing.T) {
+	t.Parallel()
+	importer := ChromedpImporter{
+		run:           func(context.Context, ...chromedp.Action) error { return nil },
+		bankItemCount: func(context.Context) (int, error) { return 5, nil }, // bank has content
+	}
+	if got := importer.recoverStuckImport(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
+		t.Fatal("recoverStuckImport() = true with an unknown (-1) baseline, want false")
+	}
+}
+
+// TestChromedpImporterImport_RecoversFromUploadTimeout covers the two flakes
+// documented in docs/item-bank-import-flake.md: a plain timeout on
+// attach/submit/wait-completion recovers by re-checking the bank for actual
+// content rather than always erroring out and leaving a stray empty bank
+// behind; a non-timeout error (or a timeout with no content found) still
+// fails as before.
+func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		failAt        int
+		failErr       error
+		recoveredJS   int // bankItemCount returned by recoverStuckImport's check
+		recoverErr    error
+		expectedCalls int
+		wantErr       string
+		wantRecovered bool
+	}{
+		{name: "non-timeout error still fails immediately", failAt: 13, failErr: errors.New("browser failed"), expectedCalls: 13, wantErr: "attach package"},
+		{name: "timeout but bank still empty on recheck", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 14, wantErr: "attach package"},
+		{name: "timeout but recheck navigation fails", failAt: 13, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 14, wantErr: "attach package"},
+		{name: "attach timeout recovers", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
+		{name: "submit timeout recovers", failAt: 14, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
+		{name: "completion wait timeout recovers", failAt: 15, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 16, wantRecovered: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			importer := ChromedpImporter{
+				run: func(_ context.Context, _ ...chromedp.Action) error {
+					calls++
+					if calls == tt.failAt {
+						return tt.failErr
+					}
+					if calls == tt.failAt+1 && tt.recoverErr != nil {
+						return tt.recoverErr
+					}
+					return nil
+				},
+				// This test's bank is freshly created (found == false), so its
+				// baseline is hardcoded to 0 by Import() itself, not read through
+				// this hook; the only call recoverStuckImport's post-recovery
+				// check needs to see growth past that 0 baseline.
+				bankItemCount: func(context.Context) (int, error) { return tt.recoveredJS, nil },
+				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+			}
+			result, err := importer.Import(context.Background(), &Request{
+				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
+				CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != tt.expectedCalls {
+				t.Fatalf("browser action batches = %d, want %d", calls, tt.expectedCalls)
+			}
+			if tt.wantRecovered && result.BankURL == "" {
+				t.Fatalf("Import() result = %+v, want recovered result with BankURL set", result)
+			}
+		})
+	}
+}
+
+// TestChromedpImporterPollBankItemCount_Table covers symptom 2 directly: a
+// bankItemCountMatchesJS poll timeout retries by re-navigating fresh to the
+// bank and rechecking, instead of failing on the first 30s window. Tested as
+// a standalone unit (rather than through Import()) because the mocked `run`
+// field never populates chromedp.Evaluate's out-parameter, so Import()'s
+// final numeric question-count comparison can't be exercised this way — same
+// reasoning as evaluateBool's doc comment.
+func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		pollFailCount int // number of leading poll attempts that time out
+		wantErr       string
+		expectedCalls int
+	}{
+		{name: "succeeds first try", pollFailCount: 0, expectedCalls: 2},
+		{name: "succeeds after one retry", pollFailCount: 1, expectedCalls: 4},
+		{name: "succeeds after two retries", pollFailCount: 2, expectedCalls: 6},
+		{name: "exhausts retries and fails", pollFailCount: 3, wantErr: "waiting for function failed: timeout", expectedCalls: 5},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pollAttempts := 0
+			calls := 0
+			importer := ChromedpImporter{
+				run: func(_ context.Context, actions ...chromedp.Action) error {
+					calls++
+					// runResilient always calls run with a single chromedp.Action, so
+					// len(actions) can't distinguish the re-navigate batch (a
+					// chromedp.Tasks bundling 5 sub-actions) from the lone Poll call;
+					// type-assert instead.
+					if _, isNavigate := actions[0].(chromedp.Tasks); !isNavigate {
+						pollAttempts++
+						if pollAttempts <= tt.pollFailCount {
+							return errors.New("waiting for function failed: timeout")
+						}
+					}
+					return nil
+				},
+			}
+			_, err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("pollBankItemCount() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("pollBankItemCount() error = %v, want %q", err, tt.wantErr)
+			}
+			if calls != tt.expectedCalls {
+				t.Fatalf("browser action batches = %d, want %d", calls, tt.expectedCalls)
+			}
+		})
+	}
+}
+
 func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -118,12 +298,22 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
+			bankItemCountCalls := 0
 			importer := ChromedpImporter{
-				run:           func(context.Context, ...chromedp.Action) error { calls++; return nil },
-				findBank:      func(context.Context, string) (bool, error) { return true, nil },
-				bankTitle:     func(context.Context) (string, error) { return tt.title, tt.titleErr },
-				bankItemCount: func(context.Context) (int, error) { return tt.count, tt.countErr },
-				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
+				findBank:  func(context.Context, string) (bool, error) { return true, nil },
+				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
+				// First call is the pre-upload baseline read; this test models a
+				// bank with no pre-existing content, so the final tt.count read
+				// (the second call) is the expected total unmodified.
+				bankItemCount: func(context.Context) (int, error) {
+					bankItemCountCalls++
+					if bankItemCountCalls == 1 {
+						return 0, nil
+					}
+					return tt.count, tt.countErr
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
 			result, err := importer.Import(context.Background(), &Request{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedBankName: tt.expectedTitle, ExpectedItemCount: tt.expectedCount})
 			if tt.wantErr == "" && err != nil {
