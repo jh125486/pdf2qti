@@ -188,6 +188,10 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 	return nil
 }
 
+// Import drives Canvas's browser UI to create or append to req's Item Bank
+// and upload req.Package into it, recovering from a UI/CDP timeout by
+// re-checking Canvas for actual content before failing (see
+// docs/item-bank-import-flake.md) rather than always erroring out.
 func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, error) { //nolint:gocyclo,gocritic // browser UI state machine; ChromedpImporter passed by value throughout this file
 	if req == nil {
 		return Result{}, fmt.Errorf("item bank import request is required")
@@ -278,15 +282,8 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	baselineItemCount := 0
 	if found {
 		baselineItemCount = -1
-		if c.bankItemCount != nil {
-			if n, err := c.bankItemCount(browser); err == nil {
-				baselineItemCount = n
-			}
-		} else {
-			var n int
-			if err := run(browser, chromedp.Evaluate(bankItemCountJS, &n)); err == nil {
-				baselineItemCount = n
-			}
+		if n, ok := c.stableBankItemCount(browser, run); ok {
+			baselineItemCount = n
 		}
 	}
 
@@ -726,14 +723,39 @@ func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chr
 	if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
 		return false
 	}
-	var count int
-	var countErr error
-	if c.bankItemCount != nil {
-		count, countErr = c.bankItemCount(ctx)
-	} else {
-		countErr = run(ctx, chromedp.Evaluate(bankItemCountJS, &count))
+	count, ok := c.stableBankItemCount(ctx, run)
+	return ok && count > baselineItemCount
+}
+
+// stableBankItemCount reads the bank's rendered item count twice, a short
+// settle apart, and only reports it when both reads agree. The count comes
+// from document.body.innerText over a virtualized card list that can still
+// be mid-render right after a page load — a single transient read (0, or
+// partial) would otherwise corrupt a baseline used to compute an
+// ExistingAppend import's expected final total, or let recoverStuckImport
+// compare against a stale pre-render snapshot.
+func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpRun) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	read := func() (int, bool) {
+		if c.bankItemCount != nil {
+			n, err := c.bankItemCount(ctx)
+			return n, err == nil
+		}
+		var n int
+		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &n))
+		return n, err == nil
 	}
-	return countErr == nil && count > baselineItemCount
+	first, ok := read()
+	if !ok {
+		return 0, false
+	}
+	if err := run(ctx, chromedp.Sleep(time.Second)); err != nil {
+		return 0, false
+	}
+	second, ok := read()
+	if !ok || second != first {
+		return 0, false
+	}
+	return first, true
 }
 
 // pollBankItemCount waits for the imported bank's rendered question count to

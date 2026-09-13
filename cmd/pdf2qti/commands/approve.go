@@ -13,12 +13,12 @@ import (
 	"github.com/jh125486/pdf2qti/internal/render"
 )
 
-// ApproveCmd converts an approved quiz markdown draft to QTI.
 type packageOps struct {
 	open  func(string) (io.WriteCloser, error)
 	write func(io.Writer, string, []byte) error
 }
 
+// ApproveCmd converts an approved quiz markdown draft to QTI.
 type ApproveCmd struct {
 	packageOps packageOps
 }

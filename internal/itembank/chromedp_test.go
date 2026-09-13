@@ -25,7 +25,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		wantURL       string
 	}{
 		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
-		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 11, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
 		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
@@ -161,6 +161,51 @@ func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *test
 	}
 }
 
+// TestChromedpImporterStableBankItemCount_Table covers a bug found in
+// review: the rendered item count comes from a virtualized card list that
+// can still be mid-render, so a single read can return a transient 0 or
+// partial count. stableBankItemCount must require two reads to agree before
+// trusting the value, and report unknown (not a guess) when they don't.
+func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		reads      []int
+		readErrAt  int // 1-indexed read that fails, 0 means none fail
+		sleepErr   error
+		wantOK     bool
+		wantResult int
+	}{
+		{name: "agreeing reads succeed", reads: []int{4, 4}, wantOK: true, wantResult: 4},
+		{name: "still-rendering mismatch reports unknown", reads: []int{0, 4}, wantOK: false},
+		{name: "first read errors", reads: []int{0, 0}, readErrAt: 1, wantOK: false},
+		{name: "second read errors", reads: []int{4, 0}, readErrAt: 2, wantOK: false},
+		{name: "settle sleep fails", reads: []int{4, 4}, sleepErr: errors.New("navigate interrupted"), wantOK: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reads := 0
+			importer := ChromedpImporter{
+				run: func(_ context.Context, _ ...chromedp.Action) error { return tt.sleepErr },
+				bankItemCount: func(context.Context) (int, error) {
+					reads++
+					if reads == tt.readErrAt {
+						return 0, errors.New("read failed")
+					}
+					return tt.reads[reads-1], nil
+				},
+			}
+			got, ok := importer.stableBankItemCount(context.Background(), importer.run)
+			if ok != tt.wantOK {
+				t.Fatalf("stableBankItemCount() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if tt.wantOK && got != tt.wantResult {
+				t.Fatalf("stableBankItemCount() = %d, want %d", got, tt.wantResult)
+			}
+		})
+	}
+}
+
 // TestChromedpImporterImport_RecoversFromUploadTimeout covers the two flakes
 // documented in docs/item-bank-import-flake.md: a plain timeout on
 // attach/submit/wait-completion recovers by re-checking the bank for actual
@@ -180,11 +225,11 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		wantRecovered bool
 	}{
 		{name: "non-timeout error still fails immediately", failAt: 13, failErr: errors.New("browser failed"), expectedCalls: 13, wantErr: "attach package"},
-		{name: "timeout but bank still empty on recheck", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 14, wantErr: "attach package"},
+		{name: "timeout but bank still empty on recheck", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 15, wantErr: "attach package"},
 		{name: "timeout but recheck navigation fails", failAt: 13, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 14, wantErr: "attach package"},
-		{name: "attach timeout recovers", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
-		{name: "submit timeout recovers", failAt: 14, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
-		{name: "completion wait timeout recovers", failAt: 15, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 16, wantRecovered: true},
+		{name: "attach timeout recovers", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
+		{name: "submit timeout recovers", failAt: 14, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 16, wantRecovered: true},
+		{name: "completion wait timeout recovers", failAt: 15, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 17, wantRecovered: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -303,12 +348,14 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
-				// First call is the pre-upload baseline read; this test models a
-				// bank with no pre-existing content, so the final tt.count read
-				// (the second call) is the expected total unmodified.
+				// The first two calls are stableBankItemCount's paired pre-upload
+				// baseline read (it reads twice and requires agreement); this test
+				// models a bank with no pre-existing content, so both return 0. The
+				// final single read (the third call) is the expected total
+				// unmodified.
 				bankItemCount: func(context.Context) (int, error) {
 					bankItemCountCalls++
-					if bankItemCountCalls == 1 {
+					if bankItemCountCalls <= 2 {
 						return 0, nil
 					}
 					return tt.count, tt.countErr
@@ -322,8 +369,8 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
 			}
-			if calls != 8 {
-				t.Fatalf("browser action batches = %d, want 8", calls)
+			if calls != 9 {
+				t.Fatalf("browser action batches = %d, want 9", calls)
 			}
 			if tt.wantErr == "" && (result.BankName != tt.expectedTitle || result.QuestionCount != tt.expectedCount) {
 				t.Fatalf("Import() result = %+v", result)
