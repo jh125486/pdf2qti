@@ -24,8 +24,8 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		wantErr       string
 		wantURL       string
 	}{
-		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
-		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 8, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "success", onExisting: ExistingAppend, expectedCalls: 16, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
 		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
@@ -38,12 +38,12 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		{name: "return to banks", failAt: 8, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "return to Item Banks"},
 		{name: "open bank", failAt: 9, onExisting: ExistingAppend, expectedCalls: 9, wantErr: "open Item Bank"},
 		{name: "wait actions", failAt: 10, onExisting: ExistingAppend, expectedCalls: 10, wantErr: "wait for Item Bank actions"},
-		{name: "open actions", failAt: 11, onExisting: ExistingAppend, expectedCalls: 11, wantErr: "open import actions"},
-		{name: "open dialog", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import dialog"},
-		{name: "attach package", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "attach package"},
-		{name: "submit import", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "submit import"},
-		{name: "wait completion", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "wait for import completion"},
-		{name: "read location", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "read Item Bank URL"},
+		{name: "open actions", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import actions"},
+		{name: "open dialog", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "open import dialog"},
+		{name: "attach package", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "attach package"},
+		{name: "submit import", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "submit import"},
+		{name: "wait completion", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "wait for import completion"},
+		{name: "read location", failAt: 17, onExisting: ExistingAppend, expectedCalls: 17, wantErr: "read Item Bank URL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,6 +150,7 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
+			bankItemCountCalls := 0
 			importer := ChromedpImporter{
 				run: func(_ context.Context, _ ...chromedp.Action) error {
 					calls++
@@ -161,8 +162,18 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 					}
 					return nil
 				},
-				bankItemCount: func(context.Context) (int, error) { return tt.recoveredJS, nil },
-				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+				// First call is the pre-upload baseline read (an empty bank, as in
+				// this test's create-new-bank flow); later calls are
+				// recoverStuckImport's post-recovery check, which must see actual
+				// growth past that baseline to consider the import recovered.
+				bankItemCount: func(context.Context) (int, error) {
+					bankItemCountCalls++
+					if bankItemCountCalls == 1 {
+						return 0, nil
+					}
+					return tt.recoveredJS, nil
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
 			result, err := importer.Import(context.Background(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
@@ -224,7 +235,7 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 					return nil
 				},
 			}
-			err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", 3)
+			err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("pollBankItemCount() error = %v", err)
 			}

@@ -254,6 +254,19 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if err := run(browser, chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery)); err != nil {
 		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
 	}
+	// Recorded before the import dialog opens so a later timeout-recovery
+	// check (recoverStuckImport) can require the bank's item count to have
+	// actually grown, not just be non-zero — an ExistingAppend import onto a
+	// bank that already had content would otherwise satisfy a bare "count >
+	// 0" check even when this run's own upload never completed. Best-effort:
+	// a read failure here just means recovery falls back to requiring
+	// count > 0, same as before this bank was known to be non-empty.
+	baselineItemCount := 0
+	if c.bankItemCount != nil {
+		baselineItemCount, _ = c.bankItemCount(browser)
+	} else {
+		_ = run(browser, chromedp.Evaluate(bankItemCountJS, &baselineItemCount))
+	}
 
 	if err := run(browser, chromedp.Click(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
 		return Result{}, fmt.Errorf("open import actions: %w", err)
@@ -288,7 +301,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// content before giving up: recovering here also avoids leaving behind
 		// the stray, empty Item Bank a bare error would (the "Create Bank" step
 		// above already committed server-side by this point).
-		if !isTimeoutLike(stageErr) || !c.recoverStuckImport(browser, run, base.String(), req.BankName) {
+		if !isTimeoutLike(stageErr) || !c.recoverStuckImport(browser, run, base.String(), req.BankName, req.ExpectedBankName, baselineItemCount) {
 			return Result{}, fmt.Errorf("%s: %w", stage, stageErr)
 		}
 	}
@@ -336,7 +349,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if c.bankItemCount != nil {
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
-			if countErr = c.pollBankItemCount(browser, run, base.String(), req.BankName, req.ExpectedItemCount); countErr == nil {
+			if countErr = c.pollBankItemCount(browser, run, base.String(), req.BankName, req.ExpectedBankName, req.ExpectedItemCount); countErr == nil {
 				countErr = run(browser, chromedp.Evaluate(bankItemCountJS, &itemCount))
 			}
 		}
@@ -608,21 +621,59 @@ func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedp
 	return fmt.Errorf("quiz was created but Canvas did not persist its Item Bank group (re-navigated to %s, no random group for %q with %d questions): %w", quizURL, bankName, count, lastErr)
 }
 
-// recoverStuckImport re-navigates fresh (not Reload) to the Item Banks list
-// and reopens bankName, then checks whether it already has content — used
-// after a timeout on the attach/submit/wait-completion sequence above to
-// tell "Canvas actually finished the import, the UI/CDP hiccup was
-// spurious" apart from "the import genuinely didn't happen". A positive
-// result leaves the browser positioned on the bank's page, exactly where
-// the rest of Import() expects to be after a normal completion.
-func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRun, banksURL, bankName string) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
-	if err := runResilient(ctx, run, chromedp.Tasks{
+// clickBankRowJS opens the Item Banks list entry named primary — or, if not
+// found, the entry named fallback. Canvas renames an imported New Quizzes
+// Item Bank after the QTI package's own assessment title until the caller's
+// rename-back step (later in Import()) runs, so a fresh re-navigate during
+// that window can find the bank listed under that title instead of
+// req.BankName. Uses a direct JS .click() (like clickEditBankGroupJS above)
+// rather than chromedp.Click's real mouse-event dispatch, so a miss on both
+// names returns false immediately instead of blocking on a selector that
+// will never appear.
+func clickBankRowJS(primary, fallback string) string {
+	find := func(name string) string {
+		return `Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === ` + jsString(name) + `)`
+	}
+	return `(() => {
+		let target = ` + find(primary) + `;
+		if (!target && ` + jsString(fallback) + `) { target = ` + find(fallback) + `; }
+		if (target) { target.click(); return true; }
+		return false;
+	})()`
+}
+
+// reopenBankTasks re-navigates fresh (not Reload — a reload can be served
+// from bfcache/client-side router state and so wouldn't disprove the
+// optimistic-UI theory) to banksURL and opens the bank listed as either
+// bankName or expectedBankName, waiting for its actions button to confirm
+// the detail page — not just the list page — actually finished rendering
+// before a caller polls anything on it.
+func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks {
+	return chromedp.Tasks{
 		chromedp.Sleep(2 * time.Second),
 		chromedp.Navigate(banksURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(time.Second),
-		clickText(bankName),
-	}); err != nil {
+		chromedp.Evaluate(clickBankRowJS(bankName, expectedBankName), nil),
+		chromedp.Sleep(2 * time.Second),
+		chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery),
+	}
+}
+
+// recoverStuckImport re-navigates fresh to the Item Banks list and reopens
+// the bank, then checks whether its item count actually grew past
+// baselineItemCount (the count read just before the import dialog was
+// opened) — used after a timeout on the attach/submit/wait-completion
+// sequence above to tell "Canvas actually finished the import, the UI/CDP
+// hiccup was spurious" apart from "the import genuinely didn't happen".
+// Requiring growth past the baseline (not just count > 0) matters for
+// ExistingAppend: a bank that already had content before this run's own
+// upload would otherwise satisfy a bare non-zero check even when the
+// upload never completed. A positive result leaves the browser positioned
+// on the bank's page, exactly where the rest of Import() expects to be
+// after a normal completion.
+func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
 		return false
 	}
 	var count int
@@ -632,7 +683,7 @@ func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRu
 	} else {
 		countErr = run(ctx, chromedp.Evaluate(bankItemCountJS, &count))
 	}
-	return countErr == nil && count > 0
+	return countErr == nil && count > baselineItemCount
 }
 
 // pollBankItemCount waits for the imported bank's rendered question count to
@@ -643,23 +694,26 @@ func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRu
 // of "backend already succeeded, UI/count hasn't caught up yet" race, just
 // further upstream on the plain bank-import path (no --create-random-quiz).
 // It only confirms the count matches — callers still read the actual value
-// via bankItemCountJS afterward.
-func (c ChromedpImporter) pollBankItemCount(ctx context.Context, run chromedpRun, banksURL, bankName string, expected int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+// via bankItemCountJS afterward. Only a timeout-shaped error triggers a
+// retry; a selector/logic error, closed-target error, or cancellation
+// returns immediately instead of burning the retry budget on an error a
+// re-navigate can't fix.
+func (c ChromedpImporter) pollBankItemCount(ctx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, expected int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for attempt := range 3 {
 		if attempt > 0 {
-			if err := runResilient(ctx, run, chromedp.Tasks{
-				chromedp.Sleep(2 * time.Second),
-				chromedp.Navigate(banksURL),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				chromedp.Sleep(time.Second),
-				clickText(bankName),
-			}); err != nil {
+			if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
+				if !isTimeoutLike(err) {
+					return err
+				}
 				lastErr = err
 				continue
 			}
 		}
 		if err := runResilient(ctx, run, chromedp.Poll(bankItemCountMatchesJS(expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+			if !isTimeoutLike(err) {
+				return err
+			}
 			lastErr = err
 			continue
 		}
