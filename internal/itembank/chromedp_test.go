@@ -210,9 +210,9 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 		wantErr       string
 		expectedCalls int
 	}{
-		{name: "succeeds first try", pollFailCount: 0, expectedCalls: 1},
-		{name: "succeeds after one retry", pollFailCount: 1, expectedCalls: 3},
-		{name: "succeeds after two retries", pollFailCount: 2, expectedCalls: 5},
+		{name: "succeeds first try", pollFailCount: 0, expectedCalls: 2},
+		{name: "succeeds after one retry", pollFailCount: 1, expectedCalls: 4},
+		{name: "succeeds after two retries", pollFailCount: 2, expectedCalls: 6},
 		{name: "exhausts retries and fails", pollFailCount: 3, wantErr: "waiting for function failed: timeout", expectedCalls: 5},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -235,7 +235,7 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 					return nil
 				},
 			}
-			err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
+			_, err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("pollBankItemCount() error = %v", err)
 			}

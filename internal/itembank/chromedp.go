@@ -197,6 +197,13 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		return Result{}, err
 	}
 	defer cancel()
+	// sessionCtx retains the browser tab's own context, with no deadline
+	// beyond the tab's lifetime, so timeout-recovery helpers below can derive
+	// their own fresh bounded context instead of reusing browser's — which,
+	// when the failure being recovered from is workCancel's own deadline
+	// expiring, is already a dead context that can't navigate or evaluate
+	// anything.
+	sessionCtx := browser
 	browser, workCancel := context.WithTimeout(browser, importTimeout(req.ExpectedItemCount))
 	defer workCancel()
 	run := c.run
@@ -301,7 +308,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// content before giving up: recovering here also avoids leaving behind
 		// the stray, empty Item Bank a bare error would (the "Create Bank" step
 		// above already committed server-side by this point).
-		if !isTimeoutLike(stageErr) || !c.recoverStuckImport(browser, run, base.String(), req.BankName, req.ExpectedBankName, baselineItemCount) {
+		if !isTimeoutLike(stageErr) || !c.recoverStuckImport(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, baselineItemCount) {
 			return Result{}, fmt.Errorf("%s: %w", stage, stageErr)
 		}
 	}
@@ -349,9 +356,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if c.bankItemCount != nil {
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
-			if countErr = c.pollBankItemCount(browser, run, base.String(), req.BankName, req.ExpectedBankName, req.ExpectedItemCount); countErr == nil {
-				countErr = run(browser, chromedp.Evaluate(bankItemCountJS, &itemCount))
-			}
+			itemCount, countErr = c.pollBankItemCount(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, req.ExpectedItemCount)
 		}
 		if countErr != nil {
 			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)
@@ -672,7 +677,13 @@ func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks
 // upload never completed. A positive result leaves the browser positioned
 // on the bank's page, exactly where the rest of Import() expects to be
 // after a normal completion.
-func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	// sessionCtx is the browser tab's own context, not the deadline-bounded
+	// one the failed step above used — that deadline expiring is exactly one
+	// of the timeout-shaped errors this recovery runs for, so reusing it
+	// would try to navigate/evaluate on an already-dead context.
+	ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
+	defer cancel()
 	if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
 		return false
 	}
@@ -698,28 +709,42 @@ func (c ChromedpImporter) recoverStuckImport(ctx context.Context, run chromedpRu
 // retry; a selector/logic error, closed-target error, or cancellation
 // returns immediately instead of burning the retry budget on an error a
 // re-navigate can't fix.
-func (c ChromedpImporter) pollBankItemCount(ctx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, expected int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+// pollBankItemCount takes sessionCtx — the browser tab's own context, not the
+// deadline-bounded one Import()'s other steps use — because a timeout-shaped
+// error triggering a retry here can be that outer deadline itself expiring,
+// in which case reusing it would try to navigate/evaluate on an already-dead
+// context. Each attempt gets its own fresh bounded child instead.
+func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, expected int) (int, error) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for attempt := range 3 {
+		ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
 		if attempt > 0 {
 			if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
+				cancel()
 				if !isTimeoutLike(err) {
-					return err
+					return 0, err
 				}
 				lastErr = err
 				continue
 			}
 		}
 		if err := runResilient(ctx, run, chromedp.Poll(bankItemCountMatchesJS(expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+			cancel()
 			if !isTimeoutLike(err) {
-				return err
+				return 0, err
 			}
 			lastErr = err
 			continue
 		}
-		return nil
+		var itemCount int
+		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &itemCount))
+		cancel()
+		if err != nil {
+			return 0, err
+		}
+		return itemCount, nil
 	}
-	return lastErr
+	return 0, lastErr
 }
 
 func validateQuizRequest(req *QuizRequest, requireBankID bool) error {
