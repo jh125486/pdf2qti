@@ -235,12 +235,66 @@ func deckLayoutNeeds(slides []distill.Slide) (needsContent, needsDiagram bool) {
 // errors if it's required (per `required`, e.g. needsContent/needsDiagram) but the template has no
 // slide using that layout. required == false always succeeds, returning "" for a layout the
 // template happens not to have and the deck doesn't need anyway.
-func requiredLayoutSlide(slidesByLayout map[string]string, layout string, required bool) (string, error) {
-	slide := slidesByLayout[layout]
-	if required && slide == "" {
+func requiredLayoutSlide(slidesByLayout map[string][]string, layout string, required bool) (string, error) {
+	slides := slidesByLayout[layout]
+	if required && len(slides) == 0 {
 		return "", fmt.Errorf("template has no slide using the %q layout", layout)
 	}
-	return slide, nil
+	if len(slides) == 0 {
+		return "", nil
+	}
+	return slides[0], nil
+}
+
+// validateDiagramSlidePlaceholder checks diagramSlide has a picture placeholder, but only when
+// needsDiagram — requiredLayoutSlide returns slidesByLayout[layoutDiagram][0] whenever the
+// template happens to have that layout at all, whether or not the deck actually needs it (that's
+// what makes needsDiagram==false safely mean "template has the layout, deck just doesn't use it,"
+// not "diagramSlide is empty"), so skipping this check for a deck with no diagram slides is what
+// keeps a bullets-only deck rendering fine against a template whose otherwise-unused Diagram
+// layout happens to be missing its pic placeholder.
+//
+// Checked here, before any mmdc invocation, not left to surface only via replacePicPlaceholder's
+// error deep inside fillDiagramSlide, which runs after rendering every earlier diagram slide in
+// the deck and only reaches that check when a render actually succeeds (a render failure returns
+// early via the graceful-fallback path first), so whether this template defect were caught at all
+// would otherwise depend on whether mmdc happens to be installed.
+func validateDiagramSlidePlaceholder(parts map[string][]byte, diagramSlide string, needsDiagram bool) error {
+	if !needsDiagram {
+		return nil
+	}
+	if _, _, ok := picPlaceholderShapeBounds(parts[diagramSlide]); !ok {
+		return fmt.Errorf("diagram slide %q has no picture placeholder", diagramSlide)
+	}
+	return nil
+}
+
+// removeExtraLayoutSlides deletes every slide beyond slidesByLayout[layout][0] for the Content and
+// Diagram layouts specifically (not Title/Agenda, which this package never duplicates or warns
+// about, and whose own extra-slide handling isn't exercised or specified anywhere — scoped
+// narrowly on purpose rather than silently deleting a template's second Title/Agenda slide with no
+// test coverage or warning). A template with more than one slide on the same required layout (e.g.
+// two Diagram-layout example slides) only has index 0 picked as that layout's prototype
+// (requiredLayoutSlide) — every other slide sharing the layout would otherwise never be touched by
+// anything in this package and ship, unfilled, on every single render. Called before presData is
+// read in applyDeck, so titleSldID/agendaSldID and duplicateDeckSlides' own slide/rId/sldId
+// counters are all computed against the already-cleaned-up state.
+func removeExtraLayoutSlides(parts map[string][]byte, order *[]string, slidesByLayout map[string][]string) error {
+	presData := parts["ppt/presentation.xml"]
+	for _, layout := range [...]string{layoutContent, layoutDiagram} {
+		slides := slidesByLayout[layout]
+		if len(slides) < 2 {
+			continue
+		}
+		for _, extra := range slides[1:] {
+			var err error
+			if presData, err = removeSlide(parts, order, presData, extra); err != nil {
+				return err
+			}
+		}
+	}
+	parts["ppt/presentation.xml"] = presData
+	return nil
 }
 
 // applyDeck validates the template's slide layouts and mutates parts/order in place to fill the
@@ -272,6 +326,12 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 	}
 	diagramSlide, err := requiredLayoutSlide(slidesByLayout, layoutDiagram, needsDiagram)
 	if err != nil {
+		return err
+	}
+	if err := validateDiagramSlidePlaceholder(parts, diagramSlide, needsDiagram); err != nil {
+		return err
+	}
+	if err := removeExtraLayoutSlides(parts, order, slidesByLayout); err != nil {
 		return err
 	}
 
@@ -370,8 +430,13 @@ func validateLayouts(layoutNames map[string]string, needsContent, needsDiagram b
 
 // slidesByLayoutName maps each required layout name to the first slide part (in template order)
 // that uses it, resolved by following each slide's relationship to its slide layout.
-func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map[string]string) map[string]string {
-	result := make(map[string]string)
+// slidesByLayoutName groups every slide part in order by the name of the slide layout it uses —
+// not just the first one found per layout — so a caller resolving "the" Content or Diagram slide
+// (requiredLayoutSlide takes slidesByLayout[layout][0] as that prototype) can also see and clean
+// up any OTHER slide sharing that same layout, rather than silently leaving it untouched forever
+// (see applyDeck's extra-slide removal, right after prototype resolution).
+func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map[string]string) map[string][]string {
+	result := make(map[string][]string)
 	for _, name := range order {
 		m := reSlidePart.FindStringSubmatch(name)
 		if m == nil {
@@ -385,9 +450,7 @@ func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map
 		if !ok {
 			continue
 		}
-		if _, exists := result[layoutName]; !exists {
-			result[layoutName] = name
-		}
+		result[layoutName] = append(result[layoutName], name)
 	}
 	return result
 }
@@ -539,7 +602,7 @@ func cloneDeckSlide(parts map[string][]byte, order *[]string, kind *deckSlideKin
 	relsPart := relsPartFor(slidePart)
 	c.nextSlideNum++
 
-	parts[slidePart] = kind.pristine
+	parts[slidePart] = append([]byte(nil), kind.pristine...)
 	parts[relsPart] = append([]byte(nil), kind.origRels...)
 	*order = append(*order, slidePart, relsPart)
 
@@ -734,7 +797,7 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 	pic := picXML(picID, slide.Diagram.Alt, relID, picBox{x: offX, y: offY, cx: cx, cy: cy})
 	newSlideXML, ok := replacePicPlaceholder(parts[slidePart], pic)
 	if !ok {
-		return fmt.Errorf("diagram slide %q layout has no picture placeholder", slidePart)
+		return fmt.Errorf("diagram slide %q has no picture placeholder", slidePart)
 	}
 	parts[slidePart] = newSlideXML
 	return nil

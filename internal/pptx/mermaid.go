@@ -20,6 +20,14 @@ import (
 // a render attempt eventually finishes one way or the other.
 const mermaidRenderTimeout = 30 * time.Second
 
+// mermaidRenderResult is one renderPNG outcome cached by source: either a successful PNG, or a
+// deterministic render failure (mmdc ran and rejected the source, or produced unusable output).
+// It deliberately does NOT represent "mmdc missing from PATH" — see renderPNG.
+type mermaidRenderResult struct {
+	png []byte
+	err error
+}
+
 // mermaidRenderer shells out to mmdc (mermaid-cli) to rasterize a Mermaid diagram source into a
 // PNG, mirroring mathConverter's (math.go) shape: a package-level, mutex-guarded cache keyed by
 // the diagram source, re-checking exec.LookPath("mmdc") on every call rather than caching a
@@ -34,16 +42,25 @@ const mermaidRenderTimeout = 30 * time.Second
 // applied to LaTeX-to-OMML conversion).
 type mermaidRenderer struct {
 	cacheMu sync.Mutex
-	cache   map[string][]byte
+	cache   map[string]mermaidRenderResult
 }
 
 // defaultMermaidRenderer is the package-level renderer used by fillDiagramSlide.
-var defaultMermaidRenderer = &mermaidRenderer{cache: make(map[string][]byte)}
+var defaultMermaidRenderer = &mermaidRenderer{cache: make(map[string]mermaidRenderResult)}
 
 // renderPNG rasterizes source (trimmed mermaid diagram markup) to PNG bytes, transparent
-// background, via mmdc. Successful renders are cached by source text — package-level sharing is
-// safe here for the same reason mathConverter's cache is: pure memoization, same source always
-// produces the same PNG, and a hit from an unrelated Render call is still a correct answer.
+// background, via mmdc. A successful render is always cached by source text; a failure is cached
+// only when runMmdc reports it as cacheable (see its doc comment) — package-level sharing is safe
+// for the same reason mathConverter's cache is: the same source always produces the same outcome
+// from a given mmdc install, and a hit from an unrelated Render call is still a correct answer.
+// Caching a deterministic failure, not just a success, matters for a deck repeating one broken
+// diagram across several slides: without it, every one of those slides would re-run (and re-wait
+// out mermaidRenderTimeout for) a render that's already known to fail the same way.
+//
+// "mmdc not found on PATH" is deliberately NOT cached, unlike a deterministic runMmdc failure:
+// that's an environment condition, not a property of source, and re-checking it every call is what
+// lets a caller degrade gracefully the moment mmdc becomes available mid-process instead of being
+// stuck with whatever the first call happened to observe.
 func (r *mermaidRenderer) renderPNG(source string) ([]byte, error) {
 	source = strings.TrimSpace(source)
 
@@ -51,7 +68,7 @@ func (r *mermaidRenderer) renderPNG(source string) ([]byte, error) {
 	cached, ok := r.cache[source]
 	r.cacheMu.Unlock()
 	if ok {
-		return cached, nil
+		return cached.png, cached.err
 	}
 
 	mmdc, err := exec.LookPath("mmdc")
@@ -59,40 +76,66 @@ func (r *mermaidRenderer) renderPNG(source string) ([]byte, error) {
 		return nil, fmt.Errorf("mmdc not found on PATH: %w", err)
 	}
 
+	png, err, cacheable := r.runMmdc(mmdc, source)
+	if cacheable {
+		r.cacheMu.Lock()
+		r.cache[source] = mermaidRenderResult{png: png, err: err}
+		r.cacheMu.Unlock()
+	}
+	return png, err
+}
+
+// runMmdc does the actual rasterization: write source to a temp .mmd file, invoke mmdc on it, and
+// validate the PNG it produced. Split out of renderPNG so the "mmdc missing" early return above
+// stays outside what gets cached (see renderPNG's doc comment).
+//
+// cacheable is true only for a failure that's a genuine, deterministic property of source given
+// this mmdc install — mmdc ran and rejected the diagram, or produced output that isn't a valid PNG
+// — since retrying the identical source against the identical mmdc binary would fail the identical
+// way. It's false for every other failure path: creating a temp dir, writing the input file, or
+// reading mmdc's output file failing are host/environment conditions (disk full, permissions, ...)
+// unrelated to source, and a timeout is explicitly NOT a property of source either — a diagram that
+// times out once under load might render fine on a later, less contended attempt, so caching that
+// as a permanent failure would wrongly and silently downgrade every later slide using it to the
+// caption-only fallback for the rest of the process.
+func (r *mermaidRenderer) runMmdc(mmdc, source string) (png []byte, err error, cacheable bool) {
 	dir, err := os.MkdirTemp("", "pdf2qti-mermaid-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp dir for mermaid render: %w", err)
+		return nil, fmt.Errorf("create temp dir for mermaid render: %w", err), false
 	}
 	defer os.RemoveAll(dir)
 
 	inPath := filepath.Join(dir, "in.mmd")
 	outPath := filepath.Join(dir, "out.png")
 	if err := os.WriteFile(inPath, []byte(source), 0o600); err != nil {
-		return nil, fmt.Errorf("write mermaid source: %w", err)
+		return nil, fmt.Errorf("write mermaid source: %w", err), false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), mermaidRenderTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, mmdc, "-i", inPath, "-o", outPath, "-b", "transparent", "-s", "2") //nolint:gosec // mmdc resolved via exec.LookPath, not user input
+	// WaitDelay bounds Wait() itself, not just the ctx.Done() signal: mmdc spawns a headless
+	// Chromium that inherits the CombinedOutput pipe, so on ctx cancellation, killing only the
+	// direct mmdc process leaves that grandchild holding the pipe open — CombinedOutput would
+	// otherwise keep blocking on it well past mermaidRenderTimeout, exactly the indefinite hang
+	// this timeout exists to prevent. WaitDelay forces the pipe closed (and I/O errors returned)
+	// this long after the process is signaled, regardless of what still has it open.
+	cmd.WaitDelay = 5 * time.Second
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("run mmdc: timed out after %s: %w", mermaidRenderTimeout, ctx.Err())
+			return nil, fmt.Errorf("run mmdc: timed out after %s: %w", mermaidRenderTimeout, ctx.Err()), false
 		}
-		return nil, fmt.Errorf("run mmdc: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("run mmdc: %w: %s", err, strings.TrimSpace(string(out))), true
 	}
 
-	png, err := os.ReadFile(outPath) //nolint:gosec // outPath is our own temp file, not user input
+	png, err = os.ReadFile(outPath) //nolint:gosec // outPath is our own temp file, not user input
 	if err != nil {
-		return nil, fmt.Errorf("read mermaid output png: %w", err)
+		return nil, fmt.Errorf("read mermaid output png: %w", err), false
 	}
 	if _, _, err := image.DecodeConfig(bytes.NewReader(png)); err != nil {
-		return nil, fmt.Errorf("mmdc output is not a valid png: %w", err)
+		return nil, fmt.Errorf("mmdc output is not a valid png: %w", err), true
 	}
-
-	r.cacheMu.Lock()
-	r.cache[source] = png
-	r.cacheMu.Unlock()
-	return png, nil
+	return png, nil, true
 }
 
 // diagramWarnings collects diagrams that failed to render to PNG during one Render call, deduped

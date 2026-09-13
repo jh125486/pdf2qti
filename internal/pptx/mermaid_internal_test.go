@@ -8,9 +8,12 @@ package pptx
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -267,5 +270,39 @@ func TestPngDimensions(t *testing.T) {
 				t.Fatalf("got (%d, %d), want (%d, %d)", gotW, gotH, tc.wantW, tc.wantH)
 			}
 		})
+	}
+}
+
+// TestMermaidRenderer_RenderPNG_CachesDeterministicFailure constructs its own *mermaidRenderer
+// rather than going through defaultMermaidRenderer (the package-level singleton every Render call
+// shares): that cache persists for the lifetime of the process, so a test asserting "invoked
+// exactly once" against the shared instance would pass on a first run and then silently do nothing
+// — cache hit, no invocation at all — on every later run in the same process, e.g. `go test
+// -count=2`. Not t.Parallel(): mutates PATH via t.Setenv.
+func TestMermaidRenderer_RenderPNG_CachesDeterministicFailure(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "invocations")
+	script := fmt.Sprintf("#!/bin/sh\necho x >> %q\nexit 1\n", counter)
+	if err := os.WriteFile(filepath.Join(dir, "mmdc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	r := &mermaidRenderer{cache: make(map[string]mermaidRenderResult)}
+	const source = "flowchart LR\n  CacheTest1 --> CacheTest2"
+
+	if _, err := r.renderPNG(source); err == nil {
+		t.Fatal("got nil error, want the stub's failure")
+	}
+	if _, err := r.renderPNG(source); err == nil {
+		t.Fatal("got nil error on second call, want the cached failure")
+	}
+
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("read invocation counter: %v", err)
+	}
+	if got := strings.Count(string(data), "x"); got != 1 {
+		t.Fatalf("mmdc invoked %d times for two renderPNG calls with the same failing source, want 1", got)
 	}
 }

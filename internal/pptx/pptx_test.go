@@ -87,15 +87,40 @@ func diagramSlideXML() string {
 		`</p:spTree></p:cSld></p:sld>`
 }
 
+// diagramSlideXMLNoPicPlaceholder is diagramSlideXML with its picture-placeholder shape omitted,
+// simulating a Diagram-layout slide the template author never gave one.
+func diagramSlideXMLNoPicPlaceholder() string {
+	return `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>` +
+		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>` +
+		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>` +
+		`</p:spTree></p:cSld></p:sld>`
+}
+
+// diagramTemplateEntriesWithDuplicateDiagramLayout extends diagramTemplateEntries with a second
+// slide (slide20.xml) using the same Diagram layout as slide9.xml, wired into presentation.xml,
+// its rels, and its own layout relationship — simulating a template that ships two example slides
+// on one layout.
+func diagramTemplateEntriesWithDuplicateDiagramLayout() map[string][]byte {
+	e := diagramTemplateEntries()
+	e["ppt/presentation.xml"] = []byte(`<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="255" r:id="rId1"/><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/><p:sldId id="258" r:id="rId4"/><p:sldId id="259" r:id="rId5"/></p:sldIdLst></p:presentation>`)
+	e["ppt/_rels/presentation.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide0.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide9.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide20.xml"/></Relationships>`)
+	e["ppt/slides/slide20.xml"] = []byte(diagramSlideXML())
+	e["ppt/slides/_rels/slide20.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout4.xml"/></Relationships>`)
+	return e
+}
+
 // stubMmdc puts an executable named "mmdc" on a fresh PATH-only directory and points PATH at it,
 // mirroring math_test.go's stubPandoc for the same external-tool-stubbing purpose. script is a
 // full shell script body — e.g. one that inspects "$@" for its own "-o" argument to know where
-// mmdc would have written a PNG. Not usable from a t.Parallel() test: mutates PATH via t.Setenv.
+// mmdc would have written a PNG. An empty script leaves the directory empty, simulating mmdc being
+// unavailable at all. Not usable from a t.Parallel() test: mutates PATH via t.Setenv.
 func stubMmdc(t *testing.T, script string) {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "mmdc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
-		t.Fatal(err)
+	if script != "" {
+		if err := os.WriteFile(filepath.Join(dir, "mmdc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", dir)
 }
@@ -916,15 +941,22 @@ func TestRender_MermaidDiagram(t *testing.T) {
 // proliferating standalone functions. Each case's Diagram.Source must stay unique across this
 // whole package: defaultMermaidRenderer's PNG cache is package-level and keyed by source text, so
 // a reused source would skip invoking the stub entirely.
-func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
-	tests := []struct {
-		name            string
-		script          func(fixture string) string
-		templateEntries func() map[string][]byte
-		dc              func() *distill.DistilledContext
-		wantWarnings    int
-		verify          func(t *testing.T, out map[string][]byte)
-	}{
+// mermaidDiagramMmdcScenario is one TestRender_MermaidDiagramMmdcScenarios table case.
+type mermaidDiagramMmdcScenario struct {
+	name            string
+	script          func(fixture string) string
+	templateEntries func() map[string][]byte
+	dc              func() *distill.DistilledContext
+	wantErr         string
+	wantWarnings    int
+	verify          func(t *testing.T, dir string, out map[string][]byte)
+}
+
+// mermaidDiagramMmdcScenarios builds TestRender_MermaidDiagramMmdcScenarios's table. Split out
+// from the test function itself to keep gocyclo's complexity count on the (trivial) runner, not
+// this literal — mirroring renderTestCases above for TestRender's own table.
+func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
+	return []mermaidDiagramMmdcScenario{
 		{
 			name:            "render failure falls back to title/caption",
 			script:          func(string) string { return "#!/bin/sh\nexit 1\n" },
@@ -947,17 +979,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				}
 			},
 			wantWarnings: 1,
-			verify: func(t *testing.T, out map[string][]byte) {
-				t.Helper()
-				diagram := string(out["ppt/slides/slide9.xml"])
-				mustContainAll(t, "diagram slide fallback", diagram, `<a:t>Lifecycle</a:t>`, `<a:t>A short pipeline.</a:t>`)
-				if strings.Contains(diagram, "<p:pic>") {
-					t.Fatalf("expected no <p:pic> when mmdc render fails: %q", diagram)
-				}
-				if _, ok := out["ppt/media/diagram1.png"]; ok {
-					t.Fatal("expected no media part when mmdc render fails")
-				}
-			},
+			verify:       verifyRenderFailureFallback,
 		},
 		{
 			name:            "two diagrams in one deck",
@@ -981,19 +1003,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 					},
 				}
 			},
-			verify: func(t *testing.T, out map[string][]byte) {
-				t.Helper()
-				first := string(out["ppt/slides/slide9.xml"])
-				mustContainAll(t, "first diagram slide", first, `<a:t>First</a:t>`, `<a:t>First diagram.</a:t>`, `<p:pic>`)
-				second := string(out["ppt/slides/slide10.xml"])
-				mustContainAll(t, "second diagram slide", second, `<a:t>Second</a:t>`, `<a:t>Second diagram.</a:t>`, `<p:pic>`)
-				if _, ok := out["ppt/media/diagram1.png"]; !ok {
-					t.Fatal("expected first diagram's media part")
-				}
-				if _, ok := out["ppt/media/diagram2.png"]; !ok {
-					t.Fatal("expected second diagram's media part")
-				}
-			},
+			verify: verifyTwoDiagramsInOneDeck,
 		},
 		{
 			name:   "diagram media name collides with an existing template asset",
@@ -1016,16 +1026,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 					},
 				}
 			},
-			verify: func(t *testing.T, out map[string][]byte) {
-				t.Helper()
-				if got := string(out["ppt/media/diagram1.png"]); got != existingTemplateAsset {
-					t.Fatalf("template's own diagram1.png was overwritten: got %q, want unchanged %q", got, existingTemplateAsset)
-				}
-				if _, ok := out["ppt/media/diagram2.png"]; !ok {
-					t.Fatal("expected the new diagram to be written as diagram2.png, since diagram1.png was already taken")
-				}
-				mustContainAll(t, "diagram slide rels", string(out["ppt/slides/_rels/slide9.xml.rels"]), `Target="../media/diagram2.png"`)
-			},
+			verify: verifyMediaNameCollision,
 		},
 		{
 			name:   "removing an unused prototype cleans up a template's own Sections",
@@ -1055,16 +1056,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 					},
 				}
 			},
-			verify: func(t *testing.T, out map[string][]byte) {
-				t.Helper()
-				pres := string(out["ppt/presentation.xml"])
-				if strings.Contains(pres, `<p14:sldId id="257"`) {
-					t.Fatalf("dangling reference to the removed Content prototype's sldId survived: %q", pres)
-				}
-				if strings.Contains(pres, `name="Legacy"`) {
-					t.Fatalf("the now-empty \"Legacy\" section should have been dropped entirely: %q", pres)
-				}
-			},
+			verify: verifySectionCleanup,
 		},
 		{
 			name:   "diagram title/caption collide with the picture placeholder marker",
@@ -1087,7 +1079,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 					},
 				}
 			},
-			verify: func(t *testing.T, out map[string][]byte) {
+			verify: func(t *testing.T, dir string, out map[string][]byte) {
 				t.Helper()
 				diagram := string(out["ppt/slides/slide9.xml"])
 				mustContainAll(t, "diagram slide", diagram,
@@ -1097,8 +1089,237 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				)
 			},
 		},
+		{
+			name:            "duplicate slides on the same layout are cleaned up",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntriesWithDuplicateDiagramLayout,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Duplicate Layout",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  U --> V", Alt: "U leads to V.", Caption: "One duplicate-layout diagram."},
+						},
+					},
+				}
+			},
+			verify: verifyDuplicateLayoutCleanup,
+		},
+		{
+			name:   "diagram slide missing a picture placeholder fails before any render attempt",
+			script: func(string) string { return "" },
+			templateEntries: func() map[string][]byte {
+				e := diagramTemplateEntries()
+				e["ppt/slides/slide9.xml"] = []byte(diagramSlideXMLNoPicPlaceholder())
+				return e
+			},
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Lifecycle",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{Source: "flowchart LR\n  W --> X", Alt: "W leads to X.", Caption: "Missing placeholder."},
+						},
+					},
+				}
+			},
+			wantErr: "no picture placeholder",
+		},
+		{
+			name:   "bullets-only deck renders fine against a template whose unused Diagram layout is broken",
+			script: func(string) string { return "" },
+			templateEntries: func() map[string][]byte {
+				e := diagramTemplateEntries()
+				e["ppt/slides/slide9.xml"] = []byte(diagramSlideXMLNoPicPlaceholder())
+				return e
+			},
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{Title: "Bullets Only", Content: "bullet", Tag: "ch01"},
+					},
+				}
+			},
+			verify: verifyBulletsOnlyDeckIgnoresBrokenDiagramLayout,
+		},
+		{
+			name:            "content and diagram slides interleaved keep deck order",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{Title: "C1", Content: "bullet", Tag: "ch01"},
+						{Title: "D1", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  I1 --> I2", Alt: "I1 leads to I2.", Caption: "First interleaved diagram."}},
+						{Title: "C2", Content: "bullet", Tag: "ch01"},
+						{Title: "D2", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  I3 --> I4", Alt: "I3 leads to I4.", Caption: "Second interleaved diagram."}},
+					},
+				}
+			},
+			verify: verifyMixedDeckSlideOrder,
+		},
 	}
-	for _, tc := range tests {
+}
+
+func verifyRenderFailureFallback(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	diagram := string(out["ppt/slides/slide9.xml"])
+	mustContainAll(t, "diagram slide fallback", diagram, `<a:t>Lifecycle</a:t>`, `<a:t>A short pipeline.</a:t>`)
+	if strings.Contains(diagram, "<p:pic>") {
+		t.Fatalf("expected no <p:pic> when mmdc render fails: %q", diagram)
+	}
+	if _, ok := out["ppt/media/diagram1.png"]; ok {
+		t.Fatal("expected no media part when mmdc render fails")
+	}
+}
+
+func verifyTwoDiagramsInOneDeck(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	first := string(out["ppt/slides/slide9.xml"])
+	mustContainAll(t, "first diagram slide", first, `<a:t>First</a:t>`, `<a:t>First diagram.</a:t>`, `<p:pic>`)
+	second := string(out["ppt/slides/slide10.xml"])
+	mustContainAll(t, "second diagram slide", second, `<a:t>Second</a:t>`, `<a:t>Second diagram.</a:t>`, `<p:pic>`)
+	if _, ok := out["ppt/media/diagram1.png"]; !ok {
+		t.Fatal("expected first diagram's media part")
+	}
+	if _, ok := out["ppt/media/diagram2.png"]; !ok {
+		t.Fatal("expected second diagram's media part")
+	}
+}
+
+func verifyMediaNameCollision(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	if got := string(out["ppt/media/diagram1.png"]); got != existingTemplateAsset {
+		t.Fatalf("template's own diagram1.png was overwritten: got %q, want unchanged %q", got, existingTemplateAsset)
+	}
+	if _, ok := out["ppt/media/diagram2.png"]; !ok {
+		t.Fatal("expected the new diagram to be written as diagram2.png, since diagram1.png was already taken")
+	}
+	mustContainAll(t, "diagram slide rels", string(out["ppt/slides/_rels/slide9.xml.rels"]), `Target="../media/diagram2.png"`)
+}
+
+func verifySectionCleanup(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	pres := string(out["ppt/presentation.xml"])
+	if strings.Contains(pres, `<p14:sldId id="257"`) {
+		t.Fatalf("dangling reference to the removed Content prototype's sldId survived: %q", pres)
+	}
+	if strings.Contains(pres, `name="Legacy"`) {
+		t.Fatalf("the now-empty \"Legacy\" section should have been dropped entirely: %q", pres)
+	}
+}
+
+func verifyDuplicateLayoutCleanup(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	var slideParts []string
+	for name := range out {
+		if strings.HasPrefix(name, "ppt/slides/slide") && strings.HasSuffix(name, ".xml") {
+			slideParts = append(slideParts, name)
+		}
+	}
+	if len(slideParts) != 3 {
+		t.Fatalf("got %d slide parts %v, want 3 (title, agenda, one diagram)", len(slideParts), slideParts)
+	}
+	var foundDiagram bool
+	for _, name := range slideParts {
+		if strings.Contains(string(out[name]), `<a:t>Duplicate Layout</a:t>`) {
+			foundDiagram = true
+		}
+	}
+	if !foundDiagram {
+		t.Fatalf("no surviving slide part contains the deck's diagram title: %v", slideParts)
+	}
+}
+
+// betweenFirst returns the substring of s between the first occurrence of open and the following
+// occurrence of closeMarker, and whether both were found.
+func betweenFirst(s, open, closeMarker string) (string, bool) {
+	i := strings.Index(s, open)
+	if i == -1 {
+		return "", false
+	}
+	rest := s[i+len(open):]
+	j := strings.Index(rest, closeMarker)
+	if j == -1 {
+		return "", false
+	}
+	return rest[:j], true
+}
+
+// sldIDOrder returns the r:id values from presXML's <p:sldIdLst>, in document order.
+func sldIDOrder(presXML string) []string {
+	var rIDs []string
+	for _, part := range strings.Split(presXML, "<p:sldId ")[1:] {
+		if rID, ok := betweenFirst(part, `r:id="`, `"`); ok {
+			rIDs = append(rIDs, rID)
+		}
+	}
+	return rIDs
+}
+
+// relTarget returns the Target attribute of the <Relationship Id="rID" .../> in relsXML.
+func relTarget(relsXML, rID string) string {
+	idx := strings.Index(relsXML, `Id="`+rID+`"`)
+	if idx == -1 {
+		return ""
+	}
+	target, _ := betweenFirst(relsXML[idx:], `Target="`, `"`)
+	return target
+}
+
+// firstTitleText returns the text of the first <a:t> run in slideXML — every fixture slide in this
+// file puts the title placeholder's run first.
+func firstTitleText(slideXML string) string {
+	text, _ := betweenFirst(slideXML, "<a:t>", "</a:t>")
+	return text
+}
+
+func verifyBulletsOnlyDeckIgnoresBrokenDiagramLayout(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	var found bool
+	for name, data := range out {
+		if strings.HasPrefix(name, "ppt/slides/slide") && strings.HasSuffix(name, ".xml") && strings.Contains(string(data), `<a:t>Bullets Only</a:t>`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no slide contains the deck's content title")
+	}
+}
+
+func verifyMixedDeckSlideOrder(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	pres := string(out["ppt/presentation.xml"])
+	rels := string(out["ppt/_rels/presentation.xml.rels"])
+	rIDs := sldIDOrder(pres)
+	if len(rIDs) != 6 {
+		t.Fatalf("sldIdLst has %d entries %v, want 6 (title, agenda, C1, D1, C2, D2)", len(rIDs), rIDs)
+	}
+	titles := make([]string, 0, len(rIDs)-2)
+	for _, rID := range rIDs[2:] {
+		target := relTarget(rels, rID)
+		if target == "" {
+			t.Fatalf("no relationship target for %q", rID)
+		}
+		titles = append(titles, firstTitleText(string(out["ppt/"+target])))
+	}
+	if got, want := strings.Join(titles, ","), "C1,D1,C2,D2"; got != want {
+		t.Fatalf("slide order = %q, want %q", got, want)
+	}
+}
+
+func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
+	for _, tc := range mermaidDiagramMmdcScenarios() {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			fixture := filepath.Join(dir, "fixture.png")
@@ -1111,6 +1332,12 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				t.Fatal(err)
 			}
 			warnings, err := pptx.Render(templatePath, tc.dc(), "", nil, outputPath)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}
@@ -1121,7 +1348,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tc.verify(t, out)
+			tc.verify(t, dir, out)
 		})
 	}
 }

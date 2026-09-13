@@ -629,6 +629,8 @@ func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
 		{name: "missing caption", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n A --> B\n```", want: "caption line"},
 		{name: "empty diagram", body: "<!-- alt: diagram -->\n> caption\n```mermaid\n```", want: "cannot be empty"},
 		{name: "diagram bullet", body: "<!-- alt: diagram -->\n> caption\n- forbidden\n```mermaid\nflowchart LR\n A --> B\n```", want: "cannot contain bullets"},
+		{name: "caption not silently taken from a source line", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n> A --> B\n```", want: "caption line"},
+		{name: "unterminated fence swallowing the rest of the deck", body: "<!-- alt: diagram -->\n> caption\n```mermaid\nflowchart LR\n A --> B", want: "unterminated"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -636,6 +638,36 @@ func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
 			_, _, _, err := distill.ParseProtoDeck(prefix + tt.body)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error=%v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagramFenceContentNotScanned(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n<!-- meta: 2 ch01 -->\n# Diagram\n" +
+		"<!-- alt: diagram -->\n> caption\n"
+	tests := []struct {
+		name   string
+		fence  string
+		source string
+	}{
+		{name: "yaml frontmatter list", fence: "```", source: "---\nconfig:\n  items:\n    - one\n    - two\n---\nflowchart LR\n A --> B"},
+		{name: "mindmap syntax", fence: "```", source: "mindmap\n  root\n    - child one\n    - child two"},
+		{name: "fence content resembling an alt comment", fence: "```", source: "flowchart LR\n A --> B\n%% <!-- alt: not the real one -->"},
+		{name: "four-backtick fence", fence: "````", source: "flowchart LR\n A --> B"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in := prefix + tt.fence + "mermaid\n" + tt.source + "\n" + tt.fence
+			_, _, slides, err := distill.ParseProtoDeck(in)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(slides) != 1 || slides[0].Diagram == nil || slides[0].Diagram.Source != tt.source {
+				t.Fatalf("slides=%+v, want one diagram slide with Source %q", slides, tt.source)
 			}
 		})
 	}

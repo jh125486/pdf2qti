@@ -170,18 +170,25 @@ func validateProtoDeck(deck string, minSlides, maxSlides int) (warnings []string
 var reProtoSeparator = regexp.MustCompile(`^---\s*$`)
 
 // splitProtoDeckBlocks splits markdown into "---"-separated blocks the way GenerateProtoDeck emits
-// them, except a "---" line inside an open fenced code block (``` ... ```, any info string) is
-// never treated as a slide separator: Mermaid permits "---"-delimited YAML frontmatter inside a
-// ```mermaid fence, and a naive line-based split would otherwise cut that fence into unrelated
-// blocks and report it as an unterminated or malformed diagram instead of parsing it.
-func splitProtoDeckBlocks(markdown string) []string {
+// them, except a "---" line inside an open fenced code block (``` ... ```, any info string, any
+// backtick-run length) is never treated as a slide separator: Mermaid permits "---"-delimited YAML
+// frontmatter inside a ```mermaid fence, and a naive line-based split would otherwise cut that
+// fence into unrelated blocks and report it as an unterminated or malformed diagram instead of
+// parsing it. An unclosed fence anywhere in markdown is a hard error rather than silently merging
+// every following block into the open one — a Markdown file missing a closing ``` is exactly the
+// kind of thing that would otherwise drop slides without any indication anything went wrong.
+func splitProtoDeckBlocks(markdown string) ([]string, error) {
 	lines := strings.Split(markdown, "\n")
 	blocks := make([]string, 0, 8)
 	current := make([]string, 0, len(lines))
 	var inFence bool
-	for _, line := range lines {
+	var fenceOpenedAtLine int
+	for i, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			inFence = !inFence
+			if inFence {
+				fenceOpenedAtLine = i + 1
+			}
 		}
 		if !inFence && reProtoSeparator.MatchString(line) {
 			blocks = append(blocks, strings.Join(current, "\n"))
@@ -190,7 +197,10 @@ func splitProtoDeckBlocks(markdown string) []string {
 		}
 		current = append(current, line)
 	}
-	return append(blocks, strings.Join(current, "\n"))
+	if inFence {
+		return nil, fmt.Errorf("unterminated fenced code block opened at line %d", fenceOpenedAtLine)
+	}
+	return append(blocks, strings.Join(current, "\n")), nil
 }
 
 // ParseProtoDeck is the inverse of GenerateProtoDeck: it parses proto-deck markdown — whether
@@ -209,7 +219,17 @@ func splitProtoDeckBlocks(markdown string) []string {
 // block with no mermaid fence ignores any "<!-- alt: ... -->"/"> " lines it happens to contain,
 // silently, the same as any other non-bullet line ParseProtoDeck already drops.
 func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Slide, err error) {
-	blocks := splitProtoDeckBlocks(markdown)
+	// Normalized once, up front: CRLF/CR line endings would otherwise survive into a diagram's
+	// Source verbatim (a trailing "\r" per line), making the same diagram saved with different
+	// line endings hash to different cache keys in pptx.mermaidRenderer, and would need every
+	// line-anchored regex in this file (reProtoMeta, reAltComment, "> "/"```" line checks) to
+	// separately account for a possible trailing "\r".
+	markdown = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(markdown)
+
+	blocks, err := splitProtoDeckBlocks(markdown)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	if len(blocks) == 0 {
 		return "", nil, nil, errors.New("empty proto deck markdown")
 	}
@@ -262,6 +282,18 @@ var reAltComment = regexp.MustCompile(`(?m)^<!--[ \t]*alt:[ \t]*(.*?)[ \t]*-->[ 
 // parse it as a plain bullet block instead" rather than as a failure.
 var errNoMermaidFence = errors.New("no mermaid fence")
 
+// reMermaidFenceOpen matches a mermaid fence's opening line: 3-or-more backticks immediately
+// followed by "mermaid". reMermaidFenceClose matches a bare closing line of 3-or-more backticks —
+// both accept any backtick-run length (not just exactly 3), matching splitProtoDeckBlocks's own
+// generic `` "```" `` -prefix fence toggle, so the two functions agree on what counts as a fence
+// instead of findMermaidFence silently missing a fence (e.g. four backticks, `` ```` ``, used to
+// visually nest an example inside another fenced block) that splitProtoDeckBlocks already treated
+// as one.
+var (
+	reMermaidFenceOpen  = regexp.MustCompile("^`{3,}mermaid[ \t]*$")
+	reMermaidFenceClose = regexp.MustCompile("^`{3,}[ \t]*$")
+)
+
 // findMermaidFence scans lines for a single ```mermaid ... ``` fenced block and returns its
 // content line range [open+1, close) once found. It errors on a second fence in the same block,
 // an unterminated fence, or an empty one; errNoMermaidFence specifically signals no fence was
@@ -272,13 +304,13 @@ func findMermaidFence(lines []string, metaNum int) (open, closeAt int, err error
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		switch {
-		case !inFence && trimmed == "```mermaid":
+		case !inFence && reMermaidFenceOpen.MatchString(trimmed):
 			if open != -1 {
 				return 0, 0, fmt.Errorf("slide %d: more than one mermaid diagram in one slide block", metaNum)
 			}
 			inFence = true
 			open = i
-		case inFence && trimmed == "```":
+		case inFence && reMermaidFenceClose.MatchString(trimmed):
 			inFence = false
 			closeAt = i
 		}
@@ -342,17 +374,24 @@ func parseDiagramBlock(block string, metaNum int) (*Diagram, error) {
 		return nil, err
 	}
 
-	alt, err := diagramAltText(block, metaNum)
+	// Every check below scans lines OUTSIDE the fence, not block/lines directly: the fence's own
+	// content is the diagram's actual source, which can legitimately contain lines that look like
+	// an alt comment, a "> " blockquote, or a "- " bullet (Mermaid frontmatter, mindmap syntax,
+	// arrow labels, ...) without those being real diagram-block metadata to validate.
+	outside := append(append([]string{}, lines[:open]...), lines[closeAt+1:]...)
+	outsideBlock := strings.Join(outside, "\n")
+
+	alt, err := diagramAltText(outsideBlock, metaNum)
 	if err != nil {
 		return nil, err
 	}
 
-	caption, err := diagramCaption(lines, metaNum)
+	caption, err := diagramCaption(outside, metaNum)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(bulletLines(block)) > 0 {
+	if len(bulletLines(outsideBlock)) > 0 {
 		return nil, fmt.Errorf("slide %d: diagram slide cannot contain bullets", metaNum)
 	}
 
