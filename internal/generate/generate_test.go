@@ -35,6 +35,10 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 		llmErr   error
 		nilGen   bool
 		nilLLM   bool
+		// wantLen, when nonzero, requires GenerateStage to return exactly this
+		// many questions instead of just >= count — used to prove an overshoot
+		// response is returned in full, not truncated down to count.
+		wantLen int
 	}{
 		{name: "true false", stage: config.StageTF, count: 1, response: `{"questions":[{"text":"Sky blue?","options":[{"text":"True","is_correct":true,"match_text":""},{"text":"False","is_correct":false,"match_text":""}]}]}`},
 		{name: "multiple answer", stage: config.StageMA, count: 1, response: `{"questions":[{"text":"Pick colors","options":[{"text":"Red","is_correct":true,"match_text":""},{"text":"Blue","is_correct":true,"match_text":""}]}]}`},
@@ -44,7 +48,7 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 		{name: "essay", stage: config.StageES, count: 1, response: `{"questions":[{"text":"Explain.","options":[]}]}`},
 		{name: "numeric response", stage: config.StageNR, count: 1, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""}]}]}`},
 		{name: "count mismatch", stage: config.StageMC, count: 2, response: `{"questions":[]}`, wantErr: "returned 0 mc questions; want at least 2"},
-		{name: "count overshoot accepted", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""},{"text":"5","is_correct":false,"match_text":""}]},{"text":"Three plus three?","options":[{"text":"6","is_correct":true,"match_text":""},{"text":"7","is_correct":false,"match_text":""}]}]}`},
+		{name: "count overshoot accepted", stage: config.StageMC, count: 1, wantLen: 2, response: `{"questions":[{"text":"Two plus two?","options":[{"text":"4","is_correct":true,"match_text":""},{"text":"5","is_correct":false,"match_text":""}]},{"text":"Three plus three?","options":[{"text":"6","is_correct":true,"match_text":""},{"text":"7","is_correct":false,"match_text":""}]}]}`},
 		{name: "invalid multiple choice", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Q","options":[{"text":"A","is_correct":true,"match_text":""}]}]}`, wantErr: "requires at least two options"},
 		{name: "empty question text", stage: config.StageMC, count: 1, response: `{"questions":[{"text":" ","options":[{"text":"A","is_correct":true,"match_text":""},{"text":"B","is_correct":false,"match_text":""}]}]}`, wantErr: "text is empty"},
 		{name: "empty option text", stage: config.StageMC, count: 1, response: `{"questions":[{"text":"Q","options":[{"text":" ","is_correct":true,"match_text":""},{"text":"B","is_correct":false,"match_text":""}]}]}`, wantErr: "option 1 text is empty"},
@@ -92,6 +96,12 @@ func TestGenerateStage_Table(t *testing.T) { //nolint:gocyclo // table covers ea
 			}
 			if len(questions) < tt.count {
 				t.Fatalf("len=%d want>=%d", len(questions), tt.count)
+			}
+			if tt.wantLen != 0 && len(questions) != tt.wantLen {
+				t.Fatalf("len=%d want exactly %d (an overshoot response must be returned in full, not truncated to count)", len(questions), tt.wantLen)
+			}
+			if !strings.Contains(fake.prompt, fmt.Sprintf("Create at least %d", tt.count)) {
+				t.Fatalf("prompt does not use minimum-count wording: %q", fake.prompt)
 			}
 			if fake.schema == nil || fake.schema.Name != "quiz_questions" {
 				t.Fatalf("schema=%+v", fake.schema)
