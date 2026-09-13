@@ -888,9 +888,6 @@ func TestRender_MermaidDiagram(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	if len(warnings) != 0 {
-		// mmdc is confirmed on PATH (see the LookPath check above), so a warning here means the
-		// mmdc invocation, PNG validation, or slide embedding actually broke — a real regression
-		// this integration test exists to catch, not an environment quirk to shrug off.
 		t.Fatalf("mmdc is on PATH; render should not have produced a diagram warning: %v", warnings)
 	}
 	out, err := readZip(outputPath)
@@ -914,33 +911,14 @@ func TestRender_MermaidDiagram(t *testing.T) {
 }
 
 // TestRender_MermaidDiagramMmdcScenarios is a justified exception to the single-table-function
-// convention above: every case needs its own t.Setenv-stubbed "mmdc" binary, and t.Setenv forbids
-// t.Parallel() on the test that calls it (see go-test-conventions) — so neither this function nor
-// its subtests can run in parallel, unlike TestRender_MermaidDiagram's real-mmdc integration test.
-// The three scenarios below are still folded into one table rather than three separate top-level
-// functions, per that same convention's guidance to prefer sharing a table when cases share a
-// setup shape instead of proliferating standalone functions:
-//   - "render failure falls back to title/caption": the fallback path (title/caption slide
-//     shipped, warning returned, picture omitted) otherwise has no deterministic coverage — a
-//     machine either lacks mmdc (TestRender_MermaidDiagram skips) or has a working one (never
-//     exercises the failure branch).
-//   - "two diagrams in one deck": a regression test for the deckSlideKind.pristine bug (see its
-//     doc comment in pptx.go).
-//   - "diagram media name collides with an existing template asset": a regression test for the
-//     nextUnusedMediaPart bug (see its doc comment in pptx.go).
-//   - "removing an unused prototype cleans up a template's own Sections": a regression test for
-//     the removeDanglingSectionSldID bug (see removeSlide's doc comment in pptx.go).
-// Every case's Diagram.Source below must be unique across this whole table (and across every
-// other test in this package): defaultMermaidRenderer's PNG cache is package-level and keyed by
-// source text alone, so a source reused from a test that already rendered it successfully would
-// serve that old cached PNG here instead of ever invoking this test's stubbed mmdc — silently
-// making the stub, and whatever behavior it's meant to force (a render failure, in particular),
-// a no-op.
+// convention above: every case needs its own t.Setenv-stubbed "mmdc", which forbids t.Parallel()
+// (see go-test-conventions), so these are folded into one non-parallel table instead of
+// proliferating standalone functions. Each case's Diagram.Source must stay unique across this
+// whole package: defaultMermaidRenderer's PNG cache is package-level and keyed by source text, so
+// a reused source would skip invoking the stub entirely.
 func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 	tests := []struct {
-		name string
-		// script builds the stubbed mmdc's body; fixture is a real PNG file path a
-		// mmdcCopyFixtureScript-based script can `cp` into place to simulate a successful render.
+		name            string
 		script          func(fixture string) string
 		templateEntries func() map[string][]byte
 		dc              func() *distill.DistilledContext
@@ -1046,10 +1024,6 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				if _, ok := out["ppt/media/diagram2.png"]; !ok {
 					t.Fatal("expected the new diagram to be written as diagram2.png, since diagram1.png was already taken")
 				}
-				// Not just that diagram2.png exists, but that the diagram slide's own relationship
-				// actually points at it — a bug that wrote the new PNG's bytes under the new name
-				// while still relating the slide to diagram1.png (i.e. displaying the template's
-				// unrelated artwork) would otherwise pass the two checks above.
 				mustContainAll(t, "diagram slide rels", string(out["ppt/slides/_rels/slide9.xml.rels"]), `Target="../media/diagram2.png"`)
 			},
 		},
@@ -1058,11 +1032,7 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 			script: mmdcCopyFixtureScript,
 			templateEntries: func() map[string][]byte {
 				e := diagramTemplateEntries()
-				// Content prototype's own sldId (see diagramTemplateEntries' presentation.xml:
-				// rId3 -> slide2.xml -> sldId 257) is referenced by a Section the template already
-				// ships, unrelated to anything this package's own addSections (sections.go) adds.
-				// This deck uses only diagram slides, so the Content prototype goes unused and gets
-				// removeSlide'd — which must also clean up this dangling reference.
+				// 257: content prototype's sldId, per diagramTemplateEntries.
 				const preexistingSectionExt = `<p:extLst><p:ext uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}">` +
 					`<p14:sectionLst xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">` +
 					`<p14:section name="Legacy" id="{00000000-0000-0000-0000-000000000001}">` +
@@ -1094,6 +1064,37 @@ func TestRender_MermaidDiagramMmdcScenarios(t *testing.T) {
 				if strings.Contains(pres, `name="Legacy"`) {
 					t.Fatalf("the now-empty \"Legacy\" section should have been dropped entirely: %q", pres)
 				}
+			},
+		},
+		{
+			name:   "diagram title/caption collide with the picture placeholder marker",
+			script: mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: `A type="pic" Diagram`,
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{
+								Source:  "flowchart LR\n  R --> S",
+								Alt:     "R leads to S.",
+								Caption: `Its caption also says type="pic" for good measure.`,
+							},
+						},
+					},
+				}
+			},
+			verify: func(t *testing.T, out map[string][]byte) {
+				t.Helper()
+				diagram := string(out["ppt/slides/slide9.xml"])
+				mustContainAll(t, "diagram slide", diagram,
+					`<a:t>A type="pic" Diagram</a:t>`,
+					`<a:t>Its caption also says type="pic" for good measure.</a:t>`,
+					`<p:pic>`,
+				)
 			},
 		},
 	}

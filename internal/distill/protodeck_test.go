@@ -591,6 +591,31 @@ func TestParseProtoDeck_MermaidDiagram(t *testing.T) {
 	}
 }
 
+func TestParseProtoDeck_MermaidDiagramFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Themed lifecycle\n<!-- alt: Client sends a request to an API, which queries a database and responds to client. -->\n" +
+		"> The API mediates every database request.\n```mermaid\n---\ntitle: Lifecycle\n---\nflowchart LR\n  Client --> API --> Database\n```\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse diagram deck with frontmatter: %v", err)
+	}
+	want := distill.Slide{
+		Title: "Themed lifecycle",
+		Tag:   "ch01",
+		Diagram: &distill.Diagram{
+			Source:  "---\ntitle: Lifecycle\n---\nflowchart LR\n  Client --> API --> Database",
+			Alt:     "Client sends a request to an API, which queries a database and responds to client.",
+			Caption: "The API mediates every database request.",
+		},
+	}
+	if len(slides) != 1 || !reflect.DeepEqual(slides[0], want) {
+		t.Fatalf("slides=%+v, want [%+v]", slides, want)
+	}
+}
+
 func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
 	t.Parallel()
 

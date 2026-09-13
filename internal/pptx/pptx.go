@@ -740,6 +740,11 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 	return nil
 }
 
+// rePicPhTag matches a <p:ph .../> or <p:ph ...> tag with a type="pic" attribute, anywhere in the
+// tag (PowerPoint can order p:ph attributes either way) — see picPlaceholderShapeBounds for why
+// anchoring on this tag, not a bare "type=\"pic\"" substring, matters.
+var rePicPhTag = regexp.MustCompile(`<p:ph\b[^>]*\btype="pic"[^>]*/?>`)
+
 // picPlaceholderShapeBounds finds the byte range [start, end) of the single <p:sp> shape
 // enclosing a <p:ph .../> with type="pic" in xml, anchored on the ph tag's own position — the
 // same LastIndex-back/Index-forward scan setPlaceholderBullets uses for a text placeholder,
@@ -751,12 +756,19 @@ func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsP
 // to the picture one's close tag — silently deleting the title/body shapes it was never supposed
 // to touch. ok is false if no picture placeholder is found.
 func picPlaceholderShapeBounds(xml []byte) (start, end int, ok bool) {
-	// PowerPoint can order p:ph attributes either way, so match type="pic" anywhere in the tag
-	// rather than anchoring on "<p:ph type=\"pic\"" specifically.
-	phIdx := bytes.Index(xml, []byte(`type="pic"`))
-	if phIdx == -1 {
+	// Anchored on the <p:ph ...> tag itself, not a bare "type=\"pic\"" substring search: this runs
+	// on a slide whose title/caption text has already been filled in (fillDiagramSlide fills text
+	// first, then swaps the picture placeholder), so a bare substring search could match a literal
+	// "type=\"pic\"" sitting inside a diagram's title or caption <a:t> text instead of the real
+	// placeholder tag, and drop that text shape instead. rePicPhTag requires the match to start
+	// with "<p:ph", which text content can never produce — xmlTextReplacer escapes every literal
+	// "<" in inserted text to "&lt;". PowerPoint can order p:ph attributes either way, so
+	// type="pic" is still matched anywhere within the tag, not only right after "<p:ph".
+	loc := rePicPhTag.FindIndex(xml)
+	if loc == nil {
 		return 0, 0, false
 	}
+	phIdx := loc[0]
 	spStart := bytes.LastIndex(xml[:phIdx], []byte("<p:sp>"))
 	if spStart == -1 {
 		return 0, 0, false

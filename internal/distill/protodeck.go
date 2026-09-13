@@ -167,7 +167,31 @@ func validateProtoDeck(deck string, minSlides, maxSlides int) (warnings []string
 
 // reProtoSeparator matches a "---" slide-separator line, the format GenerateProtoDeck emits and
 // ParseProtoDeck reads back.
-var reProtoSeparator = regexp.MustCompile(`(?m)^---\s*$`)
+var reProtoSeparator = regexp.MustCompile(`^---\s*$`)
+
+// splitProtoDeckBlocks splits markdown into "---"-separated blocks the way GenerateProtoDeck emits
+// them, except a "---" line inside an open fenced code block (``` ... ```, any info string) is
+// never treated as a slide separator: Mermaid permits "---"-delimited YAML frontmatter inside a
+// ```mermaid fence, and a naive line-based split would otherwise cut that fence into unrelated
+// blocks and report it as an unterminated or malformed diagram instead of parsing it.
+func splitProtoDeckBlocks(markdown string) []string {
+	lines := strings.Split(markdown, "\n")
+	blocks := make([]string, 0, 8)
+	current := make([]string, 0, len(lines))
+	var inFence bool
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+		}
+		if !inFence && reProtoSeparator.MatchString(line) {
+			blocks = append(blocks, strings.Join(current, "\n"))
+			current = current[:0]
+			continue
+		}
+		current = append(current, line)
+	}
+	return append(blocks, strings.Join(current, "\n"))
+}
 
 // ParseProtoDeck is the inverse of GenerateProtoDeck: it parses proto-deck markdown — whether
 // produced by GenerateProtoDeck or written by hand in the same format — into the pieces
@@ -185,7 +209,7 @@ var reProtoSeparator = regexp.MustCompile(`(?m)^---\s*$`)
 // block with no mermaid fence ignores any "<!-- alt: ... -->"/"> " lines it happens to contain,
 // silently, the same as any other non-bullet line ParseProtoDeck already drops.
 func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Slide, err error) {
-	blocks := reProtoSeparator.Split(markdown, -1)
+	blocks := splitProtoDeckBlocks(markdown)
 	if len(blocks) == 0 {
 		return "", nil, nil, errors.New("empty proto deck markdown")
 	}
