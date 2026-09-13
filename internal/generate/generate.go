@@ -160,7 +160,7 @@ func validateQuestion(stage config.Stage, question generatedQuestion) error { //
 }
 
 func buildPrompt(stage config.Stage, sourceText string, count int) string {
-	return fmt.Sprintf(`Create exactly %d %s quiz questions from source material below.
+	return fmt.Sprintf(`Create at least %d %s quiz questions from source material below.
 
 Ground every question and answer in source material. Do not invent facts. Return JSON only, matching supplied schema. Write every mathematical expression in LaTeX delimiters: inline math uses \\(...\\) and display math uses \\[...\\]. Preserve source LaTeX exactly when it already uses these delimiters. Code identifiers, function names, and variable names (e.g. create_vector, get_component) must stay in plain markdown backtick spans and never be placed inside LaTeX delimiters or \texttt{}: Canvas's MathJax renders an escaped underscore (\_) inside \texttt{} as a literal backslash instead of collapsing it, so escaping is only for math-mode content, not code. For unused match_text fields return an empty string.
 
