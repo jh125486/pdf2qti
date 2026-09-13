@@ -55,7 +55,7 @@ type generatedOption struct {
 	MatchText string `json:"match_text"`
 }
 
-// GenerateStage generates exactly count questions for stage, grounded only in sourceText.
+// GenerateStage generates at least count questions for stage, grounded only in sourceText.
 func (g *Generator) GenerateStage(ctx context.Context, stage config.Stage, sourceText string, count int) ([]render.Question, error) {
 	if count < 0 {
 		return nil, fmt.Errorf("question count must not be negative")
@@ -81,8 +81,8 @@ func (g *Generator) GenerateStage(ctx context.Context, stage config.Stage, sourc
 	if err := json.Unmarshal([]byte(raw), &response); err != nil {
 		return nil, fmt.Errorf("parse LLM response: %w", err)
 	}
-	if len(response.Questions) != count {
-		return nil, fmt.Errorf("LLM returned %d %s questions; want %d", len(response.Questions), stage, count)
+	if len(response.Questions) < count {
+		return nil, fmt.Errorf("LLM returned %d %s questions; want at least %d", len(response.Questions), stage, count)
 	}
 
 	questions := make([]render.Question, len(response.Questions))
