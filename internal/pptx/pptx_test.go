@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,6 +63,24 @@ func demoSlideXML(titleText string) string {
 	return `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>` +
 		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>` + titleText + `</a:t></a:r></a:p></p:txBody></p:sp>` +
 		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="body" idx="11"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>` +
+		`</p:spTree></p:cSld></p:sld>`
+}
+
+func diagramTemplateEntries() map[string][]byte {
+	e := baseTemplateEntries()
+	e["ppt/presentation.xml"] = []byte(`<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="255" r:id="rId1"/><p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/><p:sldId id="258" r:id="rId4"/></p:sldIdLst></p:presentation>`)
+	e["ppt/_rels/presentation.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide0.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide9.xml"/></Relationships>`)
+	e["ppt/slideLayouts/slideLayout4.xml"] = []byte(`<?xml version="1.0"?><p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld name="Diagram"><p:spTree><p:sp><p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr><p:nvSpPr><p:nvPr><p:ph idx="10" type="pic"/></p:nvPr></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sldLayout>`)
+	e["ppt/slides/slide9.xml"] = []byte(diagramSlideXML())
+	e["ppt/slides/_rels/slide9.xml.rels"] = []byte(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout4.xml"/></Relationships>`)
+	return e
+}
+
+func diagramSlideXML() string {
+	return `<?xml version="1.0"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>` +
+		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>` +
+		`<p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>` +
+		`<p:sp><p:nvSpPr><p:cNvPr id="9" name="Picture Placeholder"/><p:nvPr><p:ph idx="10" type="pic"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>` +
 		`</p:spTree></p:cSld></p:sld>`
 }
 
@@ -779,6 +798,61 @@ func TestRender(t *testing.T) {
 				tt.verify(t, outEntries)
 			}
 		})
+	}
+}
+
+func TestRender_MermaidDiagram(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("mmdc"); err != nil {
+		t.Skip("mmdc not installed; Mermaid CLI integration unavailable")
+	}
+
+	dir := t.TempDir()
+	templatePath := filepath.Join(dir, "template.pptx")
+	outputPath := filepath.Join(dir, "out.pptx")
+	if err := writeZip(templatePath, diagramTemplateEntries()); err != nil {
+		t.Fatal(err)
+	}
+	dc := &distill.DistilledContext{
+		ModuleName: "Diagrams",
+		Agenda:     []string{"One", "Two", "Three"},
+		Slides: []distill.Slide{
+			{Title: "Text", Content: "Bullet", Tag: "ch01"},
+			{
+				Title: "Lifecycle",
+				Tag:   "ch01",
+				Diagram: &distill.Diagram{
+					Source:  "flowchart LR\n  Client --> API --> Database",
+					Alt:     `Client sends request to API, then API queries database.`,
+					Caption: "The API mediates storage access.",
+				},
+			},
+		},
+	}
+	warnings, err := pptx.Render(templatePath, dc, "", nil, outputPath)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Skipf("mmdc installed but unusable in test environment: %v", warnings)
+	}
+	out, err := readZip(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagram := string(out["ppt/slides/slide9.xml"])
+	mustContainAll(t, "diagram slide", diagram,
+		`<a:t>Lifecycle</a:t>`,
+		`<a:t>The API mediates storage access.</a:t>`,
+		`<p:pic>`,
+		`descr="Client sends request to API, then API queries database."`,
+		`r:embed="rId2"`,
+	)
+	if _, ok := out["ppt/media/diagram1.png"]; !ok {
+		t.Fatal("expected rendered Mermaid PNG media part")
+	}
+	if !strings.Contains(string(out["[Content_Types].xml"]), `Extension="png" ContentType="image/png"`) {
+		t.Fatal("expected PNG content type")
 	}
 }
 

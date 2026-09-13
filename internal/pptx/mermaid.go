@@ -1,0 +1,180 @@
+package pptx
+
+import (
+	"bytes"
+	"fmt"
+	"image"
+	_ "image/png" // registers the PNG format with image.DecodeConfig, used to sanity-check mmdc's output
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+// mermaidRenderer shells out to mmdc (mermaid-cli) to rasterize a Mermaid diagram source into a
+// PNG, mirroring mathConverter's (math.go) shape: a package-level, mutex-guarded cache keyed by
+// the diagram source, re-checking exec.LookPath("mmdc") on every call rather than caching a
+// one-time "missing" verdict, so a caller degrades gracefully the moment mmdc becomes available (or
+// unavailable) rather than being stuck with whatever the process's first call happened to observe.
+//
+// Fallback contract: if mmdc is missing, or a given diagram's source fails to render, the slide
+// carrying that diagram is still emitted with its title and caption — just without the picture —
+// and the failure is recorded on a diagramWarnings collector (see below). fillDiagramSlide (pptx.go)
+// never turns a rendering failure into a hard Render error; a broken or unrenderable diagram is no
+// more fatal to a deck than an unconvertible math formula is (see mathWarnings for the same idea
+// applied to LaTeX-to-OMML conversion).
+type mermaidRenderer struct {
+	cacheMu sync.Mutex
+	cache   map[string][]byte
+}
+
+// defaultMermaidRenderer is the package-level renderer used by fillDiagramSlide.
+var defaultMermaidRenderer = &mermaidRenderer{cache: make(map[string][]byte)}
+
+// renderPNG rasterizes source (trimmed mermaid diagram markup) to PNG bytes, transparent
+// background, via mmdc. Successful renders are cached by source text — package-level sharing is
+// safe here for the same reason mathConverter's cache is: pure memoization, same source always
+// produces the same PNG, and a hit from an unrelated Render call is still a correct answer.
+func (r *mermaidRenderer) renderPNG(source string) ([]byte, error) {
+	source = strings.TrimSpace(source)
+
+	r.cacheMu.Lock()
+	cached, ok := r.cache[source]
+	r.cacheMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	mmdc, err := exec.LookPath("mmdc")
+	if err != nil {
+		return nil, fmt.Errorf("mmdc not found on PATH: %w", err)
+	}
+
+	dir, err := os.MkdirTemp("", "pdf2qti-mermaid-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir for mermaid render: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	inPath := filepath.Join(dir, "in.mmd")
+	outPath := filepath.Join(dir, "out.png")
+	if err := os.WriteFile(inPath, []byte(source), 0o600); err != nil {
+		return nil, fmt.Errorf("write mermaid source: %w", err)
+	}
+
+	cmd := exec.Command(mmdc, "-i", inPath, "-o", outPath, "-b", "transparent", "-s", "2") //nolint:gosec // mmdc resolved via exec.LookPath, not user input
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("run mmdc: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	png, err := os.ReadFile(outPath) //nolint:gosec // outPath is our own temp file, not user input
+	if err != nil {
+		return nil, fmt.Errorf("read mermaid output png: %w", err)
+	}
+	if _, _, err := image.DecodeConfig(bytes.NewReader(png)); err != nil {
+		return nil, fmt.Errorf("mmdc output is not a valid png: %w", err)
+	}
+
+	r.cacheMu.Lock()
+	r.cache[source] = png
+	r.cacheMu.Unlock()
+	return png, nil
+}
+
+// diagramWarnings collects diagrams that failed to render to PNG during one Render call, deduped
+// by source text — a near-copy of mathWarnings (math.go), for the identical reason: this package's
+// tests run many Render calls concurrently via t.Parallel(), so a shared, package-level collector
+// would race between them (one call's collection could steal or clear warnings a concurrently-
+// running call hadn't reported yet). Scoped to a single Render call instead, threaded down through
+// applyDeck -> ... -> fillDiagramSlide. The zero value is ready to use; a nil *diagramWarnings is
+// also safe to call add/warnings on.
+type diagramWarnings struct {
+	mu   sync.Mutex
+	seen map[string]bool
+	list []string
+}
+
+// add records source as having failed to render, with err's message, unless the same source was
+// already recorded on this collector. Appends in call order, matching mathWarnings.add.
+func (w *diagramWarnings) add(source string, err error) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.seen == nil {
+		w.seen = make(map[string]bool)
+	}
+	if w.seen[source] {
+		return
+	}
+	w.seen[source] = true
+	w.list = append(w.list, fmt.Sprintf("diagram failed to render, slide emitted without its picture: %v", err))
+}
+
+// warnings returns every diagram-render failure recorded so far, in the order first encountered.
+func (w *diagramWarnings) warnings() []string {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.list
+}
+
+// pngDimensions returns png's pixel width and height, for fitBox to convert to EMU.
+func pngDimensions(png []byte) (width, height int, err error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(png))
+	if err != nil {
+		return 0, 0, fmt.Errorf("decode png dimensions: %w", err)
+	}
+	return cfg.Width, cfg.Height, nil
+}
+
+// picBox is a picture placeholder's layout-level box, in EMU, as read off a slide layout's
+// <a:xfrm> (see picPlaceholderBox in pptx.go).
+type picBox struct {
+	x, y   int64
+	cx, cy int64
+}
+
+// emuPerPixel converts a PNG's pixel dimensions to EMU assuming 96 DPI (PowerPoint's own default
+// for raster images with no embedded DPI metadata) — 914400 EMU per inch / 96 px per inch.
+const emuPerPixel = 9525
+
+// fitBox computes the offset and extent (EMU) to draw a natW x natH (pixels) image centered inside
+// box, scaled down (never up — mmdc's "-s 2" output is already large; upscaling would just blur it
+// further) to fit both dimensions.
+func fitBox(natW, natH int, box picBox) (offX, offY, cx, cy int64) {
+	natEMUW := int64(natW) * emuPerPixel
+	natEMUH := int64(natH) * emuPerPixel
+	if natEMUW <= 0 || natEMUH <= 0 || box.cx <= 0 || box.cy <= 0 {
+		return box.x, box.y, box.cx, box.cy
+	}
+
+	scale := min(float64(box.cx)/float64(natEMUW), float64(box.cy)/float64(natEMUH), 1.0)
+
+	cx = int64(float64(natEMUW) * scale)
+	cy = int64(float64(natEMUH) * scale)
+	offX = box.x + (box.cx-cx)/2
+	offY = box.y + (box.cy-cy)/2
+	return offX, offY, cx, cy
+}
+
+// xmlAttrReplacer escapes text for placement inside a double-quoted XML attribute value — the same
+// three characters xmlTextReplacer escapes for element text, plus '"' itself, which xmlTextReplacer
+// doesn't need to touch since <a:t> element content never sits inside quotes.
+var xmlAttrReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+
+// picXML renders a <p:pic> element embedding a diagram image: id must be unique within the
+// slide's spTree, alt is the screen-reader description (escaped for an XML attribute), rID is the
+// slide's own relationship id for the image part, and box is the EMU position/size to draw it at
+// (see fitBox).
+func picXML(id int, alt, rID string, box picBox) string {
+	return fmt.Sprintf(
+		`<p:pic><p:nvPicPr><p:cNvPr id="%d" name="Diagram" descr="%s"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>`+
+			`<p:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>`+
+			`<p:spPr><a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`,
+		id, xmlAttrReplacer.Replace(alt), rID, box.x, box.y, box.cx, box.cy)
+}

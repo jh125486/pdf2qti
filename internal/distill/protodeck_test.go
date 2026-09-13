@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -562,6 +563,56 @@ func TestParseProtoDeck_HandWrittenLooseSpacing(t *testing.T) {
 	}
 	if len(slides) != 1 || slides[0] != (distill.Slide{Title: "A Slide", Content: "bullet", Tag: "ch01"}) {
 		t.Fatalf("got slides %+v", slides)
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagram(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Request lifecycle\n<!-- alt: Client sends a request to an API, which queries a database and responds to client. -->\n" +
+		"> The API mediates every database request.\n```mermaid\nflowchart LR\n  Client --> API --> Database\n```\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse diagram deck: %v", err)
+	}
+	want := distill.Slide{
+		Title: "Request lifecycle",
+		Tag:   "ch01",
+		Diagram: &distill.Diagram{
+			Source:  "flowchart LR\n  Client --> API --> Database",
+			Alt:     "Client sends a request to an API, which queries a database and responds to client.",
+			Caption: "The API mediates every database request.",
+		},
+	}
+	if len(slides) != 1 || !reflect.DeepEqual(slides[0], want) {
+		t.Fatalf("slides=%+v, want [%+v]", slides, want)
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n<!-- meta: 2 ch01 -->\n# Diagram\n"
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing alt text", body: "> caption\n```mermaid\nflowchart LR\n A --> B\n```", want: "requires a non-empty"},
+		{name: "missing caption", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n A --> B\n```", want: "caption line"},
+		{name: "empty diagram", body: "<!-- alt: diagram -->\n> caption\n```mermaid\n```", want: "cannot be empty"},
+		{name: "diagram bullet", body: "<!-- alt: diagram -->\n> caption\n- forbidden\n```mermaid\nflowchart LR\n A --> B\n```", want: "cannot contain bullets"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := distill.ParseProtoDeck(prefix + tt.body)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want substring %q", err, tt.want)
+			}
+		})
 	}
 }
 

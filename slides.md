@@ -51,6 +51,39 @@ Every non-agenda, non-summary slide is tagged with the source chapter it came fr
   `\begin{cases}`, `\begin{bmatrix}`, etc.) is broken into one level-1 sub-bullet per row, instead
   of one oversized bullet holding the whole block.
 
+### Mermaid diagram slides
+
+A content-slide block can be a Mermaid diagram instead of a set of bullets. A diagram block
+contains exactly one non-empty ` ```mermaid ` fenced code block, exactly one non-empty
+`<!-- alt: ... -->` comment line, and exactly one non-empty `> ` blockquote line — and no bullets.
+`pptx` renders the diagram to a PNG and places it, with its title and caption, on its own
+dedicated slide.
+
+````markdown
+<!-- meta: 3 ch01 -->
+# Request lifecycle
+
+<!-- alt: A client sends a request to an API, which queries a database and returns a response to the client. -->
+> Requests pass through the API before data is read from storage.
+
+```mermaid
+flowchart LR
+  Client --> API --> Database
+  Database --> API --> Client
+```
+````
+
+The `<!-- alt: ... -->` line is the image's screen-reader description, embedded on the rendered
+PNG for PowerPoint accessibility — keep it structural and specific, naming the diagram's actual
+nodes, arrows, and direction, since a reader can't see the picture. The `> ` blockquote is the
+caption a sighted viewer reads alongside the diagram — keep that one focused on the teaching
+takeaway instead. The two rarely make good stand-ins for each other.
+
+A template only needs a `Diagram` slide layout when a deck actually contains a diagram slide —
+existing Title/Agenda/Content-only templates stay valid for decks without one. That layout needs
+`title`, `body`, and `pic` placeholders: `title` and `body` take the diagram slide's title and
+caption exactly like a Content slide, and `pic` is replaced by the rendered diagram image.
+
 ### Math
 
 LaTeX is written inline using `\(...\)` for inline math and `\[...\]` for display math (never bare

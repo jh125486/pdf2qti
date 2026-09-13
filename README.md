@@ -221,6 +221,14 @@ template path is a positional argument. `-v`/`--vars` passes extra `key=value` t
 variables (`;`-separated for multiple) available inside the template alongside the distilled
 context data.
 
+Mermaid diagram blocks (see [`slides.md`](slides.md)) render as PNGs on their own dedicated
+slides. A template used with such a deck needs a `Diagram` layout with `title`, `body`, and `pic`
+placeholders — `body` gets the visible caption, `pic` is replaced by the rendered diagram, and its
+alt text becomes the image's screen-reader description. Requires [`mmdc`](https://github.com/mermaid-js/mermaid-cli)
+on `PATH`; if a diagram fails to render, its slide still ships with title and caption, missing only
+the picture, and the failure is reported back as a warning rather than failing the whole render.
+A template with no `Diagram` layout is still valid for a deck that has no diagram slides.
+
 ### `module` — Build a combined slide-deck Markdown doc across chapters
 
 ```bash
