@@ -24,7 +24,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		wantErr       string
 		wantURL       string
 	}{
-		{name: "success", onExisting: ExistingAppend, expectedCalls: 16, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
@@ -38,12 +38,12 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		{name: "return to banks", failAt: 8, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "return to Item Banks"},
 		{name: "open bank", failAt: 9, onExisting: ExistingAppend, expectedCalls: 9, wantErr: "open Item Bank"},
 		{name: "wait actions", failAt: 10, onExisting: ExistingAppend, expectedCalls: 10, wantErr: "wait for Item Bank actions"},
-		{name: "open actions", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import actions"},
-		{name: "open dialog", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "open import dialog"},
-		{name: "attach package", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "attach package"},
-		{name: "submit import", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "submit import"},
-		{name: "wait completion", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "wait for import completion"},
-		{name: "read location", failAt: 17, onExisting: ExistingAppend, expectedCalls: 17, wantErr: "read Item Bank URL"},
+		{name: "open actions", failAt: 11, onExisting: ExistingAppend, expectedCalls: 11, wantErr: "open import actions"},
+		{name: "open dialog", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import dialog"},
+		{name: "attach package", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "attach package"},
+		{name: "submit import", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "submit import"},
+		{name: "wait completion", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "wait for import completion"},
+		{name: "read location", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "read Item Bank URL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -122,6 +122,45 @@ func TestImportTimeout_Table(t *testing.T) {
 	}
 }
 
+func TestIsTimeoutLike_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "context deadline exceeded", err: errors.New("context deadline exceeded"), want: true},
+		{name: "poll timeout", err: errors.New("waiting for function failed: timeout"), want: true},
+		{name: "poll JS exception is not a timeout", err: errors.New("waiting for function failed: SyntaxError: Unexpected token"), want: false},
+		{name: "unrelated error", err: errors.New("browser failed"), want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTimeoutLike(tt.err); got != tt.want {
+				t.Fatalf("isTimeoutLike(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers covers a
+// bug found in review: a failed pre-upload baseline read must not silently
+// fall back to treating the bank as empty. Defaulting to 0 would let an
+// ExistingAppend onto a bank that already had content report "recovered" as
+// soon as that pre-existing content became visible again, even though this
+// run's own upload never completed.
+func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *testing.T) {
+	t.Parallel()
+	importer := ChromedpImporter{
+		run:           func(context.Context, ...chromedp.Action) error { return nil },
+		bankItemCount: func(context.Context) (int, error) { return 5, nil }, // bank has content
+	}
+	if got := importer.recoverStuckImport(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
+		t.Fatal("recoverStuckImport() = true with an unknown (-1) baseline, want false")
+	}
+}
+
 // TestChromedpImporterImport_RecoversFromUploadTimeout covers the two flakes
 // documented in docs/item-bank-import-flake.md: a plain timeout on
 // attach/submit/wait-completion recovers by re-checking the bank for actual
@@ -150,7 +189,6 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			bankItemCountCalls := 0
 			importer := ChromedpImporter{
 				run: func(_ context.Context, _ ...chromedp.Action) error {
 					calls++
@@ -162,18 +200,12 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 					}
 					return nil
 				},
-				// First call is the pre-upload baseline read (an empty bank, as in
-				// this test's create-new-bank flow); later calls are
-				// recoverStuckImport's post-recovery check, which must see actual
-				// growth past that baseline to consider the import recovered.
-				bankItemCount: func(context.Context) (int, error) {
-					bankItemCountCalls++
-					if bankItemCountCalls == 1 {
-						return 0, nil
-					}
-					return tt.recoveredJS, nil
-				},
-				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+				// This test's bank is freshly created (found == false), so its
+				// baseline is hardcoded to 0 by Import() itself, not read through
+				// this hook; the only call recoverStuckImport's post-recovery
+				// check needs to see growth past that 0 baseline.
+				bankItemCount: func(context.Context) (int, error) { return tt.recoveredJS, nil },
+				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
 			result, err := importer.Import(context.Background(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
@@ -266,12 +298,22 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
+			bankItemCountCalls := 0
 			importer := ChromedpImporter{
-				run:           func(context.Context, ...chromedp.Action) error { calls++; return nil },
-				findBank:      func(context.Context, string) (bool, error) { return true, nil },
-				bankTitle:     func(context.Context) (string, error) { return tt.title, tt.titleErr },
-				bankItemCount: func(context.Context) (int, error) { return tt.count, tt.countErr },
-				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
+				findBank:  func(context.Context, string) (bool, error) { return true, nil },
+				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
+				// First call is the pre-upload baseline read; this test models a
+				// bank with no pre-existing content, so the final tt.count read
+				// (the second call) is the expected total unmodified.
+				bankItemCount: func(context.Context) (int, error) {
+					bankItemCountCalls++
+					if bankItemCountCalls == 1 {
+						return 0, nil
+					}
+					return tt.count, tt.countErr
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
 			result, err := importer.Import(context.Background(), &Request{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedBankName: tt.expectedTitle, ExpectedItemCount: tt.expectedCount})
 			if tt.wantErr == "" && err != nil {

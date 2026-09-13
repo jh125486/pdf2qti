@@ -83,7 +83,11 @@ func isTimeoutLike(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "waiting for function failed")
+	// "waiting for function failed" alone also prefixes chromedp.Poll errors
+	// from a JavaScript exception or other evaluation failure inside the
+	// predicate, not just a timeout — match the concrete timeout suffix so
+	// those aren't mistaken for the same recoverable race.
+	return strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "waiting for function failed: timeout")
 }
 
 // importTimeout scales Import()'s outer browser-context budget with the
@@ -265,14 +269,25 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	// check (recoverStuckImport) can require the bank's item count to have
 	// actually grown, not just be non-zero — an ExistingAppend import onto a
 	// bank that already had content would otherwise satisfy a bare "count >
-	// 0" check even when this run's own upload never completed. Best-effort:
-	// a read failure here just means recovery falls back to requiring
-	// count > 0, same as before this bank was known to be non-empty.
+	// 0" check even when this run's own upload never completed. A bank this
+	// call just created (found == false) is definitionally empty, no read
+	// needed. For an existing bank the read is best-effort: -1 means unknown,
+	// and callers below must treat that as "can't confirm", not silently
+	// fall back to 0 — a false 0 baseline reintroduces exactly the bug this
+	// baseline exists to prevent.
 	baselineItemCount := 0
-	if c.bankItemCount != nil {
-		baselineItemCount, _ = c.bankItemCount(browser)
-	} else {
-		_ = run(browser, chromedp.Evaluate(bankItemCountJS, &baselineItemCount))
+	if found {
+		baselineItemCount = -1
+		if c.bankItemCount != nil {
+			if n, err := c.bankItemCount(browser); err == nil {
+				baselineItemCount = n
+			}
+		} else {
+			var n int
+			if err := run(browser, chromedp.Evaluate(bankItemCountJS, &n)); err == nil {
+				baselineItemCount = n
+			}
+		}
 	}
 
 	if err := run(browser, chromedp.Click(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
@@ -311,6 +326,12 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if !isTimeoutLike(stageErr) || !c.recoverStuckImport(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, baselineItemCount) {
 			return Result{}, fmt.Errorf("%s: %w", stage, stageErr)
 		}
+		// The recovered failure can be workCancel's own deadline expiring, in
+		// which case browser is now a dead context — every remaining step
+		// below must run against a fresh bounded child of sessionCtx instead.
+		workCancel()
+		browser, workCancel = context.WithTimeout(sessionCtx, importTimeout(req.ExpectedItemCount))
+		defer workCancel()
 	}
 	bankTitle := req.BankName
 	if req.ExpectedBankName != "" {
@@ -352,17 +373,29 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	}
 	itemCount := 0
 	if req.ExpectedItemCount > 0 {
+		// req.ExpectedItemCount is the package's own item count. For a fresh
+		// bank (baselineItemCount == 0) that's also the bank's expected final
+		// total, but ExistingAppend imports onto a bank that already had
+		// content — the bank's rendered total after import is the pre-import
+		// baseline plus the package count, not the package count alone. A
+		// baseline read that failed (-1) can't be added meaningfully; fall
+		// back to the package count alone rather than corrupting the target
+		// with a negative offset.
+		expectedTotal := req.ExpectedItemCount
+		if baselineItemCount > 0 {
+			expectedTotal += baselineItemCount
+		}
 		var countErr error
 		if c.bankItemCount != nil {
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
-			itemCount, countErr = c.pollBankItemCount(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, req.ExpectedItemCount)
+			itemCount, countErr = c.pollBankItemCount(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, expectedTotal)
 		}
 		if countErr != nil {
 			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)
 		}
-		if itemCount != req.ExpectedItemCount {
-			return Result{}, fmt.Errorf("imported Item Bank question count = %d, want %d", itemCount, req.ExpectedItemCount)
+		if itemCount != expectedTotal {
+			return Result{}, fmt.Errorf("imported Item Bank question count = %d, want %d", itemCount, expectedTotal)
 		}
 	}
 	var location string
@@ -674,10 +707,16 @@ func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks
 // Requiring growth past the baseline (not just count > 0) matters for
 // ExistingAppend: a bank that already had content before this run's own
 // upload would otherwise satisfy a bare non-zero check even when the
-// upload never completed. A positive result leaves the browser positioned
-// on the bank's page, exactly where the rest of Import() expects to be
-// after a normal completion.
+// upload never completed. baselineItemCount == -1 means the pre-upload read
+// failed — treated as non-recoverable rather than falling back to 0, since
+// a false 0 baseline reintroduces exactly the false-positive this baseline
+// exists to prevent. A positive result leaves the browser positioned on the
+// bank's page, exactly where the rest of Import() expects to be after a
+// normal completion.
 func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if baselineItemCount < 0 {
+		return false
+	}
 	// sessionCtx is the browser tab's own context, not the deadline-bounded
 	// one the failed step above used — that deadline expiring is exactly one
 	// of the timeout-shaped errors this recovery runs for, so reusing it
