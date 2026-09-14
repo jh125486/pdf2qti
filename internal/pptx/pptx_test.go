@@ -118,6 +118,18 @@ func diagramTemplateEntriesWithReversedSldIDAttrOrder() map[string][]byte {
 	return e
 }
 
+// diagramTemplateEntriesWithReversedOverrideAttrOrder is diagramTemplateEntries with the Content
+// prototype (slide2.xml) given an explicit [Content_Types].xml Override whose ContentType
+// attribute comes before PartName — real PowerPoint-authored XML doesn't guarantee PartName comes
+// first, unlike every other fixture in this file.
+func diagramTemplateEntriesWithReversedOverrideAttrOrder() map[string][]byte {
+	e := diagramTemplateEntries()
+	e["[Content_Types].xml"] = []byte(`<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+		`<Override ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml" PartName="/ppt/slides/slide2.xml"/>` +
+		`</Types>`)
+	return e
+}
+
 // stubMmdc puts an executable named "mmdc" on a fresh PATH-only directory and points PATH at it,
 // mirroring math_test.go's stubPandoc for the same external-tool-stubbing purpose. script is a
 // full shell script body — e.g. one that inspects "$@" for its own "-o" argument to know where
@@ -1228,6 +1240,22 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 			verify: verifyReversedSldIDAttrOrderRemovalAndClone,
 		},
 		{
+			name:            "[Content_Types].xml Override for removed prototype has ContentType before PartName",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntriesWithReversedOverrideAttrOrder,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{Title: "First", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  Ov1 --> Ov2", Alt: "Ov1 leads to Ov2.", Caption: "First diagram."}},
+						{Title: "Second", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  Ov3 --> Ov4", Alt: "Ov3 leads to Ov4.", Caption: "Second diagram."}},
+					},
+				}
+			},
+			verify: verifyReversedOverrideAttrOrderCleanup,
+		},
+		{
 			name:            "diagram alt text and caption containing template-action-like syntax",
 			script:          mmdcCopyFixtureScript,
 			templateEntries: diagramTemplateEntries,
@@ -1433,6 +1461,14 @@ func verifyReversedSldIDAttrOrderRemovalAndClone(t *testing.T, dir string, out m
 			t.Fatalf("duplicate sldId %q in %v", id, ids)
 		}
 		seen[id] = true
+	}
+}
+
+func verifyReversedOverrideAttrOrderCleanup(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	contentTypes := string(out["[Content_Types].xml"])
+	if strings.Contains(contentTypes, `PartName="/ppt/slides/slide2.xml"`) {
+		t.Fatalf("removed Content prototype's Override (ContentType before PartName) survived: %q", contentTypes)
 	}
 }
 

@@ -974,7 +974,7 @@ func removeSlide(parts map[string][]byte, order *[]string, presData []byte, slid
 	delete(parts, relsPart)
 	*order = removeFromOrder(*order, slidePart, relsPart)
 
-	ctOverride := regexp.MustCompile(`<Override PartName="/` + regexp.QuoteMeta(slidePart) + `"[^>]*/>`)
+	ctOverride := regexp.MustCompile(`<Override\b[^>]*\bPartName="/` + regexp.QuoteMeta(slidePart) + `"[^>]*/>`)
 	parts["[Content_Types].xml"] = ctOverride.ReplaceAll(parts["[Content_Types].xml"], nil)
 
 	relEl := regexp.MustCompile(`<Relationship\b[^>]*\bId="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
