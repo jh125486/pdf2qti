@@ -169,35 +169,57 @@ func validateProtoDeck(deck string, minSlides, maxSlides int) (warnings []string
 // ParseProtoDeck reads back.
 var reProtoSeparator = regexp.MustCompile(`^---\s*$`)
 
+// reFenceLine matches any line that opens or could close a fenced code block: a run of 3-or-more
+// backticks, optionally followed by an info string containing no further backticks — CommonMark
+// forbids a backtick in a fence's own info string precisely so a prose line mentioning an inline
+// code span right after opening backticks (`` ```mermaid``` is the opener `` in running text) isn't
+// misread as a fence itself; requiring group 2 to be backtick-free is what makes such a line fail
+// to match reFenceLine at all, rather than being treated as an open with a garbled info string.
+// Shared by splitProtoDeckBlocks and findMermaidFence so both agree on the one thing that actually
+// matters here: a fence's closing line must have a backtick run at least as long as its opening
+// line's, per CommonMark's own nesting rule. Without that, a documentation example like a
+// 4-backtick fence wrapping a literal, inert 3-backtick ```mermaid block — exactly the shape
+// slides.md itself uses to show this format — would have its inner backticks misread as the real
+// fence boundary: a "---" inside would wrongly end up treated as a slide separator
+// (splitProtoDeckBlocks), and the literal example would wrongly get rendered as an actual diagram
+// (findMermaidFence). A backtick run shorter than the currently-open fence's, or one carrying its
+// own info string, is just ordinary content until the real close is found.
+var reFenceLine = regexp.MustCompile("^(`{3,})([^`]*)$")
+
 // splitProtoDeckBlocks splits markdown into "---"-separated blocks the way GenerateProtoDeck emits
 // them, except a "---" line inside an open fenced code block (``` ... ```, any info string, any
-// backtick-run length) is never treated as a slide separator: Mermaid permits "---"-delimited YAML
-// frontmatter inside a ```mermaid fence, and a naive line-based split would otherwise cut that
-// fence into unrelated blocks and report it as an unterminated or malformed diagram instead of
-// parsing it. An unclosed fence anywhere in markdown is a hard error rather than silently merging
-// every following block into the open one — a Markdown file missing a closing ``` is exactly the
-// kind of thing that would otherwise drop slides without any indication anything went wrong.
+// backtick-run length — see reFenceLine) is never treated as a slide separator: Mermaid permits
+// "---"-delimited YAML frontmatter inside a ```mermaid fence, and a naive line-based split would
+// otherwise cut that fence into unrelated blocks and report it as an unterminated or malformed
+// diagram instead of parsing it. An unclosed fence anywhere in markdown is a hard error rather than
+// silently merging every following block into the open one — a Markdown file missing a closing ```
+// is exactly the kind of thing that would otherwise drop slides without any indication anything
+// went wrong.
 func splitProtoDeckBlocks(markdown string) ([]string, error) {
 	lines := strings.Split(markdown, "\n")
 	blocks := make([]string, 0, 8)
 	current := make([]string, 0, len(lines))
-	var inFence bool
+	var fenceLen int
 	var fenceOpenedAtLine int
 	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "```") {
-			inFence = !inFence
-			if inFence {
+		if m := reFenceLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			backticks, rest := m[1], strings.TrimSpace(m[2])
+			switch {
+			case fenceLen == 0:
+				fenceLen = len(backticks)
 				fenceOpenedAtLine = i + 1
+			case rest == "" && len(backticks) >= fenceLen:
+				fenceLen = 0
 			}
 		}
-		if !inFence && reProtoSeparator.MatchString(line) {
+		if fenceLen == 0 && reProtoSeparator.MatchString(line) {
 			blocks = append(blocks, strings.Join(current, "\n"))
 			current = current[:0]
 			continue
 		}
 		current = append(current, line)
 	}
-	if inFence {
+	if fenceLen != 0 {
 		return nil, fmt.Errorf("unterminated fenced code block opened at line %d", fenceOpenedAtLine)
 	}
 	return append(blocks, strings.Join(current, "\n")), nil
@@ -282,43 +304,59 @@ var reAltComment = regexp.MustCompile(`(?m)^<!--[ \t]*alt:[ \t]*(.*?)[ \t]*-->[ 
 // parse it as a plain bullet block instead" rather than as a failure.
 var errNoMermaidFence = errors.New("no mermaid fence")
 
-// reMermaidFenceOpen matches a mermaid fence's opening line: 3-or-more backticks immediately
-// followed by "mermaid". reMermaidFenceClose matches a bare closing line of 3-or-more backticks —
-// both accept any backtick-run length (not just exactly 3), matching splitProtoDeckBlocks's own
-// generic `` "```" `` -prefix fence toggle, so the two functions agree on what counts as a fence
-// instead of findMermaidFence silently missing a fence (e.g. four backticks, `` ```` ``, used to
-// visually nest an example inside another fenced block) that splitProtoDeckBlocks already treated
-// as one.
-var (
-	reMermaidFenceOpen  = regexp.MustCompile("^`{3,}mermaid[ \t]*$")
-	reMermaidFenceClose = regexp.MustCompile("^`{3,}[ \t]*$")
-)
+// reMermaidInfoString matches a fence-opening line's info string when it's exactly "mermaid",
+// with only trailing whitespace tolerated — "mermaid ", not " mermaid" or "mermaidfoo" — the same
+// adjacency the format has always required (backticks immediately followed by the word).
+var reMermaidInfoString = regexp.MustCompile(`^mermaid[ \t]*$`)
 
-// findMermaidFence scans lines for a single ```mermaid ... ``` fenced block and returns its
-// content line range [open+1, close) once found. It errors on a second fence in the same block,
-// an unterminated fence, or an empty one; errNoMermaidFence specifically signals no fence was
-// found at all, so ParseProtoDeck can tell that apart from a genuine validation failure.
+// findMermaidFence scans lines for a single top-level ```mermaid ... ``` fenced block and returns
+// its content line range [open+1, close) once found. Uses the same reFenceLine backtick-length
+// tracking as splitProtoDeckBlocks (see its doc comment): once a fence of length N is open,
+// nothing shorter than N (or carrying its own info string) can close it, so a literal, inert
+// example fence nested one level deeper — a doc block wrapping a ```mermaid sample in 4 backticks,
+// say — is read as ordinary content, never mistaken for the real mermaid fence or its close. It
+// errors on a second top-level mermaid fence in the same block, an unterminated fence, or an empty
+// one; errNoMermaidFence specifically signals no top-level mermaid fence was found at all, so
+// ParseProtoDeck can tell that apart from a genuine validation failure.
 func findMermaidFence(lines []string, metaNum int) (open, closeAt int, err error) {
 	open, closeAt = -1, -1
-	var inFence bool
+	var fenceLen int
+	var isMermaidFence bool
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		m := reFenceLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		backticks, info := m[1], m[2]
 		switch {
-		case !inFence && reMermaidFenceOpen.MatchString(trimmed):
-			if open != -1 {
-				return 0, 0, fmt.Errorf("slide %d: more than one mermaid diagram in one slide block", metaNum)
+		case fenceLen == 0:
+			if reMermaidInfoString.MatchString(info) {
+				if open != -1 {
+					return 0, 0, fmt.Errorf("slide %d: more than one mermaid diagram in one slide block", metaNum)
+				}
+				isMermaidFence = true
+				open = i
+			} else {
+				isMermaidFence = false
 			}
-			inFence = true
-			open = i
-		case inFence && reMermaidFenceClose.MatchString(trimmed):
-			inFence = false
-			closeAt = i
+			fenceLen = len(backticks)
+		case strings.TrimSpace(info) == "" && len(backticks) >= fenceLen:
+			if isMermaidFence {
+				closeAt = i
+			}
+			fenceLen = 0
+			isMermaidFence = false
 		}
 	}
 	if open == -1 {
 		return 0, 0, errNoMermaidFence
 	}
-	if inFence {
+	// Unreachable in practice: findMermaidFence only ever runs on a block splitProtoDeckBlocks
+	// already produced, and that function uses this same fence-length tracking to guarantee every
+	// block it emits is fence-balanced — an unterminated fence anywhere in the document is already
+	// a hard error there, before any block reaches here. Kept as a direct, defensive translation of
+	// that invariant rather than an assertion/panic, in case that guarantee ever changes.
+	if closeAt == -1 {
 		return 0, 0, fmt.Errorf("slide %d: unterminated mermaid fence", metaNum)
 	}
 	if strings.TrimSpace(strings.Join(lines[open+1:closeAt], "\n")) == "" {

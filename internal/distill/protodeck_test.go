@@ -631,6 +631,7 @@ func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
 		{name: "diagram bullet", body: "<!-- alt: diagram -->\n> caption\n- forbidden\n```mermaid\nflowchart LR\n A --> B\n```", want: "cannot contain bullets"},
 		{name: "caption not silently taken from a source line", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n> A --> B\n```", want: "caption line"},
 		{name: "unterminated fence swallowing the rest of the deck", body: "<!-- alt: diagram -->\n> caption\n```mermaid\nflowchart LR\n A --> B", want: "unterminated"},
+		{name: "two top-level mermaid fences in one block", body: "<!-- alt: diagram -->\n> caption\n```mermaid\nflowchart LR\n A --> B\n```\n```mermaid\nflowchart LR\n C --> D\n```", want: "more than one"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -670,6 +671,85 @@ func TestParseProtoDeck_MermaidDiagramFenceContentNotScanned(t *testing.T) {
 				t.Fatalf("slides=%+v, want one diagram slide with Source %q", slides, tt.source)
 			}
 		})
+	}
+}
+
+func TestParseProtoDeck_NestedFenceExamples(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n"
+	tests := []struct {
+		name        string
+		block       string
+		wantContent string
+		wantSource  string
+	}{
+		{
+			name: "bare four-backtick fence wraps an inert three-backtick example containing a separator",
+			block: "<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- An example:\n" +
+				"````\n---\ntitle: literal, not real frontmatter\n---\n```mermaid\nflowchart LR\n  A --> B\n```\n````\n",
+			wantContent: "An example:",
+		},
+		{
+			name: "markdown-labeled four-backtick fence wraps the same inert example",
+			block: "<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- An example:\n" +
+				"````markdown\n```mermaid\nflowchart LR\n  A --> B\n```\n````\n",
+			wantContent: "An example:",
+		},
+		{
+			name: "a real mermaid fence following an inert nested example in the same block",
+			block: "<!-- meta: 2 ch01 -->\n# Real Diagram\n````\n```mermaid\nnot the real one\n```\n````\n" +
+				"<!-- alt: real one -->\n> caption\n```mermaid\nflowchart LR\n  X --> Y\n```\n",
+			wantSource: "flowchart LR\n  X --> Y",
+		},
+		{
+			name: "a line starting with an inline code span is not misread as a fence opener",
+			block: "<!-- meta: 2 ch01 -->\n# Prose\n- Real point\n" +
+				"```mermaid``` is the opener, mentioned here only in passing.\n",
+			wantContent: "Real point",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, slides, err := distill.ParseProtoDeck(prefix + tt.block)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(slides) != 1 {
+				t.Fatalf("slides=%+v, want exactly one", slides)
+			}
+			switch {
+			case tt.wantContent != "":
+				if slides[0].Diagram != nil || slides[0].Content != tt.wantContent {
+					t.Fatalf("slide=%+v, want a content slide with Content %q", slides[0], tt.wantContent)
+				}
+			case tt.wantSource != "":
+				if slides[0].Diagram == nil || slides[0].Diagram.Source != tt.wantSource {
+					t.Fatalf("slide=%+v, want a diagram slide with Source %q", slides[0], tt.wantSource)
+				}
+			}
+		})
+	}
+}
+
+func TestParseProtoDeck_NestedFenceExampleDoesNotSwallowTheNextSlide(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- A mermaid fence starts with:\n" +
+		"````\n```mermaid\n````\n---\n<!-- meta: 3 ch01 -->\n# Next Slide\n- another bullet\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []distill.Slide{
+		{Title: "Documenting Mermaid", Content: "A mermaid fence starts with:", Tag: "ch01"},
+		{Title: "Next Slide", Content: "another bullet", Tag: "ch01"},
+	}
+	if !reflect.DeepEqual(slides, want) {
+		t.Fatalf("slides=%+v, want %+v", slides, want)
 	}
 }
 
