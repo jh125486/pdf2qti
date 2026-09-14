@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -562,6 +563,193 @@ func TestParseProtoDeck_HandWrittenLooseSpacing(t *testing.T) {
 	}
 	if len(slides) != 1 || slides[0] != (distill.Slide{Title: "A Slide", Content: "bullet", Tag: "ch01"}) {
 		t.Fatalf("got slides %+v", slides)
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagram(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Request lifecycle\n<!-- alt: Client sends a request to an API, which queries a database and responds to client. -->\n" +
+		"> The API mediates every database request.\n```mermaid\nflowchart LR\n  Client --> API --> Database\n```\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse diagram deck: %v", err)
+	}
+	want := distill.Slide{
+		Title: "Request lifecycle",
+		Tag:   "ch01",
+		Diagram: &distill.Diagram{
+			Source:  "flowchart LR\n  Client --> API --> Database",
+			Alt:     "Client sends a request to an API, which queries a database and responds to client.",
+			Caption: "The API mediates every database request.",
+		},
+	}
+	if len(slides) != 1 || !reflect.DeepEqual(slides[0], want) {
+		t.Fatalf("slides=%+v, want [%+v]", slides, want)
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagramFrontmatter(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Themed lifecycle\n<!-- alt: Client sends a request to an API, which queries a database and responds to client. -->\n" +
+		"> The API mediates every database request.\n```mermaid\n---\ntitle: Lifecycle\n---\nflowchart LR\n  Client --> API --> Database\n```\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse diagram deck with frontmatter: %v", err)
+	}
+	want := distill.Slide{
+		Title: "Themed lifecycle",
+		Tag:   "ch01",
+		Diagram: &distill.Diagram{
+			Source:  "---\ntitle: Lifecycle\n---\nflowchart LR\n  Client --> API --> Database",
+			Alt:     "Client sends a request to an API, which queries a database and responds to client.",
+			Caption: "The API mediates every database request.",
+		},
+	}
+	if len(slides) != 1 || !reflect.DeepEqual(slides[0], want) {
+		t.Fatalf("slides=%+v, want [%+v]", slides, want)
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagramValidation(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n<!-- meta: 2 ch01 -->\n# Diagram\n"
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing alt text", body: "> caption\n```mermaid\nflowchart LR\n A --> B\n```", want: "requires a non-empty"},
+		{name: "missing caption", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n A --> B\n```", want: "caption line"},
+		{name: "empty diagram", body: "<!-- alt: diagram -->\n> caption\n```mermaid\n```", want: "cannot be empty"},
+		{name: "diagram bullet", body: "<!-- alt: diagram -->\n> caption\n- forbidden\n```mermaid\nflowchart LR\n A --> B\n```", want: "cannot contain bullets"},
+		{name: "caption not silently taken from a source line", body: "<!-- alt: diagram -->\n```mermaid\nflowchart LR\n> A --> B\n```", want: "caption line"},
+		{name: "unterminated fence swallowing the rest of the deck", body: "<!-- alt: diagram -->\n> caption\n```mermaid\nflowchart LR\n A --> B", want: "unterminated"},
+		{name: "two top-level mermaid fences in one block", body: "<!-- alt: diagram -->\n> caption\n```mermaid\nflowchart LR\n A --> B\n```\n```mermaid\nflowchart LR\n C --> D\n```", want: "more than one"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, err := distill.ParseProtoDeck(prefix + tt.body)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseProtoDeck_MermaidDiagramFenceContentNotScanned(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n<!-- meta: 2 ch01 -->\n# Diagram\n" +
+		"<!-- alt: diagram -->\n> caption\n"
+	tests := []struct {
+		name   string
+		fence  string
+		source string
+	}{
+		{name: "yaml frontmatter list", fence: "```", source: "---\nconfig:\n  items:\n    - one\n    - two\n---\nflowchart LR\n A --> B"},
+		{name: "mindmap syntax", fence: "```", source: "mindmap\n  root\n    - child one\n    - child two"},
+		{name: "fence content resembling an alt comment", fence: "```", source: "flowchart LR\n A --> B\n%% <!-- alt: not the real one -->"},
+		{name: "four-backtick fence", fence: "````", source: "flowchart LR\n A --> B"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			in := prefix + tt.fence + "mermaid\n" + tt.source + "\n" + tt.fence
+			_, _, slides, err := distill.ParseProtoDeck(in)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(slides) != 1 || slides[0].Diagram == nil || slides[0].Diagram.Source != tt.source {
+				t.Fatalf("slides=%+v, want one diagram slide with Source %q", slides, tt.source)
+			}
+		})
+	}
+}
+
+func TestParseProtoDeck_NestedFenceExamples(t *testing.T) {
+	t.Parallel()
+
+	prefix := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n"
+	tests := []struct {
+		name        string
+		block       string
+		wantContent string
+		wantSource  string
+	}{
+		{
+			name: "bare four-backtick fence wraps an inert three-backtick example containing a separator",
+			block: "<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- An example:\n" +
+				"````\n---\ntitle: literal, not real frontmatter\n---\n```mermaid\nflowchart LR\n  A --> B\n```\n````\n",
+			wantContent: "An example:",
+		},
+		{
+			name: "markdown-labeled four-backtick fence wraps the same inert example",
+			block: "<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- An example:\n" +
+				"````markdown\n```mermaid\nflowchart LR\n  A --> B\n```\n````\n",
+			wantContent: "An example:",
+		},
+		{
+			name: "a real mermaid fence following an inert nested example in the same block",
+			block: "<!-- meta: 2 ch01 -->\n# Real Diagram\n````\n```mermaid\nnot the real one\n```\n````\n" +
+				"<!-- alt: real one -->\n> caption\n```mermaid\nflowchart LR\n  X --> Y\n```\n",
+			wantSource: "flowchart LR\n  X --> Y",
+		},
+		{
+			name: "a line starting with an inline code span is not misread as a fence opener",
+			block: "<!-- meta: 2 ch01 -->\n# Prose\n- Real point\n" +
+				"```mermaid``` is the opener, mentioned here only in passing.\n",
+			wantContent: "Real point",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, slides, err := distill.ParseProtoDeck(prefix + tt.block)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(slides) != 1 {
+				t.Fatalf("slides=%+v, want exactly one", slides)
+			}
+			switch {
+			case tt.wantContent != "":
+				if slides[0].Diagram != nil || slides[0].Content != tt.wantContent {
+					t.Fatalf("slide=%+v, want a content slide with Content %q", slides[0], tt.wantContent)
+				}
+			case tt.wantSource != "":
+				if slides[0].Diagram == nil || slides[0].Diagram.Source != tt.wantSource {
+					t.Fatalf("slide=%+v, want a diagram slide with Source %q", slides[0], tt.wantSource)
+				}
+			}
+		})
+	}
+}
+
+func TestParseProtoDeck_NestedFenceExampleDoesNotSwallowTheNextSlide(t *testing.T) {
+	t.Parallel()
+
+	in := "# My Deck\n---\n<!-- meta: 1 agenda -->\n# Agenda\n- one\n- two\n- three\n---\n" +
+		"<!-- meta: 2 ch01 -->\n# Documenting Mermaid\n- A mermaid fence starts with:\n" +
+		"````\n```mermaid\n````\n---\n<!-- meta: 3 ch01 -->\n# Next Slide\n- another bullet\n"
+
+	_, _, slides, err := distill.ParseProtoDeck(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []distill.Slide{
+		{Title: "Documenting Mermaid", Content: "A mermaid fence starts with:", Tag: "ch01"},
+		{Title: "Next Slide", Content: "another bullet", Tag: "ch01"},
+	}
+	if !reflect.DeepEqual(slides, want) {
+		t.Fatalf("slides=%+v, want %+v", slides, want)
 	}
 }
 

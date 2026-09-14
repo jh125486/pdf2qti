@@ -167,15 +167,91 @@ func validateProtoDeck(deck string, minSlides, maxSlides int) (warnings []string
 
 // reProtoSeparator matches a "---" slide-separator line, the format GenerateProtoDeck emits and
 // ParseProtoDeck reads back.
-var reProtoSeparator = regexp.MustCompile(`(?m)^---\s*$`)
+var reProtoSeparator = regexp.MustCompile(`^---\s*$`)
+
+// reFenceLine matches any line that opens or could close a fenced code block: a run of 3-or-more
+// backticks, optionally followed by an info string containing no further backticks — CommonMark
+// forbids a backtick in a fence's own info string precisely so a prose line mentioning an inline
+// code span right after opening backticks (`` ```mermaid``` is the opener `` in running text) isn't
+// misread as a fence itself; requiring group 2 to be backtick-free is what makes such a line fail
+// to match reFenceLine at all, rather than being treated as an open with a garbled info string.
+// Shared by splitProtoDeckBlocks and findMermaidFence so both agree on the one thing that actually
+// matters here: a fence's closing line must have a backtick run at least as long as its opening
+// line's, per CommonMark's own nesting rule. Without that, a documentation example like a
+// 4-backtick fence wrapping a literal, inert 3-backtick ```mermaid block — exactly the shape
+// slides.md itself uses to show this format — would have its inner backticks misread as the real
+// fence boundary: a "---" inside would wrongly end up treated as a slide separator
+// (splitProtoDeckBlocks), and the literal example would wrongly get rendered as an actual diagram
+// (findMermaidFence). A backtick run shorter than the currently-open fence's, or one carrying its
+// own info string, is just ordinary content until the real close is found.
+var reFenceLine = regexp.MustCompile("^(`{3,})([^`]*)$")
+
+// splitProtoDeckBlocks splits markdown into "---"-separated blocks the way GenerateProtoDeck emits
+// them, except a "---" line inside an open fenced code block (``` ... ```, any info string, any
+// backtick-run length — see reFenceLine) is never treated as a slide separator: Mermaid permits
+// "---"-delimited YAML frontmatter inside a ```mermaid fence, and a naive line-based split would
+// otherwise cut that fence into unrelated blocks and report it as an unterminated or malformed
+// diagram instead of parsing it. An unclosed fence anywhere in markdown is a hard error rather than
+// silently merging every following block into the open one — a Markdown file missing a closing ```
+// is exactly the kind of thing that would otherwise drop slides without any indication anything
+// went wrong.
+func splitProtoDeckBlocks(markdown string) ([]string, error) {
+	lines := strings.Split(markdown, "\n")
+	blocks := make([]string, 0, 8)
+	current := make([]string, 0, len(lines))
+	var fenceLen int
+	var fenceOpenedAtLine int
+	for i, line := range lines {
+		if m := reFenceLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			backticks, rest := m[1], strings.TrimSpace(m[2])
+			switch {
+			case fenceLen == 0:
+				fenceLen = len(backticks)
+				fenceOpenedAtLine = i + 1
+			case rest == "" && len(backticks) >= fenceLen:
+				fenceLen = 0
+			}
+		}
+		if fenceLen == 0 && reProtoSeparator.MatchString(line) {
+			blocks = append(blocks, strings.Join(current, "\n"))
+			current = current[:0]
+			continue
+		}
+		current = append(current, line)
+	}
+	if fenceLen != 0 {
+		return nil, fmt.Errorf("unterminated fenced code block opened at line %d", fenceOpenedAtLine)
+	}
+	return append(blocks, strings.Join(current, "\n")), nil
+}
 
 // ParseProtoDeck is the inverse of GenerateProtoDeck: it parses proto-deck markdown — whether
 // produced by GenerateProtoDeck or written by hand in the same format — into the pieces
 // pptx.Render needs: the overall deck title, the agenda bullets, and one Slide per non-agenda
 // block in document order ("summary" is included as a regular slide since there's no dedicated
 // Summary layout in the PPTX template contract).
+//
+// A block is a diagram block, rendered as a dedicated diagram slide instead of a bullet slide,
+// iff it contains a fenced code block whose info string is "mermaid". A diagram block additionally
+// requires exactly one non-empty "<!-- alt: ... -->" comment line (screen-reader alt text) and
+// exactly one non-empty "> " blockquote line (the visible on-slide caption) — both are hard parse
+// errors when missing, empty, or duplicated, as is a bullet line inside a diagram block (a diagram
+// slide is title + diagram + caption, full stop) and an unterminated mermaid fence. Every such
+// error is wrapped with the block's meta number so the author can find the offending block. A
+// block with no mermaid fence ignores any "<!-- alt: ... -->"/"> " lines it happens to contain,
+// silently, the same as any other non-bullet line ParseProtoDeck already drops.
 func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Slide, err error) {
-	blocks := reProtoSeparator.Split(markdown, -1)
+	// Normalized once, up front: CRLF/CR line endings would otherwise survive into a diagram's
+	// Source verbatim (a trailing "\r" per line), making the same diagram saved with different
+	// line endings hash to different cache keys in pptx.mermaidRenderer, and would need every
+	// line-anchored regex in this file (reProtoMeta, reAltComment, "> "/"```" line checks) to
+	// separately account for a possible trailing "\r".
+	markdown = strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(markdown)
+
+	blocks, err := splitProtoDeckBlocks(markdown)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	if len(blocks) == 0 {
 		return "", nil, nil, errors.New("empty proto deck markdown")
 	}
@@ -187,12 +263,28 @@ func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Sl
 		if m == nil {
 			continue
 		}
-		bullets := bulletLines(block)
 		tag := m[2]
+		metaNum, _ := strconv.Atoi(m[1]) // digits guaranteed by reProtoMeta
+
+		diagram, derr := parseDiagramBlock(block, metaNum)
+		if derr != nil {
+			return "", nil, nil, derr
+		}
+
 		if tag == "agenda" {
-			agenda = bullets
+			if diagram != nil {
+				return "", nil, nil, fmt.Errorf("slide %d: agenda block cannot contain a mermaid diagram", metaNum)
+			}
+			agenda = bulletLines(block)
 			continue
 		}
+
+		if diagram != nil {
+			slides = append(slides, Slide{Title: firstHeading(block), Tag: tag, Diagram: diagram})
+			continue
+		}
+
+		bullets := bulletLines(block)
 		slides = append(slides, Slide{Title: firstHeading(block), Content: strings.Join(bullets, "\n"), Tag: tag})
 	}
 
@@ -200,6 +292,152 @@ func ParseProtoDeck(markdown string) (title string, agenda []string, slides []Sl
 		return "", nil, nil, errors.New("no agenda or slides found in proto deck markdown")
 	}
 	return title, agenda, slides, nil
+}
+
+// reAltComment matches a "<!-- alt: ... -->" screen-reader alt-text comment line, a diagram
+// block's own convention (see parseDiagramBlock), distinct from the "<!-- meta: N tag -->" marker
+// reProtoMeta reads.
+var reAltComment = regexp.MustCompile(`(?m)^<!--[ \t]*alt:[ \t]*(.*?)[ \t]*-->[ \t\r]*$`)
+
+// errNoMermaidFence is parseDiagramBlock's internal sentinel for "block has no mermaid fence at
+// all" — the ordinary, far more common case, which ParseProtoDeck treats as "not a diagram block,
+// parse it as a plain bullet block instead" rather than as a failure.
+var errNoMermaidFence = errors.New("no mermaid fence")
+
+// reMermaidInfoString matches a fence-opening line's info string when it's exactly "mermaid",
+// with only trailing whitespace tolerated — "mermaid ", not " mermaid" or "mermaidfoo" — the same
+// adjacency the format has always required (backticks immediately followed by the word).
+var reMermaidInfoString = regexp.MustCompile(`^mermaid[ \t]*$`)
+
+// findMermaidFence scans lines for a single top-level ```mermaid ... ``` fenced block and returns
+// its content line range [open+1, close) once found. Uses the same reFenceLine backtick-length
+// tracking as splitProtoDeckBlocks (see its doc comment): once a fence of length N is open,
+// nothing shorter than N (or carrying its own info string) can close it, so a literal, inert
+// example fence nested one level deeper — a doc block wrapping a ```mermaid sample in 4 backticks,
+// say — is read as ordinary content, never mistaken for the real mermaid fence or its close. It
+// errors on a second top-level mermaid fence in the same block, an unterminated fence, or an empty
+// one; errNoMermaidFence specifically signals no top-level mermaid fence was found at all, so
+// ParseProtoDeck can tell that apart from a genuine validation failure.
+func findMermaidFence(lines []string, metaNum int) (open, closeAt int, err error) {
+	open, closeAt = -1, -1
+	var fenceLen int
+	var isMermaidFence bool
+	for i, line := range lines {
+		m := reFenceLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		backticks, info := m[1], m[2]
+		switch {
+		case fenceLen == 0:
+			if reMermaidInfoString.MatchString(info) {
+				if open != -1 {
+					return 0, 0, fmt.Errorf("slide %d: more than one mermaid diagram in one slide block", metaNum)
+				}
+				isMermaidFence = true
+				open = i
+			} else {
+				isMermaidFence = false
+			}
+			fenceLen = len(backticks)
+		case strings.TrimSpace(info) == "" && len(backticks) >= fenceLen:
+			if isMermaidFence {
+				closeAt = i
+			}
+			fenceLen = 0
+			isMermaidFence = false
+		}
+	}
+	if open == -1 {
+		return 0, 0, errNoMermaidFence
+	}
+	// Unreachable in practice: findMermaidFence only ever runs on a block splitProtoDeckBlocks
+	// already produced, and that function uses this same fence-length tracking to guarantee every
+	// block it emits is fence-balanced — an unterminated fence anywhere in the document is already
+	// a hard error there, before any block reaches here. Kept as a direct, defensive translation of
+	// that invariant rather than an assertion/panic, in case that guarantee ever changes.
+	if closeAt == -1 {
+		return 0, 0, fmt.Errorf("slide %d: unterminated mermaid fence", metaNum)
+	}
+	if strings.TrimSpace(strings.Join(lines[open+1:closeAt], "\n")) == "" {
+		return 0, 0, fmt.Errorf("slide %d: mermaid fence cannot be empty", metaNum)
+	}
+	return open, closeAt, nil
+}
+
+// diagramAltText extracts a diagram block's exactly-one, non-empty "<!-- alt: ... -->" line.
+func diagramAltText(block string, metaNum int) (string, error) {
+	matches := reAltComment.FindAllStringSubmatch(block, -1)
+	switch {
+	case len(matches) > 1:
+		return "", fmt.Errorf("slide %d: diagram slide has more than one \"<!-- alt: ... -->\" line", metaNum)
+	case len(matches) == 0 || strings.TrimSpace(matches[0][1]) == "":
+		return "", fmt.Errorf("slide %d: diagram slide requires a non-empty \"<!-- alt: ... -->\" line", metaNum)
+	}
+	return strings.TrimSpace(matches[0][1]), nil
+}
+
+// diagramCaption extracts a diagram block's exactly-one, non-empty "> " blockquote line.
+func diagramCaption(lines []string, metaNum int) (string, error) {
+	var captions []string
+	for _, line := range lines {
+		after, ok := strings.CutPrefix(strings.TrimSpace(line), "> ")
+		if !ok {
+			continue
+		}
+		captions = append(captions, strings.TrimSpace(after))
+	}
+	switch {
+	case len(captions) > 1:
+		return "", fmt.Errorf("slide %d: diagram slide has more than one \"> \" caption line", metaNum)
+	case len(captions) == 0 || captions[0] == "":
+		return "", fmt.Errorf("slide %d: diagram slide requires a non-empty \"> \" caption line", metaNum)
+	}
+	return captions[0], nil
+}
+
+// parseDiagramBlock inspects block for a "```mermaid" fenced code block and, if present, parses it
+// (plus its required alt-text comment and caption blockquote — see ParseProtoDeck's doc comment)
+// into a Diagram. It returns (nil, nil) for a block with no mermaid fence at all — see
+// errNoMermaidFence — left for the caller to treat as a plain bullet block exactly as before this
+// feature existed. metaNum is only used to name the offending block in a returned error.
+func parseDiagramBlock(block string, metaNum int) (*Diagram, error) {
+	lines := strings.Split(block, "\n")
+
+	open, closeAt, err := findMermaidFence(lines, metaNum)
+	if errors.Is(err, errNoMermaidFence) {
+		return nil, nil //nolint:nilnil // "no diagram in this block" is the common case, not an error; see errNoMermaidFence.
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Every check below scans lines OUTSIDE the fence, not block/lines directly: the fence's own
+	// content is the diagram's actual source, which can legitimately contain lines that look like
+	// an alt comment, a "> " blockquote, or a "- " bullet (Mermaid frontmatter, mindmap syntax,
+	// arrow labels, ...) without those being real diagram-block metadata to validate.
+	outside := append(append([]string{}, lines[:open]...), lines[closeAt+1:]...)
+	outsideBlock := strings.Join(outside, "\n")
+
+	alt, err := diagramAltText(outsideBlock, metaNum)
+	if err != nil {
+		return nil, err
+	}
+
+	caption, err := diagramCaption(outside, metaNum)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(bulletLines(outsideBlock)) > 0 {
+		return nil, fmt.Errorf("slide %d: diagram slide cannot contain bullets", metaNum)
+	}
+
+	return &Diagram{
+		Source:  strings.Join(lines[open+1:closeAt], "\n"),
+		Alt:     alt,
+		Caption: caption,
+	}, nil
 }
 
 // firstHeading returns the text of the first "# " line in block, or "" if none.

@@ -58,9 +58,24 @@ func (o *Objective) UnmarshalJSON(data []byte) error {
 
 // Slide is a single content slide's title and body, one per major section.
 type Slide struct {
-	Title   string `json:"title"`
-	Content string `json:"content"`        // newline-separated bullet lines
-	Tag     string `json:"tag,omitempty"`  // chapter tag (or "summary") from the proto-deck's meta marker
+	Title   string   `json:"title"`
+	Content string   `json:"content"`           // newline-separated bullet lines; empty for a diagram slide
+	Tag     string   `json:"tag,omitempty"`     // chapter tag (or "summary") from the proto-deck's meta marker
+	Diagram *Diagram `json:"diagram,omitempty"` // non-nil iff this slide renders a Mermaid diagram instead of bullets
+}
+
+// Diagram is a Mermaid diagram rendered onto its own slide, parsed from a proto-deck block whose
+// fenced code has the "mermaid" info string (see ParseProtoDeck). Source is the mermaid source
+// itself (fence markers stripped, so it's fed to mmdc verbatim), Alt is the screen-reader alt text
+// from the block's required "<!-- alt: ... -->" comment, and Caption is the visible on-slide
+// caption from the block's required "> " blockquote line. Alt and Caption are deliberately two
+// separate fields, not one reused for both roles: a screen reader needs the diagram's structure
+// described (what the boxes and arrows are), while a sighted viewer reading the caption wants the
+// takeaway the diagram is making — the same sentence rarely serves both audiences well.
+type Diagram struct {
+	Source  string `json:"source"`
+	Alt     string `json:"alt"`
+	Caption string `json:"caption"`
 }
 
 // VocabTerm is a single vocabulary term and its definition.

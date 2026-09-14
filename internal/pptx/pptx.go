@@ -24,6 +24,7 @@ const (
 	layoutTitle   = "Title"
 	layoutAgenda  = "Agenda"
 	layoutContent = "Content"
+	layoutDiagram = "Diagram"
 )
 
 var (
@@ -35,12 +36,27 @@ var (
 	reRelIDAttr       = regexp.MustCompile(`\bId="([^"]+)"`)
 	reRelTargetAttr   = regexp.MustCompile(`\bTarget="([^"]+)"`)
 	reRelIDGlobal     = regexp.MustCompile(`Id="rId(\d+)"`)
-	reSldIDGlobal     = regexp.MustCompile(`<p:sldId id="(\d+)"`)
-	rePicBlock        = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
-	reCNvPrOpen       = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
-	reLastView        = regexp.MustCompile(`\blastView="[^"]*"`)
+	// reSldIDGlobal extracts a <p:sldId> element's own numeric id="..." attribute, wherever it
+	// falls among the element's attributes — real PowerPoint XML doesn't guarantee id before
+	// r:id. The required "\s" immediately before id=" excludes matching inside "r:id=" (never
+	// preceded by whitespace, only by ':'), and the "<p:sldId\b[^>]*" anchor keeps this from also
+	// matching an unrelated element's own numeric id="..." elsewhere in presentation.xml, like
+	// <p:sldMasterId id="..." r:id="..."/>, a completely different ID namespace.
+	reSldIDGlobal = regexp.MustCompile(`<p:sldId\b[^>]*\sid="(\d+)"`)
+	rePicBlock    = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
+	reCNvPrOpen   = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
+	reLastView    = regexp.MustCompile(`\blastView="[^"]*"`)
 
-	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	// "{"/"}" are escaped as numeric character references, not for XML validity (braces aren't
+	// XML-special) but because writeEntry parses every .xml/.rels PART as a Go text/template
+	// AFTER all of this package's own insertions (title, bullets, section names, diagram alt/
+	// caption, ...) are already baked into that part's bytes. Author-supplied text containing a
+	// literal "{{" would otherwise be parsed as a template action instead of preserved as the
+	// text it is — this replacer runs before that byte stream ever exists, so the escaped form is
+	// what template.Parse sees, and "&#123;&#123;" is inert to it. Any OOXML-conformant reader
+	// (PowerPoint included) decodes the numeric reference back to a literal brace when displaying
+	// it, so this is invisible to anyone but the Go template parser it's defusing.
+	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "{", "&#123;", "}", "&#125;")
 )
 
 // markLayoutPicturesDecorative adds descr="" to every <p:cNvPr> inside a <p:pic> in a slide
@@ -89,14 +105,16 @@ func resetLastView(parts map[string][]byte) {
 	parts[viewPropsPart] = reLastView.ReplaceAll(data, []byte(`lastView="sldView"`))
 }
 
-// Render reads a PPTX template file, validates it has Title/Agenda/Content slide layouts, fills
-// in the title slide (dc.ModuleName and courseName), the agenda bullets, and duplicates the
-// Content slide once per dc.Slides entry, executes Go text templates in the remaining XML/RELS
-// parts against distilled context data and vars, and writes the result to outputPath.
+// Render reads a PPTX template file, validates Title/Agenda layouts plus Content and Diagram
+// layouts needed by dc.Slides, fills in the title slide (dc.ModuleName and courseName), agenda
+// bullets, and duplicates Content or Diagram slides once per dc.Slides entry (see
+// distill.Slide.Diagram), executes Go text templates in remaining XML/RELS parts against
+// distilled context data and vars, and writes result to outputPath.
 //
-// warnings reports every formula that failed to convert to real OOXML math and fell back to
-// plain escaped text instead — see mathWarnings — so callers can surface them instead of a
-// broken formula silently shipping unrendered (nil, not an error, on full success).
+// warnings reports every formula that failed to convert to real OOXML math (see mathWarnings) and
+// every diagram that failed to render to a picture (see diagramWarnings), both of which fall back
+// to a degraded-but-still-shipped slide rather than failing Render outright, so callers can
+// surface them instead of a silent gap in the deck (nil, not an error, on full success).
 func Render(templatePath string, dc *distill.DistilledContext, courseName string, vars map[string]string, outputPath string) (warnings []string, err error) {
 	inData, err := os.ReadFile(templatePath)
 	if err != nil {
@@ -117,7 +135,8 @@ func Render(templatePath string, dc *distill.DistilledContext, courseName string
 	resetLastView(parts)
 
 	mathW := &mathWarnings{}
-	if err := applyDeck(parts, &order, dc, courseName, mathW); err != nil {
+	diagW := &diagramWarnings{}
+	if err := applyDeck(parts, &order, dc, courseName, mathW, diagW); err != nil {
 		return nil, err
 	}
 
@@ -151,7 +170,7 @@ func Render(templatePath string, dc *distill.DistilledContext, courseName string
 		return nil, fmt.Errorf("finalize output pptx: %w", err)
 	}
 
-	return mathW.warnings(), nil
+	return append(mathW.warnings(), diagW.warnings()...), nil
 }
 
 // readParts reads every entry of reader into memory, keyed by part name, along with its original
@@ -213,31 +232,122 @@ func isTemplatedPart(name string) bool {
 	return strings.HasSuffix(lower, ".xml") || strings.HasSuffix(lower, ".rels")
 }
 
+// deckLayoutNeeds reports whether slides contains at least one bullet slide (slide.Diagram ==
+// nil) and/or at least one Mermaid diagram slide, so applyDeck/validateLayouts only require
+// whichever of the Content/Diagram layouts the deck actually uses.
+func deckLayoutNeeds(slides []distill.Slide) (needsContent, needsDiagram bool) {
+	for _, slide := range slides {
+		if slide.Diagram == nil {
+			needsContent = true
+		} else {
+			needsDiagram = true
+		}
+	}
+	return needsContent, needsDiagram
+}
+
+// requiredLayoutSlide looks up layout in slidesByLayout (as built by slidesByLayoutName) and
+// errors if it's required (per `required`, e.g. needsContent/needsDiagram) but the template has no
+// slide using that layout. required == false always succeeds, returning "" for a layout the
+// template happens not to have and the deck doesn't need anyway.
+func requiredLayoutSlide(slidesByLayout map[string][]string, layout string, required bool) (string, error) {
+	slides := slidesByLayout[layout]
+	if required && len(slides) == 0 {
+		return "", fmt.Errorf("template has no slide using the %q layout", layout)
+	}
+	if len(slides) == 0 {
+		return "", nil
+	}
+	return slides[0], nil
+}
+
+// validateDiagramSlidePlaceholder checks diagramSlide has a picture placeholder, but only when
+// needsDiagram — requiredLayoutSlide returns slidesByLayout[layoutDiagram][0] whenever the
+// template happens to have that layout at all, whether or not the deck actually needs it (that's
+// what makes needsDiagram==false safely mean "template has the layout, deck just doesn't use it,"
+// not "diagramSlide is empty"), so skipping this check for a deck with no diagram slides is what
+// keeps a bullets-only deck rendering fine against a template whose otherwise-unused Diagram
+// layout happens to be missing its pic placeholder.
+//
+// Checked here, before any mmdc invocation, not left to surface only via replacePicPlaceholder's
+// error deep inside fillDiagramSlide, which runs after rendering every earlier diagram slide in
+// the deck and only reaches that check when a render actually succeeds (a render failure returns
+// early via the graceful-fallback path first), so whether this template defect were caught at all
+// would otherwise depend on whether mmdc happens to be installed.
+func validateDiagramSlidePlaceholder(parts map[string][]byte, diagramSlide string, needsDiagram bool) error {
+	if !needsDiagram {
+		return nil
+	}
+	if _, _, ok := picPlaceholderShapeBounds(parts[diagramSlide]); !ok {
+		return fmt.Errorf("diagram slide %q has no picture placeholder", diagramSlide)
+	}
+	return nil
+}
+
+// removeExtraLayoutSlides deletes every slide beyond slidesByLayout[layout][0] for the Content and
+// Diagram layouts specifically (not Title/Agenda, which this package never duplicates or warns
+// about, and whose own extra-slide handling isn't exercised or specified anywhere — scoped
+// narrowly on purpose rather than silently deleting a template's second Title/Agenda slide with no
+// test coverage or warning). A template with more than one slide on the same required layout (e.g.
+// two Diagram-layout example slides) only has index 0 picked as that layout's prototype
+// (requiredLayoutSlide) — every other slide sharing the layout would otherwise never be touched by
+// anything in this package and ship, unfilled, on every single render. Called before presData is
+// read in applyDeck, so titleSldID/agendaSldID and duplicateDeckSlides' own slide/rId/sldId
+// counters are all computed against the already-cleaned-up state.
+func removeExtraLayoutSlides(parts map[string][]byte, order *[]string, slidesByLayout map[string][]string) error {
+	presData := parts["ppt/presentation.xml"]
+	for _, layout := range [...]string{layoutContent, layoutDiagram} {
+		slides := slidesByLayout[layout]
+		if len(slides) < 2 {
+			continue
+		}
+		for _, extra := range slides[1:] {
+			var err error
+			if presData, err = removeSlide(parts, order, presData, extra); err != nil {
+				return err
+			}
+		}
+	}
+	parts["ppt/presentation.xml"] = presData
+	return nil
+}
+
 // applyDeck validates the template's slide layouts and mutates parts/order in place to fill the
-// title slide, inject agenda bullets into the Agenda slide, and duplicate the Content slide once
-// per dc.Slides entry.
-func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext, courseName string, warnings *mathWarnings) error {
+// title slide, inject agenda bullets into the Agenda slide, and duplicate the Content and Diagram
+// slides once per dc.Slides entry (see duplicateDeckSlides).
+func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledContext, courseName string, mathW *mathWarnings, diagW *diagramWarnings) error {
 	layoutNames, err := layoutNamesByPart(parts)
 	if err != nil {
 		return err
 	}
-	if err := validateLayouts(layoutNames); err != nil {
+	needsContent, needsDiagram := deckLayoutNeeds(dc.Slides)
+	if err := validateLayouts(layoutNames, needsContent, needsDiagram); err != nil {
 		return err
 	}
 
 	slidesByLayout := slidesByLayoutName(parts, *order, layoutNames)
 
-	titleSlide, ok := slidesByLayout[layoutTitle]
-	if !ok {
-		return fmt.Errorf("template has no slide using the %q layout", layoutTitle)
+	titleSlide, err := requiredLayoutSlide(slidesByLayout, layoutTitle, true)
+	if err != nil {
+		return err
 	}
-	agendaSlide, ok := slidesByLayout[layoutAgenda]
-	if !ok {
-		return fmt.Errorf("template has no slide using the %q layout", layoutAgenda)
+	agendaSlide, err := requiredLayoutSlide(slidesByLayout, layoutAgenda, true)
+	if err != nil {
+		return err
 	}
-	contentSlide, ok := slidesByLayout[layoutContent]
-	if !ok {
-		return fmt.Errorf("template has no slide using the %q layout", layoutContent)
+	contentSlide, err := requiredLayoutSlide(slidesByLayout, layoutContent, needsContent)
+	if err != nil {
+		return err
+	}
+	diagramSlide, err := requiredLayoutSlide(slidesByLayout, layoutDiagram, needsDiagram)
+	if err != nil {
+		return err
+	}
+	if err := validateDiagramSlidePlaceholder(parts, diagramSlide, needsDiagram); err != nil {
+		return err
+	}
+	if err := removeExtraLayoutSlides(parts, order, slidesByLayout); err != nil {
+		return err
 	}
 
 	// Resolved before any mutation touches ppt/presentation.xml, since sldIDForPart reads the
@@ -252,15 +362,21 @@ func applyDeck(parts map[string][]byte, order *[]string, dc *distill.DistilledCo
 		return err
 	}
 
-	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName, warnings); err != nil {
+	if err := fillTitleSlide(parts, titleSlide, dc.ModuleName, courseName, mathW); err != nil {
 		return err
 	}
 
-	if err := fillAgenda(parts, agendaSlide, dc.Agenda, warnings); err != nil {
+	if err := fillAgenda(parts, agendaSlide, dc.Agenda, mathW); err != nil {
 		return err
 	}
 
-	contentSldIDs, err := duplicateContentSlides(parts, order, contentSlide, dc.Slides, warnings)
+	const presRelsPart = "ppt/_rels/presentation.xml.rels"
+	agendaRID, err := relationshipIDForTarget(parts[presRelsPart], strings.TrimPrefix(agendaSlide, "ppt/"))
+	if err != nil {
+		return fmt.Errorf("find presentation relationship for %q: %w", agendaSlide, err)
+	}
+
+	contentSldIDs, err := duplicateDeckSlides(parts, order, contentSlide, diagramSlide, agendaRID, dc.Slides, mathW, diagW)
 	if err != nil {
 		return err
 	}
@@ -304,16 +420,22 @@ func layoutNamesByPart(parts map[string][]byte) (map[string]string, error) {
 	return names, nil
 }
 
-func validateLayouts(layoutNames map[string]string) error {
+func validateLayouts(layoutNames map[string]string, needsContent, needsDiagram bool) error {
 	have := make(map[string]bool, len(layoutNames))
 	for _, n := range layoutNames {
 		have[n] = true
 	}
 	var missing []string
-	for _, want := range []string{layoutTitle, layoutAgenda, layoutContent} {
+	for _, want := range []string{layoutTitle, layoutAgenda} {
 		if !have[want] {
 			missing = append(missing, want)
 		}
+	}
+	if needsContent && !have[layoutContent] {
+		missing = append(missing, layoutContent)
+	}
+	if needsDiagram && !have[layoutDiagram] {
+		missing = append(missing, layoutDiagram)
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("template missing required slide layout(s): %v", missing)
@@ -323,8 +445,13 @@ func validateLayouts(layoutNames map[string]string) error {
 
 // slidesByLayoutName maps each required layout name to the first slide part (in template order)
 // that uses it, resolved by following each slide's relationship to its slide layout.
-func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map[string]string) map[string]string {
-	result := make(map[string]string)
+// slidesByLayoutName groups every slide part in order by the name of the slide layout it uses —
+// not just the first one found per layout — so a caller resolving "the" Content or Diagram slide
+// (requiredLayoutSlide takes slidesByLayout[layout][0] as that prototype) can also see and clean
+// up any OTHER slide sharing that same layout, rather than silently leaving it untouched forever
+// (see applyDeck's extra-slide removal, right after prototype resolution).
+func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map[string]string) map[string][]string {
+	result := make(map[string][]string)
 	for _, name := range order {
 		m := reSlidePart.FindStringSubmatch(name)
 		if m == nil {
@@ -338,9 +465,7 @@ func slidesByLayoutName(parts map[string][]byte, order []string, layoutNames map
 		if !ok {
 			continue
 		}
-		if _, exists := result[layoutName]; !exists {
-			result[layoutName] = name
-		}
+		result[layoutName] = append(result[layoutName], name)
 	}
 	return result
 }
@@ -388,97 +513,510 @@ func fillAgenda(parts map[string][]byte, slidePart string, agenda []string, warn
 	return nil
 }
 
-// duplicateContentSlides fills the prototype Content slide with slides[0] in place, then clones
-// it once per remaining entry, wiring up the new part's relationships, content type, and
-// presentation slide list entry. It returns each entry's final numeric sldId, in slides order,
-// so callers can group them into PowerPoint Sections afterward.
-func duplicateContentSlides(parts map[string][]byte, order *[]string, prototypePart string, slides []distill.Slide, warnings *mathWarnings) ([]string, error) {
+// fillContentSlideBody fills prototypeXML's title and body placeholders from slide's title and
+// bullet content, with an explicit autofit scale (see estimateAutofitScale) when geom was
+// successfully read off the prototype's layout. index is only used to number this slide in an
+// error message (1-based, matching the deck's own slide numbering, not slides-of-this-kind
+// numbering).
+func fillContentSlideBody(prototypeXML []byte, slide distill.Slide, index int, geom bodyGeometry, geomOK bool, warnings *mathWarnings) ([]byte, error) {
+	body, err := setPlaceholderBullets(prototypeXML, "title", []bulletLine{{text: slide.Title}}, nil, warnings)
+	if err != nil {
+		return nil, fmt.Errorf("set title for slide %d: %w", index+1, err)
+	}
+	bullets := splitBullets(slide.Content)
+	var scale *autofitScale
+	if geomOK {
+		scale = estimateAutofitScale(bullets, geom)
+	}
+	body, err = setPlaceholderBullets(body, "body", bullets, scale, warnings)
+	if err != nil {
+		return nil, fmt.Errorf("set content for slide %d: %w", index+1, err)
+	}
+	return body, nil
+}
+
+// deckSlideKind holds everything specific to one of the two prototype slides (Content or Diagram)
+// duplicateDeckSlides works with — its part name, whether it's been used in place yet, its
+// never-filled XML and original .rels a clone starts from, and the box/geometry its fill step
+// needs — so the per-slide loop can pick "the right kind" for a given distill.Slide once and
+// operate on it generically, instead of branching on isDiagram at every step.
+type deckSlideKind struct {
+	proto         string
+	used          bool
+	origRels      []byte
+	pristine      []byte
+	contentGeom   bodyGeometry
+	contentGeomOK bool
+	diagramBox    picBox
+}
+
+// newDeckSlideKind captures proto's original .rels and its raw, never-filled XML (before any
+// mutation), and, if proto is non-empty, its layout's body geometry or picture-placeholder box
+// (whichever isDiagramKind calls for) up front — every duplicate of this kind shares that same
+// geometry/box.
+//
+// pristine is why every clone (see cloneDeckSlide) starts from this snapshot rather than proto's
+// current value in parts: fillDiagramSlide structurally REMOVES a Diagram slide's picture
+// placeholder (replacePicPlaceholder) on first use, a one-way edit, so a second diagram cloned
+// from the first one's already-filled XML would find no placeholder left and fail. A Content
+// slide's fill is just a repeatable text replacement either way, so pristine costs it nothing.
+func newDeckSlideKind(parts map[string][]byte, proto string, isDiagramKind bool) deckSlideKind {
+	k := deckSlideKind{proto: proto, diagramBox: defaultPicBox}
+	if proto == "" {
+		return k
+	}
+	k.origRels = append([]byte(nil), parts[relsPartFor(proto)]...)
+	k.pristine = append([]byte(nil), parts[proto]...)
+	layoutPart, ok := slideLayoutPart(parts, proto)
+	if !ok {
+		return k
+	}
+	if isDiagramKind {
+		if box, ok := picPlaceholderBox(parts[layoutPart]); ok {
+			k.diagramBox = box
+		}
+		return k
+	}
+	k.contentGeom, k.contentGeomOK = contentBodyGeometry(parts[layoutPart])
+	return k
+}
+
+// fillDeckSlide fills slidePart/relsPart (either a prototype being used in place, or a fresh clone
+// of one) for slide, dispatching to fillDiagramSlide or fillContentSlideBody depending on which
+// kind slide belongs to. index is only used to number the slide in a fillContentSlideBody error
+// message.
+func fillDeckSlide(parts map[string][]byte, order *[]string, slidePart, relsPart string, slide distill.Slide, index int, kind *deckSlideKind, mediaBySource map[string]string, mediaCounter *int, mathW *mathWarnings, diagW *diagramWarnings) error {
+	if slide.Diagram != nil {
+		return fillDiagramSlide(parts, order, slidePart, relsPart, slide, mediaBySource, mediaCounter, kind.diagramBox, mathW, diagW)
+	}
+	body, err := fillContentSlideBody(parts[slidePart], slide, index, kind.contentGeom, kind.contentGeomOK, mathW)
+	if err != nil {
+		return err
+	}
+	parts[slidePart] = body
+	return nil
+}
+
+// slideIDCounters tracks the monotonically increasing numbers duplicateDeckSlides hands out to
+// each newly cloned slide part/relationship/sldId, so cloneDeckSlide can claim the next one of
+// each without duplicateDeckSlides threading three separate int pointers through every call.
+type slideIDCounters struct {
+	nextSlideNum int
+	nextRID      int
+	nextSldID    int
+}
+
+// cloneDeckSlide clones kind's pristine, never-filled prototype XML into a brand-new slide part
+// positioned right after prevRID in document order: a new slide+rels part (starting from kind's
+// original, content-specific-mutation-free .rels), a [Content_Types].xml override, a presentation
+// relationship, and a <p:sldId> entry in presData. It returns the clone's part name (for
+// fillDeckSlide), its own new sldId (for the caller's sldIDs/Sections bookkeeping) and rID (the
+// new prevRID anchor for the next iteration), and presData with the new sldId spliced in.
+func cloneDeckSlide(parts map[string][]byte, order *[]string, kind *deckSlideKind, presRelsPart, prevRID string, presData []byte, c *slideIDCounters) (slidePart, rID, sldID string, newPresData []byte, err error) {
+	slidePart = fmt.Sprintf("ppt/slides/slide%d.xml", c.nextSlideNum)
+	relsPart := relsPartFor(slidePart)
+	c.nextSlideNum++
+
+	parts[slidePart] = append([]byte(nil), kind.pristine...)
+	parts[relsPart] = append([]byte(nil), kind.origRels...)
+	*order = append(*order, slidePart, relsPart)
+
+	rID = fmt.Sprintf("rId%d", c.nextRID)
+	c.nextRID++
+
+	parts["[Content_Types].xml"], err = addContentTypeOverride(parts["[Content_Types].xml"], slidePart)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+	parts[presRelsPart], err = addPresentationRelationship(parts[presRelsPart], rID, strings.TrimPrefix(slidePart, "ppt/"))
+	if err != nil {
+		return "", "", "", nil, err
+	}
+
+	sldID = strconv.Itoa(c.nextSldID)
+	c.nextSldID++
+	newPresData = insertSldIDAfter(presData, prevRID, sldID, rID)
+	return slidePart, rID, sldID, newPresData, nil
+}
+
+// reusePrototypeInPlace resolves proto's own presentation-relationship id and numeric sldId (it
+// already has both, being an existing template slide, unlike a clone) and moves that sldId to sit
+// right after prevRID in presData's <p:sldIdLst> — matching the deck's document order regardless
+// of where the prototype originally sat in the template.
+func reusePrototypeInPlace(parts map[string][]byte, presRelsPart, proto string, presData []byte, prevRID string) (rID, sldID string, newPresData []byte, err error) {
+	rID, err = relationshipIDForTarget(parts[presRelsPart], strings.TrimPrefix(proto, "ppt/"))
+	if err != nil {
+		return "", "", nil, fmt.Errorf("find presentation relationship for %q: %w", proto, err)
+	}
+	sldID, err = sldIDForRID(presData, rID)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return rID, sldID, moveSldIDAfter(presData, prevRID, rID), nil
+}
+
+// duplicateDeckSlides fills the Content and Diagram prototype slides with dc.Slides in document
+// order — bullet slides (slide.Diagram == nil) against contentProto, mermaid-diagram slides
+// against diagramProto — reusing whichever prototype hasn't been used yet in place, and cloning it
+// (via cloneDeckSlide) every time that prototype is needed again. Whichever prototype (Content or
+// Diagram) never ends up used at all is deleted afterward (removeSlide), so a deck with no diagram
+// slides never ships a stray, empty Diagram-layout slide.
+//
+// agendaRID is the agenda slide's own presentation-relationship id — the anchor prevRID starts
+// from, so the first prototype slide filled in place gets moved to sit right after the agenda (see
+// reusePrototypeInPlace). It returns each entry's final numeric sldId, in slides order, so callers
+// can group them into PowerPoint Sections afterward — the same contract this generalizes from
+// (duplicateContentSlides, this function's single-prototype predecessor).
+func duplicateDeckSlides(parts map[string][]byte, order *[]string, contentProto, diagramProto, agendaRID string, slides []distill.Slide, mathW *mathWarnings, diagW *diagramWarnings) ([]string, error) {
 	if len(slides) == 0 {
 		return nil, errors.New("distilled context has no slides to render")
 	}
 
-	prototypeRels, ok := parts[relsPartFor(prototypePart)]
-	if !ok {
-		return nil, fmt.Errorf("content slide %q has no relationships part", prototypePart)
-	}
-
 	const presRelsPart = "ppt/_rels/presentation.xml.rels"
-	prototypeTarget := strings.TrimPrefix(prototypePart, "ppt/")
-	prevRID, err := relationshipIDForTarget(parts[presRelsPart], prototypeTarget)
-	if err != nil {
-		return nil, fmt.Errorf("find presentation relationship for %q: %w", prototypePart, err)
-	}
+	contentKind := newDeckSlideKind(parts, contentProto, false)
+	diagramKind := newDeckSlideKind(parts, diagramProto, true)
+	kinds := map[bool]*deckSlideKind{false: &contentKind, true: &diagramKind}
 
 	presData := parts["ppt/presentation.xml"]
-	protoSldID, err := sldIDForRID(presData, prevRID)
-	if err != nil {
-		return nil, err
+	counters := &slideIDCounters{
+		nextSlideNum: maxSlideNumber(*order) + 1,
+		nextRID:      maxRelID(parts[presRelsPart]) + 1,
+		nextSldID:    maxSldID(presData) + 1,
 	}
 
-	nextSlideNum := maxSlideNumber(*order) + 1
-	nextRID := maxRelID(parts[presRelsPart]) + 1
-	nextSldID := maxSldID(presData) + 1
-
-	// Resolved once, from the prototype's own layout, since every duplicated slide shares it.
-	// geomOK false (no layout, or the layout's body placeholder doesn't match the expected shape)
-	// just means every slide falls back to setPlaceholderBullets's bare-normAutofit default.
-	var geom bodyGeometry
-	var geomOK bool
-	if layoutPart, ok := slideLayoutPart(parts, prototypePart); ok {
-		geom, geomOK = contentBodyGeometry(parts[layoutPart])
-	}
-
+	mediaBySource := make(map[string]string)
+	mediaCounter := 0
+	prevRID := agendaRID
 	sldIDs := make([]string, len(slides))
 
 	for i, slide := range slides {
-		body, err := setPlaceholderBullets(parts[prototypePart], "title", []bulletLine{{text: slide.Title}}, nil, warnings)
-		if err != nil {
-			return nil, fmt.Errorf("set title for slide %d: %w", i+1, err)
-		}
-		bullets := splitBullets(slide.Content)
-		var scale *autofitScale
-		if geomOK {
-			scale = estimateAutofitScale(bullets, geom)
-		}
-		body, err = setPlaceholderBullets(body, "body", bullets, scale, warnings)
-		if err != nil {
-			return nil, fmt.Errorf("set content for slide %d: %w", i+1, err)
+		isDiagram := slide.Diagram != nil
+		kind := kinds[isDiagram]
+		if kind.proto == "" {
+			return nil, fmt.Errorf("template has no slide using the %q layout", map[bool]string{true: layoutDiagram, false: layoutContent}[isDiagram])
 		}
 
-		if i == 0 {
-			parts[prototypePart] = body
-			sldIDs[0] = protoSldID
-			continue
+		var (
+			slidePart, relsPart, rID, sldID string
+			err                             error
+		)
+		if !kind.used {
+			slidePart, relsPart = kind.proto, relsPartFor(kind.proto)
+			kind.used = true
+			rID, sldID, presData, err = reusePrototypeInPlace(parts, presRelsPart, kind.proto, presData, prevRID)
+		} else {
+			slidePart, rID, sldID, presData, err = cloneDeckSlide(parts, order, kind, presRelsPart, prevRID, presData, counters)
+			relsPart = relsPartFor(slidePart)
 		}
-
-		slidePartName := fmt.Sprintf("ppt/slides/slide%d.xml", nextSlideNum)
-		relsPartName := relsPartFor(slidePartName)
-		nextSlideNum++
-
-		parts[slidePartName] = body
-		parts[relsPartName] = prototypeRels
-		*order = append(*order, slidePartName, relsPartName)
-
-		rID := fmt.Sprintf("rId%d", nextRID)
-		nextRID++
-
-		parts["[Content_Types].xml"], err = addContentTypeOverride(parts["[Content_Types].xml"], slidePartName)
-		if err != nil {
-			return nil, err
-		}
-		parts[presRelsPart], err = addPresentationRelationship(parts[presRelsPart], rID, strings.TrimPrefix(slidePartName, "ppt/"))
 		if err != nil {
 			return nil, err
 		}
 
-		presData = insertSldIDAfter(presData, prevRID, strconv.Itoa(nextSldID), rID)
-		sldIDs[i] = strconv.Itoa(nextSldID)
+		if err := fillDeckSlide(parts, order, slidePart, relsPart, slide, i, kind, mediaBySource, &mediaCounter, mathW, diagW); err != nil {
+			return nil, err
+		}
+
+		sldIDs[i] = sldID
 		prevRID = rID
-		nextSldID++
 	}
 
 	parts["ppt/presentation.xml"] = presData
+
+	for _, kind := range kinds {
+		if kind.used || kind.proto == "" {
+			continue
+		}
+		newPresData, err := removeSlide(parts, order, parts["ppt/presentation.xml"], kind.proto)
+		if err != nil {
+			return nil, err
+		}
+		parts["ppt/presentation.xml"] = newPresData
+	}
+
 	return sldIDs, nil
+}
+
+// nextUnusedMediaPart claims the next "ppt/media/diagramN.png" name not already present in parts
+// — a valid template can already ship its own ppt/media/diagram1.png (used by some other slide or
+// layout), so a naive always-start-at-1 counter would silently overwrite that unrelated media part
+// the first time this deck renders a diagram. *counter is advanced past every name tried,
+// including ones skipped for colliding, so a deck's Nth diagram never retries a name an earlier
+// diagram in the same Render call already claimed.
+func nextUnusedMediaPart(parts map[string][]byte, counter *int) string {
+	for {
+		*counter++
+		candidate := fmt.Sprintf("ppt/media/diagram%d.png", *counter)
+		if _, exists := parts[candidate]; !exists {
+			return candidate
+		}
+	}
+}
+
+// fillDiagramSlide fills slidePart's title and caption placeholders from slide (unconditionally),
+// then attempts to render slide.Diagram's mermaid source to a PNG and embed it as the slide's
+// picture. Rendering never hard-fails Render: if mmdc is unavailable or the source fails to
+// render, the slide keeps its title and caption but its picture placeholder is left untouched, and
+// the failure is recorded on diagW instead (see mermaid.go's file doc comment for the fallback
+// contract). mediaBySource/mediaCounter dedupe media parts by mermaid source across the whole
+// deck: a diagram repeated verbatim on two slides shares one ppt/media part, each slide getting
+// its own relationship pointing at it. box is the picture placeholder's layout-level
+// position/size (see picPlaceholderBox/defaultPicBox), used to fit the PNG's actual pixel
+// dimensions into that box without upscaling (see fitBox).
+func fillDiagramSlide(parts map[string][]byte, order *[]string, slidePart, relsPart string, slide distill.Slide, mediaBySource map[string]string, mediaCounter *int, box picBox, mathW *mathWarnings, diagW *diagramWarnings) error {
+	body, err := setPlaceholderBullets(parts[slidePart], "title", []bulletLine{{text: slide.Title}}, nil, mathW)
+	if err != nil {
+		return fmt.Errorf("fill diagram slide %q: %w", slidePart, err)
+	}
+	body, err = setPlaceholderBullets(body, "body", []bulletLine{{text: slide.Diagram.Caption}}, nil, mathW)
+	if err != nil {
+		return fmt.Errorf("fill diagram slide %q: %w", slidePart, err)
+	}
+	parts[slidePart] = body
+
+	png, err := defaultMermaidRenderer.renderPNG(slide.Diagram.Source)
+	if err != nil {
+		diagW.add(slide.Title, slide.Diagram.Source, err)
+		return nil
+	}
+
+	mediaPart, ok := mediaBySource[slide.Diagram.Source]
+	if !ok {
+		mediaPart = nextUnusedMediaPart(parts, mediaCounter)
+		mediaBySource[slide.Diagram.Source] = mediaPart
+		parts[mediaPart] = png
+		*order = append(*order, mediaPart)
+
+		ct, err := addPNGDefaultIfMissing(parts["[Content_Types].xml"])
+		if err != nil {
+			return err
+		}
+		parts["[Content_Types].xml"] = ct
+	}
+
+	natW, natH, err := pngDimensions(png)
+	if err != nil {
+		diagW.add(slide.Title, slide.Diagram.Source, err)
+		return nil
+	}
+	offX, offY, cx, cy := fitBox(natW, natH, box)
+
+	relID := fmt.Sprintf("rId%d", maxRelID(parts[relsPart])+1)
+	relTarget := "../media/" + path.Base(mediaPart)
+	newRels, err := addImageRelationship(parts[relsPart], relID, relTarget)
+	if err != nil {
+		return err
+	}
+	parts[relsPart] = newRels
+
+	picID := maxCNvPrID(parts[slidePart]) + 1
+	pic := picXML(picID, slide.Diagram.Alt, relID, picBox{x: offX, y: offY, cx: cx, cy: cy})
+	newSlideXML, ok := replacePicPlaceholder(parts[slidePart], pic)
+	if !ok {
+		return fmt.Errorf("diagram slide %q has no picture placeholder", slidePart)
+	}
+	parts[slidePart] = newSlideXML
+	return nil
+}
+
+// rePicPhTag matches a <p:ph .../> or <p:ph ...> tag with a type="pic" attribute, anywhere in the
+// tag (PowerPoint can order p:ph attributes either way) — see picPlaceholderShapeBounds for why
+// anchoring on this tag, not a bare "type=\"pic\"" substring, matters.
+var rePicPhTag = regexp.MustCompile(`<p:ph\b[^>]*\btype="pic"[^>]*/?>`)
+
+// picPlaceholderShapeBounds finds the byte range [start, end) of the single <p:sp> shape
+// enclosing a <p:ph .../> with type="pic" in xml, anchored on the ph tag's own position — the
+// same LastIndex-back/Index-forward scan setPlaceholderBullets uses for a text placeholder,
+// applied here to a picture one instead. This deliberately avoids a single DOTALL regex spanning
+// "<p:sp>...type=\"pic\"...</p:sp>": Go's RE2 has no lookahead to stop that pattern's lazy `.*?`
+// from crossing a sibling shape's boundary, so on a layout/slide whose picture placeholder isn't
+// the FIRST <p:sp> in the tree (title and body shapes precede it, as in a real Diagram layout),
+// that regex's leftmost match starts at the first sibling's own <p:sp> and swallows every shape up
+// to the picture one's close tag — silently deleting the title/body shapes it was never supposed
+// to touch. ok is false if no picture placeholder is found.
+func picPlaceholderShapeBounds(xml []byte) (start, end int, ok bool) {
+	// Anchored on the <p:ph ...> tag itself, not a bare "type=\"pic\"" substring search: this runs
+	// on a slide whose title/caption text has already been filled in (fillDiagramSlide fills text
+	// first, then swaps the picture placeholder), so a bare substring search could match a literal
+	// "type=\"pic\"" sitting inside a diagram's title or caption <a:t> text instead of the real
+	// placeholder tag, and drop that text shape instead. rePicPhTag requires the match to start
+	// with "<p:ph", which text content can never produce — xmlTextReplacer escapes every literal
+	// "<" in inserted text to "&lt;". PowerPoint can order p:ph attributes either way, so
+	// type="pic" is still matched anywhere within the tag, not only right after "<p:ph".
+	loc := rePicPhTag.FindIndex(xml)
+	if loc == nil {
+		return 0, 0, false
+	}
+	phIdx := loc[0]
+	spStart := bytes.LastIndex(xml[:phIdx], []byte("<p:sp>"))
+	if spStart == -1 {
+		return 0, 0, false
+	}
+	spEndRel := bytes.Index(xml[phIdx:], []byte("</p:sp>"))
+	if spEndRel == -1 {
+		return 0, 0, false
+	}
+	return spStart, phIdx + spEndRel + len("</p:sp>"), true
+}
+
+// rePicXfrm extracts a shape's explicit position/size from its <a:xfrm>.
+var rePicXfrm = regexp.MustCompile(`<a:xfrm>\s*<a:off x="(\d+)" y="(\d+)"/>\s*<a:ext cx="(\d+)" cy="(\d+)"/>\s*</a:xfrm>`)
+
+// defaultPicBox is a conservative 16:9 diagram area used when a Diagram layout's picture
+// placeholder omits explicit geometry. Authors should provide that placeholder so their template
+// controls exact placement.
+var defaultPicBox = picBox{x: 685800, y: 1371600, cx: 10820400, cy: 4114800}
+
+// picPlaceholderBox gets a Diagram layout picture placeholder's explicit geometry. The slide
+// placeholder is replaced by a p:pic at this same box during rendering.
+func picPlaceholderBox(layoutXML []byte) (picBox, bool) {
+	start, end, ok := picPlaceholderShapeBounds(layoutXML)
+	if !ok {
+		return picBox{}, false
+	}
+	m := rePicXfrm.FindSubmatch(layoutXML[start:end])
+	if m == nil {
+		return picBox{}, false
+	}
+	values := [4]int64{}
+	for i := range values {
+		n, err := strconv.ParseInt(string(m[i+1]), 10, 64)
+		if err != nil || n <= 0 && i >= 2 {
+			return picBox{}, false
+		}
+		values[i] = n
+	}
+	return picBox{x: values[0], y: values[1], cx: values[2], cy: values[3]}, true
+}
+
+// replacePicPlaceholder swaps a Diagram slide's picture placeholder shape for picElement.
+func replacePicPlaceholder(slideXML []byte, picElement string) ([]byte, bool) {
+	start, end, ok := picPlaceholderShapeBounds(slideXML)
+	if !ok {
+		return slideXML, false
+	}
+	out := make([]byte, 0, len(slideXML)-(end-start)+len(picElement))
+	out = append(out, slideXML[:start]...)
+	out = append(out, picElement...)
+	out = append(out, slideXML[end:]...)
+	return out, true
+}
+
+// reCNvPrID matches any <p:cNvPr id="..."> attribute in a slide, for maxCNvPrID.
+var reCNvPrID = regexp.MustCompile(`<p:cNvPr\b[^>]*\bid="(\d+)"`)
+
+// maxCNvPrID returns the highest id="..." on any <p:cNvPr> in slideXML, 0 if none — so a newly
+// inserted <p:pic>'s own <p:cNvPr id="..."> can pick one that's guaranteed unique within the
+// slide's spTree.
+func maxCNvPrID(slideXML []byte) int {
+	maxID := 0
+	for _, m := range reCNvPrID.FindAllSubmatch(slideXML, -1) {
+		if n, err := strconv.Atoi(string(m[1])); err == nil && n > maxID {
+			maxID = n
+		}
+	}
+	return maxID
+}
+
+// addImageRelationship appends an image-type <Relationship> to data (a slide's own .rels part),
+// pointing at target (a path relative to ppt/slides/, e.g. "../media/diagram1.png").
+func addImageRelationship(data []byte, id, target string) ([]byte, error) {
+	if !bytes.Contains(data, []byte("</Relationships>")) {
+		return nil, fmt.Errorf("add image relationship %q: no </Relationships> marker", id)
+	}
+	entry := fmt.Sprintf(`<Relationship Id=%q Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target=%q/>`, id, target)
+	return bytes.Replace(data, []byte("</Relationships>"), append([]byte(entry), []byte("</Relationships>")...), 1), nil
+}
+
+// reHasPNGDefault detects an existing <Default .../> for the png extension in
+// [Content_Types].xml, so addPNGDefaultIfMissing doesn't add a duplicate one when a template
+// already declares it. Extension="png" is matched anywhere in the element rather than only
+// immediately after <Default, so attribute order (e.g.
+// <Default ContentType="image/png" Extension="png"/>) doesn't matter — this still assumes the
+// double-quoted, no-surrounding-space form every OOXML producer this package has seen emits, not
+// every attribute syntax XML itself permits (single quotes, spaces around "=").
+var reHasPNGDefault = regexp.MustCompile(`<Default\b[^>]*\bExtension="[Pp][Nn][Gg]"`)
+
+// addPNGDefaultIfMissing adds a <Default Extension="png" ContentType="image/png"/> to
+// [Content_Types].xml if it doesn't already declare one — this package's own testdata template
+// has no png parts at all before this feature, so it needs one the first time a diagram is
+// rendered; a template that already ships other PNG images is left alone.
+func addPNGDefaultIfMissing(data []byte) ([]byte, error) {
+	if reHasPNGDefault.Match(data) {
+		return data, nil
+	}
+	if !bytes.Contains(data, []byte("</Types>")) {
+		return nil, errors.New("add png content-type default: [Content_Types].xml has no </Types> marker")
+	}
+	entry := []byte(`<Default Extension="png" ContentType="image/png"/>`)
+	return bytes.Replace(data, []byte("</Types>"), append(entry, []byte("</Types>")...), 1), nil
+}
+
+// removeSlide deletes an unused prototype slide part (and its _rels part) from parts and order,
+// plus its [Content_Types].xml Override, its ppt/_rels/presentation.xml.rels Relationship, and its
+// ppt/presentation.xml <p:sldId> entry, so it doesn't ship as a stray, empty slide (see
+// duplicateDeckSlides — this is what happens to whichever of Content/Diagram never got used). It
+// also strips that numeric sldId out of any PowerPoint Section a template already shipped in its
+// own <p14:sectionLst> (see removeDanglingSectionSldID) — addSections (sections.go) only ever
+// appends a fresh sectionLst for this render's own slides, it never touches a pre-existing one, so
+// a template-authored section referencing the slide being deleted here would otherwise dangle.
+// presData is threaded through explicitly, like the rest of this package's slide-mutation
+// helpers, rather than re-read from parts, since a caller iterating over multiple removals has a
+// more current in-memory copy than what's already been written back into parts.
+func removeSlide(parts map[string][]byte, order *[]string, presData []byte, slidePart string) ([]byte, error) {
+	relsPart := relsPartFor(slidePart)
+
+	rID, err := relationshipIDForTarget(parts["ppt/_rels/presentation.xml.rels"], strings.TrimPrefix(slidePart, "ppt/"))
+	if err != nil {
+		return nil, fmt.Errorf("remove unused slide %q: %w", slidePart, err)
+	}
+
+	delete(parts, slidePart)
+	delete(parts, relsPart)
+	*order = removeFromOrder(*order, slidePart, relsPart)
+
+	ctOverride := regexp.MustCompile(`<Override\b[^>]*\bPartName="/` + regexp.QuoteMeta(slidePart) + `"[^>]*/>`)
+	parts["[Content_Types].xml"] = ctOverride.ReplaceAll(parts["[Content_Types].xml"], nil)
+
+	relEl := regexp.MustCompile(`<Relationship\b[^>]*\bId="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
+	parts["ppt/_rels/presentation.xml.rels"] = relEl.ReplaceAll(parts["ppt/_rels/presentation.xml.rels"], nil)
+
+	if start, end, ok := sldIDElementForRID(presData, rID); ok {
+		if m := reSldIDNumericAttr.FindSubmatch(presData[start:end]); m != nil {
+			presData = removeDanglingSectionSldID(presData, string(m[1]))
+		}
+		presData = append(presData[:start:start], presData[end:]...)
+	}
+	return presData, nil
+}
+
+// reEmptySection matches a <p14:section> left with no <p14:sldId> children at all, the shape
+// removeDanglingSectionSldID's own reference-stripping can produce — an empty section is exactly
+// as invalid to PowerPoint as a dangling reference, so it's dropped too, not left behind.
+var reEmptySection = regexp.MustCompile(`<p14:section\b[^>]*>\s*<p14:sldIdLst>\s*</p14:sldIdLst>\s*</p14:section>`)
+
+// removeDanglingSectionSldID strips any "<p14:sldId id=\"sldID\"/>" reference to a just-deleted
+// slide out of presData's PowerPoint Sections, then drops any section left with no slides at all
+// as a result — see removeSlide's doc comment for why this exists at all.
+func removeDanglingSectionSldID(presData []byte, sldID string) []byte {
+	ref := regexp.MustCompile(`<p14:sldId id="` + regexp.QuoteMeta(sldID) + `"\s*/>`)
+	presData = ref.ReplaceAll(presData, nil)
+	return reEmptySection.ReplaceAll(presData, nil)
+}
+
+// removeFromOrder returns order with every name in names removed, preserving the relative order of
+// everything else.
+func removeFromOrder(order []string, names ...string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	out := order[:0]
+	for _, n := range order {
+		if !drop[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // sldIDForPart resolves partName's numeric <p:sldId id="..."> in presData, by following its
@@ -493,12 +1031,33 @@ func sldIDForPart(parts map[string][]byte, presData []byte, partName string) (st
 	return sldIDForRID(presData, rID)
 }
 
+// reSldIDNumericAttr extracts a <p:sldId> element's own numeric id="..." attribute out of an
+// already-isolated element's bytes, distinct from that same element's r:id="..." attribute — see
+// reSldIDGlobal's doc comment for why the required leading "\s" is what tells the two apart.
+var reSldIDNumericAttr = regexp.MustCompile(`\sid="(\d+)"`)
+
+// sldIDElementForRID finds the byte range [start, end) of the single <p:sldId .../> element in
+// data whose r:id attribute equals rID, matching regardless of where r:id falls among the
+// element's attributes (see reSldIDGlobal's doc comment for why order can't be assumed). ok is
+// false if no such element exists.
+func sldIDElementForRID(data []byte, rID string) (start, end int, ok bool) {
+	re := regexp.MustCompile(`<p:sldId\b[^>]*\br:id="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
+	loc := re.FindIndex(data)
+	if loc == nil {
+		return 0, 0, false
+	}
+	return loc[0], loc[1], true
+}
+
 // sldIDForRID resolves the numeric <p:sldId id="..."> whose r:id matches rID.
 func sldIDForRID(presData []byte, rID string) (string, error) {
-	re := regexp.MustCompile(`<p:sldId id="(\d+)" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
-	m := re.FindSubmatch(presData)
-	if m == nil {
+	start, end, ok := sldIDElementForRID(presData, rID)
+	if !ok {
 		return "", fmt.Errorf("no sldId found for r:id %q", rID)
+	}
+	m := reSldIDNumericAttr.FindSubmatch(presData[start:end])
+	if m == nil {
+		return "", fmt.Errorf("sldId element for r:id %q has no numeric id attribute", rID)
 	}
 	return string(m[1]), nil
 }
@@ -575,19 +1134,46 @@ func addPresentationRelationship(data []byte, rID, target string) ([]byte, error
 // afterRID, falling back to appending before </p:sldIdLst> if it isn't found.
 func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 	entry := fmt.Sprintf(`<p:sldId id=%q r:id=%q/>`, newID, newRID)
+	return insertSldIDElementAfter(data, afterRID, entry)
+}
 
-	marker := fmt.Appendf(nil, `r:id=%q/>`, afterRID)
-	idx := bytes.Index(data, marker)
-	if idx == -1 {
+// insertSldIDElementAfter splices the literal element string entry into data immediately after the
+// <p:sldId> element whose r:id matches afterRID, falling back to appending before </p:sldIdLst> if
+// it isn't found. Factored out of insertSldIDAfter so moveSldIDAfter can reuse the same splicing
+// logic for an existing element's exact bytes, rather than a freshly-formatted one. Locates the
+// anchor element via sldIDElementForRID (order-agnostic) rather than a "r:id=\"...\"/>" marker
+// requiring r:id to be that element's last attribute — real PowerPoint XML doesn't guarantee that.
+func insertSldIDElementAfter(data []byte, afterRID, entry string) []byte {
+	_, end, ok := sldIDElementForRID(data, afterRID)
+	if !ok {
 		return bytes.Replace(data, []byte("</p:sldIdLst>"), append([]byte(entry), []byte("</p:sldIdLst>")...), 1)
 	}
 
-	insertPos := idx + len(marker)
 	out := make([]byte, 0, len(data)+len(entry))
-	out = append(out, data[:insertPos]...)
+	out = append(out, data[:end]...)
 	out = append(out, entry...)
-	out = append(out, data[insertPos:]...)
+	out = append(out, data[end:]...)
 	return out
+}
+
+// moveSldIDAfter moves the existing <p:sldId .../> element whose r:id matches moveRID to sit
+// immediately after the element whose r:id matches afterRID — a no-op (byte for byte) if it's
+// already there, since removing and reinserting an element already in that position reproduces the
+// identical bytes. Used when a prototype slide (Content or Diagram) is filled in place rather than
+// cloned: its existing sldId entry needs to move into the deck's actual document order, which may
+// not match wherever that prototype happened to sit in the original template.
+func moveSldIDAfter(presData []byte, afterRID, moveRID string) []byte {
+	start, end, ok := sldIDElementForRID(presData, moveRID)
+	if !ok {
+		return presData
+	}
+	entry := string(presData[start:end])
+
+	without := make([]byte, 0, len(presData)-len(entry))
+	without = append(without, presData[:start]...)
+	without = append(without, presData[end:]...)
+
+	return insertSldIDElementAfter(without, afterRID, entry)
 }
 
 // reAutofitChild matches any of the three mutually-exclusive OOXML text-autofit child elements a
