@@ -109,6 +109,15 @@ func diagramTemplateEntriesWithDuplicateDiagramLayout() map[string][]byte {
 	return e
 }
 
+// diagramTemplateEntriesWithReversedSldIDAttrOrder is diagramTemplateEntries with every
+// <p:sldId> element's attributes reversed (r:id before id) — real PowerPoint-authored XML doesn't
+// guarantee id comes first, unlike every other fixture in this file.
+func diagramTemplateEntriesWithReversedSldIDAttrOrder() map[string][]byte {
+	e := diagramTemplateEntries()
+	e["ppt/presentation.xml"] = []byte(`<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId1" id="255"/><p:sldId r:id="rId2" id="256"/><p:sldId r:id="rId3" id="257"/><p:sldId r:id="rId4" id="258"/></p:sldIdLst></p:presentation>`)
+	return e
+}
+
 // stubMmdc puts an executable named "mmdc" on a fresh PATH-only directory and points PATH at it,
 // mirroring math_test.go's stubPandoc for the same external-tool-stubbing purpose. script is a
 // full shell script body — e.g. one that inspects "$@" for its own "-o" argument to know where
@@ -241,6 +250,24 @@ func renderTestCases() []renderTestCase {
 					if got := strings.Count(pres[idx:idx+end], "<p14:sldId "); got != 2 {
 						t.Fatalf("expected 2 sldIds in the ch1 section, got %d: %q", got, pres[idx:idx+end])
 					}
+				}
+			},
+		},
+		{
+			name:    "section name containing a quote renders as valid XML",
+			entries: baseTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				dc := sampleContext()
+				dc.Slides[0].Tag = `Ch 1: "Intro"`
+				return dc
+			},
+			courseName: "Test University",
+			verify: func(t *testing.T, outEntries map[string][]byte) {
+				t.Helper()
+				pres := string(outEntries["ppt/presentation.xml"])
+				mustContainAll(t, "presentation.xml", pres, `<p14:section name="Ch 1: &quot;Intro&quot;"`)
+				if strings.Contains(pres, `\"`) {
+					t.Fatalf("section name was Go-quote-escaped instead of XML-escaped: %q", pres)
 				}
 			},
 		},
@@ -1168,6 +1195,61 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 			},
 			verify: verifyMixedDeckSlideOrder,
 		},
+		{
+			name:            "template's sldId elements have r:id before id",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntriesWithReversedSldIDAttrOrder,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{Title: "Bullets", Content: "bullet", Tag: "ch01"},
+						{Title: "Reversed Order Diagram", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  RevOrd1 --> RevOrd2", Alt: "RevOrd1 leads to RevOrd2.", Caption: "Attribute order shouldn't matter."}},
+					},
+				}
+			},
+			verify: verifyReversedSldIDAttrOrderRenders,
+		},
+		{
+			name:            "template's sldId elements have r:id before id, with an unused prototype removed and a diagram cloned",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntriesWithReversedSldIDAttrOrder,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{Title: "First", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  RevOrd3 --> RevOrd4", Alt: "RevOrd3 leads to RevOrd4.", Caption: "First diagram."}},
+						{Title: "Second", Tag: "ch01", Diagram: &distill.Diagram{Source: "flowchart LR\n  RevOrd5 --> RevOrd6", Alt: "RevOrd5 leads to RevOrd6.", Caption: "Second diagram."}},
+					},
+				}
+			},
+			verify: verifyReversedSldIDAttrOrderRemovalAndClone,
+		},
+		{
+			name:            "diagram alt text and caption containing template-action-like syntax",
+			script:          mmdcCopyFixtureScript,
+			templateEntries: diagramTemplateEntries,
+			dc: func() *distill.DistilledContext {
+				return &distill.DistilledContext{
+					ModuleName: "Diagrams",
+					Agenda:     []string{"One", "Two", "Three"},
+					Slides: []distill.Slide{
+						{
+							Title: "Templating",
+							Tag:   "ch01",
+							Diagram: &distill.Diagram{
+								Source:  "flowchart LR\n  TplA --> TplB",
+								Alt:     "The client calls {{.Endpoint}} on the API.",
+								Caption: "Uses {{ curly braces }} in prose.",
+							},
+						},
+					},
+				}
+			},
+			verify: verifyTemplateActionLikeTextIsPreserved,
+		},
 	}
 }
 
@@ -1294,6 +1376,75 @@ func verifyBulletsOnlyDeckIgnoresBrokenDiagramLayout(t *testing.T, dir string, o
 	}
 	if !found {
 		t.Fatal("no slide contains the deck's content title")
+	}
+}
+
+func verifyReversedSldIDAttrOrderRenders(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	pres := string(out["ppt/presentation.xml"])
+	if got := strings.Count(pres, "<p:sldId "); got != 4 {
+		t.Fatalf("got %d sldId entries, want 4: %q", got, pres)
+	}
+	var foundBullets, foundDiagram bool
+	for name, data := range out {
+		if !strings.HasPrefix(name, "ppt/slides/slide") || !strings.HasSuffix(name, ".xml") {
+			continue
+		}
+		s := string(data)
+		if strings.Contains(s, `<a:t>Bullets</a:t>`) {
+			foundBullets = true
+		}
+		if strings.Contains(s, `<a:t>Reversed Order Diagram</a:t>`) {
+			foundDiagram = true
+		}
+	}
+	if !foundBullets || !foundDiagram {
+		t.Fatalf("missing expected slide content: foundBullets=%v foundDiagram=%v", foundBullets, foundDiagram)
+	}
+}
+
+// verifyReversedSldIDAttrOrderRemovalAndClone exercises removeSlide's dangling-relationship
+// cleanup and maxSldID's non-collision guarantee specifically under reversed sldId attribute
+// order: the deck here is diagram-only (forcing the unused Content prototype's removal) with two
+// diagrams (forcing a clone, which calls maxSldID to pick the new sldId).
+func verifyReversedSldIDAttrOrderRemovalAndClone(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	rels := string(out["ppt/_rels/presentation.xml.rels"])
+	if strings.Contains(rels, `Id="rId3"`) {
+		t.Fatalf("removed Content prototype's presentation relationship (rId3) survived: %q", rels)
+	}
+
+	pres := string(out["ppt/presentation.xml"])
+	var ids []string
+	for _, part := range strings.Split(pres, "<p:sldId ")[1:] {
+		// Leading space prepended so id="..." is always preceded by whitespace regardless of
+		// whether it's the first or second attribute — the same distinction from "r:id=" that
+		// reSldIDGlobal's own "\sid=" requires in production code (see its doc comment).
+		if id, ok := betweenFirst(" "+part, ` id="`, `"`); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) != 4 {
+		t.Fatalf("got %d sldId entries %v, want 4 (title, agenda, two diagrams)", len(ids), ids)
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate sldId %q in %v", id, ids)
+		}
+		seen[id] = true
+	}
+}
+
+func verifyTemplateActionLikeTextIsPreserved(t *testing.T, dir string, out map[string][]byte) {
+	t.Helper()
+	diagram := string(out["ppt/slides/slide9.xml"])
+	mustContainAll(t, "diagram slide", diagram,
+		`descr="The client calls &#123;&#123;.Endpoint&#125;&#125; on the API."`,
+		`<a:t>Uses &#123;&#123; curly braces &#125;&#125; in prose.</a:t>`,
+	)
+	if strings.Contains(diagram, "{{") {
+		t.Fatalf("literal \"{{\" survived into the output XML, which writeEntry parses as a Go template action: %q", diagram)
 	}
 }
 

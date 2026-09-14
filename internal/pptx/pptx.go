@@ -36,12 +36,27 @@ var (
 	reRelIDAttr       = regexp.MustCompile(`\bId="([^"]+)"`)
 	reRelTargetAttr   = regexp.MustCompile(`\bTarget="([^"]+)"`)
 	reRelIDGlobal     = regexp.MustCompile(`Id="rId(\d+)"`)
-	reSldIDGlobal     = regexp.MustCompile(`<p:sldId id="(\d+)"`)
-	rePicBlock        = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
-	reCNvPrOpen       = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
-	reLastView        = regexp.MustCompile(`\blastView="[^"]*"`)
+	// reSldIDGlobal extracts a <p:sldId> element's own numeric id="..." attribute, wherever it
+	// falls among the element's attributes — real PowerPoint XML doesn't guarantee id before
+	// r:id. The required "\s" immediately before id=" excludes matching inside "r:id=" (never
+	// preceded by whitespace, only by ':'), and the "<p:sldId\b[^>]*" anchor keeps this from also
+	// matching an unrelated element's own numeric id="..." elsewhere in presentation.xml, like
+	// <p:sldMasterId id="..." r:id="..."/>, a completely different ID namespace.
+	reSldIDGlobal = regexp.MustCompile(`<p:sldId\b[^>]*\sid="(\d+)"`)
+	rePicBlock    = regexp.MustCompile(`(?s)<p:pic>.*?</p:pic>`)
+	reCNvPrOpen   = regexp.MustCompile(`<p:cNvPr\b[^>]*>`)
+	reLastView    = regexp.MustCompile(`\blastView="[^"]*"`)
 
-	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	// "{"/"}" are escaped as numeric character references, not for XML validity (braces aren't
+	// XML-special) but because writeEntry parses every .xml/.rels PART as a Go text/template
+	// AFTER all of this package's own insertions (title, bullets, section names, diagram alt/
+	// caption, ...) are already baked into that part's bytes. Author-supplied text containing a
+	// literal "{{" would otherwise be parsed as a template action instead of preserved as the
+	// text it is — this replacer runs before that byte stream ever exists, so the escaped form is
+	// what template.Parse sees, and "&#123;&#123;" is inert to it. Any OOXML-conformant reader
+	// (PowerPoint included) decodes the numeric reference back to a literal brace when displaying
+	// it, so this is invisible to anyone but the Go template parser it's defusing.
+	xmlTextReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "{", "&#123;", "}", "&#125;")
 )
 
 // markLayoutPicturesDecorative adds descr="" to every <p:cNvPr> inside a <p:pic> in a slide
@@ -965,11 +980,11 @@ func removeSlide(parts map[string][]byte, order *[]string, presData []byte, slid
 	relEl := regexp.MustCompile(`<Relationship\b[^>]*\bId="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
 	parts["ppt/_rels/presentation.xml.rels"] = relEl.ReplaceAll(parts["ppt/_rels/presentation.xml.rels"], nil)
 
-	sldIDEl := regexp.MustCompile(`<p:sldId id="(\d+)" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
-	m := sldIDEl.FindSubmatch(presData)
-	presData = sldIDEl.ReplaceAll(presData, nil)
-	if m != nil {
-		presData = removeDanglingSectionSldID(presData, string(m[1]))
+	if start, end, ok := sldIDElementForRID(presData, rID); ok {
+		if m := reSldIDNumericAttr.FindSubmatch(presData[start:end]); m != nil {
+			presData = removeDanglingSectionSldID(presData, string(m[1]))
+		}
+		presData = append(presData[:start:start], presData[end:]...)
 	}
 	return presData, nil
 }
@@ -1016,12 +1031,33 @@ func sldIDForPart(parts map[string][]byte, presData []byte, partName string) (st
 	return sldIDForRID(presData, rID)
 }
 
+// reSldIDNumericAttr extracts a <p:sldId> element's own numeric id="..." attribute out of an
+// already-isolated element's bytes, distinct from that same element's r:id="..." attribute — see
+// reSldIDGlobal's doc comment for why the required leading "\s" is what tells the two apart.
+var reSldIDNumericAttr = regexp.MustCompile(`\sid="(\d+)"`)
+
+// sldIDElementForRID finds the byte range [start, end) of the single <p:sldId .../> element in
+// data whose r:id attribute equals rID, matching regardless of where r:id falls among the
+// element's attributes (see reSldIDGlobal's doc comment for why order can't be assumed). ok is
+// false if no such element exists.
+func sldIDElementForRID(data []byte, rID string) (start, end int, ok bool) {
+	re := regexp.MustCompile(`<p:sldId\b[^>]*\br:id="` + regexp.QuoteMeta(rID) + `"[^>]*/>`)
+	loc := re.FindIndex(data)
+	if loc == nil {
+		return 0, 0, false
+	}
+	return loc[0], loc[1], true
+}
+
 // sldIDForRID resolves the numeric <p:sldId id="..."> whose r:id matches rID.
 func sldIDForRID(presData []byte, rID string) (string, error) {
-	re := regexp.MustCompile(`<p:sldId id="(\d+)" r:id="` + regexp.QuoteMeta(rID) + `"/>`)
-	m := re.FindSubmatch(presData)
-	if m == nil {
+	start, end, ok := sldIDElementForRID(presData, rID)
+	if !ok {
 		return "", fmt.Errorf("no sldId found for r:id %q", rID)
+	}
+	m := reSldIDNumericAttr.FindSubmatch(presData[start:end])
+	if m == nil {
+		return "", fmt.Errorf("sldId element for r:id %q has no numeric id attribute", rID)
 	}
 	return string(m[1]), nil
 }
@@ -1104,19 +1140,19 @@ func insertSldIDAfter(data []byte, afterRID, newID, newRID string) []byte {
 // insertSldIDElementAfter splices the literal element string entry into data immediately after the
 // <p:sldId> element whose r:id matches afterRID, falling back to appending before </p:sldIdLst> if
 // it isn't found. Factored out of insertSldIDAfter so moveSldIDAfter can reuse the same splicing
-// logic for an existing element's exact bytes, rather than a freshly-formatted one.
+// logic for an existing element's exact bytes, rather than a freshly-formatted one. Locates the
+// anchor element via sldIDElementForRID (order-agnostic) rather than a "r:id=\"...\"/>" marker
+// requiring r:id to be that element's last attribute — real PowerPoint XML doesn't guarantee that.
 func insertSldIDElementAfter(data []byte, afterRID, entry string) []byte {
-	marker := fmt.Appendf(nil, `r:id=%q/>`, afterRID)
-	idx := bytes.Index(data, marker)
-	if idx == -1 {
+	_, end, ok := sldIDElementForRID(data, afterRID)
+	if !ok {
 		return bytes.Replace(data, []byte("</p:sldIdLst>"), append([]byte(entry), []byte("</p:sldIdLst>")...), 1)
 	}
 
-	insertPos := idx + len(marker)
 	out := make([]byte, 0, len(data)+len(entry))
-	out = append(out, data[:insertPos]...)
+	out = append(out, data[:end]...)
 	out = append(out, entry...)
-	out = append(out, data[insertPos:]...)
+	out = append(out, data[end:]...)
 	return out
 }
 
@@ -1127,16 +1163,15 @@ func insertSldIDElementAfter(data []byte, afterRID, entry string) []byte {
 // cloned: its existing sldId entry needs to move into the deck's actual document order, which may
 // not match wherever that prototype happened to sit in the original template.
 func moveSldIDAfter(presData []byte, afterRID, moveRID string) []byte {
-	moveRe := regexp.MustCompile(`<p:sldId id="\d+" r:id="` + regexp.QuoteMeta(moveRID) + `"/>`)
-	loc := moveRe.FindIndex(presData)
-	if loc == nil {
+	start, end, ok := sldIDElementForRID(presData, moveRID)
+	if !ok {
 		return presData
 	}
-	entry := string(presData[loc[0]:loc[1]])
+	entry := string(presData[start:end])
 
 	without := make([]byte, 0, len(presData)-len(entry))
-	without = append(without, presData[:loc[0]]...)
-	without = append(without, presData[loc[1]:]...)
+	without = append(without, presData[:start]...)
+	without = append(without, presData[end:]...)
 
 	return insertSldIDElementAfter(without, afterRID, entry)
 }

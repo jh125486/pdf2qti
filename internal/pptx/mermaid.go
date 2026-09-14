@@ -224,9 +224,11 @@ func fitBox(natW, natH int, box picBox) (offX, offY, cx, cy int64) {
 }
 
 // xmlAttrReplacer escapes text for placement inside a double-quoted XML attribute value — the same
-// three characters xmlTextReplacer escapes for element text, plus '"' itself, which xmlTextReplacer
-// doesn't need to touch since <a:t> element content never sits inside quotes.
-var xmlAttrReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+// characters xmlTextReplacer escapes for element text (including "{"/"}", to defuse writeEntry's
+// later Go text/template pass over the whole part — see xmlTextReplacer's doc comment), plus '"'
+// itself, which xmlTextReplacer doesn't need to touch since <a:t> element content never sits
+// inside quotes.
+var xmlAttrReplacer = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "{", "&#123;", "}", "&#125;", `"`, "&quot;")
 
 // picXML renders a <p:pic> element embedding a diagram image: id must be unique within the
 // slide's spTree, alt is the screen-reader description (escaped for an XML attribute), rID is the

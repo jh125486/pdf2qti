@@ -51,10 +51,10 @@ func renderSectionListXML(groups []sectionGroup) string {
 	b.WriteString(`<p:ext uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}">`)
 	b.WriteString(`<p14:sectionLst xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">`)
 	for _, g := range groups {
-		fmt.Fprintf(&b, `<p14:section name=%q id=%q>`, xmlTextReplacer.Replace(g.name), newSectionID())
+		fmt.Fprintf(&b, `<p14:section name="%s" id="%s">`, xmlAttrReplacer.Replace(g.name), newSectionID())
 		b.WriteString(`<p14:sldIdLst>`)
 		for _, id := range g.sldIDs {
-			fmt.Fprintf(&b, `<p14:sldId id=%q/>`, id)
+			fmt.Fprintf(&b, `<p14:sldId id="%s"/>`, id)
 		}
 		b.WriteString(`</p14:sldIdLst></p14:section>`)
 	}
