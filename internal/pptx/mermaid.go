@@ -114,12 +114,17 @@ func (r *mermaidRenderer) runMmdc(mmdc, source string) (png []byte, err error, c
 	ctx, cancel := context.WithTimeout(context.Background(), mermaidRenderTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, mmdc, "-i", inPath, "-o", outPath, "-b", "transparent", "-s", "2") //nolint:gosec // mmdc resolved via exec.LookPath, not user input
-	// WaitDelay bounds Wait() itself, not just the ctx.Done() signal: mmdc spawns a headless
-	// Chromium that inherits the CombinedOutput pipe, so on ctx cancellation, killing only the
-	// direct mmdc process leaves that grandchild holding the pipe open — CombinedOutput would
-	// otherwise keep blocking on it well past mermaidRenderTimeout, exactly the indefinite hang
-	// this timeout exists to prevent. WaitDelay forces the pipe closed (and I/O errors returned)
-	// this long after the process is signaled, regardless of what still has it open.
+	// mmdc spawns a headless Chromium that outlives it as far as ctx cancellation is concerned:
+	// the default Cancel behavior only kills the direct mmdc process, not that grandchild, so on
+	// unix configureProcessGroup replaces it with killing mmdc's entire process group instead (see
+	// its own doc comment) — otherwise a timed-out or repeatedly-broken diagram would leak an
+	// orphaned Chromium process per render, not just block CombinedOutput past the timeout.
+	configureProcessGroup(cmd)
+	// WaitDelay bounds Wait() itself, not just the ctx.Done() signal: CombinedOutput's pipe stays
+	// open for as long as ANY process holds the write end, so even with configureProcessGroup's
+	// kill signal sent, WaitDelay is what actually forces the pipe closed (and I/O errors
+	// returned) if reaping that process group takes any time at all, or on platforms (Windows)
+	// where configureProcessGroup can't reach the grandchild at all.
 	cmd.WaitDelay = 5 * time.Second
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctx.Err() != nil {
