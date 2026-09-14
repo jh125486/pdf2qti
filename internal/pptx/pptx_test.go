@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -137,6 +138,9 @@ func diagramTemplateEntriesWithReversedOverrideAttrOrder() map[string][]byte {
 // unavailable at all. Not usable from a t.Parallel() test: mutates PATH via t.Setenv.
 func stubMmdc(t *testing.T, script string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("stubMmdc writes a POSIX #!/bin/sh script named \"mmdc\": exec.LookPath only resolves it via a PATHEXT extension (.exe/.cmd/.bat) on Windows, which this bare-name file doesn't have")
+	}
 	dir := t.TempDir()
 	if script != "" {
 		if err := os.WriteFile(filepath.Join(dir, "mmdc"), []byte(script), 0o700); err != nil { //nolint:gosec // test-local executable stub

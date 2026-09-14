@@ -14,6 +14,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -280,6 +281,9 @@ func TestPngDimensions(t *testing.T) {
 // — cache hit, no invocation at all — on every later run in the same process, e.g. `go test
 // -count=2`. Not t.Parallel(): mutates PATH via t.Setenv.
 func TestMermaidRenderer_RenderPNG_CachesDeterministicFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("writes a POSIX #!/bin/sh script named \"mmdc\": exec.LookPath only resolves it via a PATHEXT extension (.exe/.cmd/.bat) on Windows, which this bare-name file doesn't have")
+	}
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "invocations")
 	script := fmt.Sprintf("#!/bin/sh\necho x >> %q\nexit 1\n", counter)
