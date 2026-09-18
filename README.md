@@ -94,6 +94,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 | Field | Description |
 |---|---|
 | `version` | Config schema version (must be `1`) |
+| `courseName` | Optional course-wide display name used as the PPTX title-slide subtitle |
 | `defaults` | Global defaults for `quiz`, `generation`, `validation`, and `workflow` |
 | `sources` | Array of PDF sources; each source can override any default |
 | `modules` | Array of modules grouping one or more `sources` (by `sourceIds`) for the `module` command |
