@@ -46,26 +46,29 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		visibilityNotFound bool
 		visibilityErr      error
 	}{
-		{name: "success", onExisting: ExistingAppend, expectedCalls: 13, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "success", onExisting: ExistingAppend, expectedCalls: 12, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
 		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
-		{name: "find bank", failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "find Item Bank"},
-		{name: "open create dialog", failClickJS: wantCreateDialogJS, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "open create bank dialog"},
+		// The initial existence check now polls via evaluatePollBool (same
+		// hook mechanism as findErr above), so its own error case is covered
+		// by "find bank error" — there's no longer a distinct run()-call slot
+		// for it to fail at via failAt.
+		{name: "open create dialog", failClickJS: wantCreateDialogJS, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open create bank dialog"},
 		// Exercises the "an evaluateBool-style click check returns an error"
 		// path (as opposed to a clean "not found" false/nil) — previously
 		// untested anywhere in this table.
-		{name: "open create dialog errors", failClickJS: wantCreateDialogJS, failClickErr: true, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "open create bank dialog"},
-		{name: "bank name field", failAt: 3, onExisting: ExistingAppend, expectedCalls: 3, wantErr: "wait for bank-name field"},
-		{name: "fill bank name", failAt: 4, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "fill bank name"},
-		{name: "wait checkbox", failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "wait for share-with-course checkbox"},
-		{name: "share course", failClickJS: wantCheckboxJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "share bank with course"},
-		{name: "wait submit button", failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "wait for create bank submit button"},
-		{name: "submit create", failClickJS: wantSubmitCreateJS, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "submit create bank"},
-		{name: "return to banks", failAt: 8, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "return to Item Banks"},
-		{name: "created bank not visible", onExisting: ExistingAppend, visibilityNotFound: true, expectedCalls: 8, wantErr: "was not found in the course bank list"},
-		{name: "created bank visibility check errors", onExisting: ExistingAppend, visibilityErr: errors.New("evaluate failed"), expectedCalls: 8, wantErr: "verify created Item Bank is visible"},
+		{name: "open create dialog errors", failClickJS: wantCreateDialogJS, failClickErr: true, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open create bank dialog"},
+		{name: "bank name field", failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "wait for bank-name field"},
+		{name: "fill bank name", failAt: 3, onExisting: ExistingAppend, expectedCalls: 3, wantErr: "fill bank name"},
+		{name: "wait checkbox", failAt: 4, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "wait for share-with-course checkbox"},
+		{name: "share course", failClickJS: wantCheckboxJS, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "share bank with course"},
+		{name: "wait submit button", failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "wait for create bank submit button"},
+		{name: "submit create", failClickJS: wantSubmitCreateJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "submit create bank"},
+		{name: "return to banks", failAt: 7, onExisting: ExistingAppend, expectedCalls: 7, wantErr: "return to Item Banks"},
+		{name: "created bank not visible", onExisting: ExistingAppend, visibilityNotFound: true, expectedCalls: 7, wantErr: "was not found in the course bank list"},
+		{name: "created bank visibility check errors", onExisting: ExistingAppend, visibilityErr: errors.New("evaluate failed"), expectedCalls: 7, wantErr: "verify created Item Bank is visible"},
 		{name: "open bank", existing: true, failClickJS: wantOpenBankJS, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Bank"},
 		{name: "wait actions", existing: true, failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "wait for Item Bank actions"},
 		{name: "open actions", existing: true, failClickJS: wantPopoverTriggerJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "open import actions"},
@@ -80,17 +83,13 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
+			bankExistsCalls := 0
 			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
 				}
 				return nil
-			}, findBank: func(_ context.Context, name string) (bool, error) {
-				if name != `"Bank"` {
-					t.Fatalf("bank lookup name = %q, want %q", name, `"Bank"`)
-				}
-				return tt.existing, tt.findErr
 			},
 				// evaluateBool/evaluatePollBool's mocked run() field never
 				// populates chromedp.Evaluate's out-parameter, so every
@@ -98,9 +97,24 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 				// hook (not the production Evaluate path) to succeed by
 				// default — it only forces failure for the one specific JS
 				// expression a row is testing, so an unrelated earlier click
-				// in the same row's flow isn't affected.
+				// in the same row's flow isn't affected. findBank is left nil
+				// throughout: the initial existence check now polls via
+				// evaluatePollBool in production (same as the post-create
+				// visibility check), so it's exercised through this same hook
+				// rather than a separate findBank hook.
 				evalBool: func(_ context.Context, js string) (bool, error) {
 					if js == wantVisibilityJS {
+						// The initial existence poll and the post-create
+						// visibility poll send the exact same
+						// bankExistsJS(name) expression, so only call order
+						// distinguishes them — the first hit is always the
+						// initial check, any hit after that is the
+						// post-create one (existing-bank rows never reach the
+						// second call at all).
+						bankExistsCalls++
+						if bankExistsCalls == 1 {
+							return tt.existing, tt.findErr
+						}
 						if tt.visibilityErr != nil {
 							return false, tt.visibilityErr
 						}
@@ -114,11 +128,6 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 					}
 					return true, nil
 				},
-			}
-			if !tt.existing && tt.findErr == nil {
-				// Exercise production Evaluate path for normal create-bank flow and its
-				// failure points; existing-bank cases use injected lookup result below.
-				importer.findBank = nil
 			}
 			if tt.wantURL != "" {
 				importer.location = func(context.Context) (string, error) { return tt.wantURL, nil }
@@ -273,12 +282,12 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		wantErr       string
 		wantRecovered bool
 	}{
-		{name: "non-timeout error still fails immediately", failAt: 11, failErr: errors.New("browser failed"), expectedCalls: 11, wantErr: "attach package"},
-		{name: "timeout but bank still empty on recheck", failAt: 11, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 13, wantErr: "attach package"},
-		{name: "timeout but recheck navigation fails", failAt: 11, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 12, wantErr: "attach package"},
-		{name: "attach timeout recovers", failAt: 11, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 13, wantRecovered: true},
-		{name: "submit timeout recovers", failAt: 12, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
-		{name: "completion wait timeout recovers", failAt: 13, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
+		{name: "non-timeout error still fails immediately", failAt: 10, failErr: errors.New("browser failed"), expectedCalls: 10, wantErr: "attach package"},
+		{name: "timeout but bank still empty on recheck", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 12, wantErr: "attach package"},
+		{name: "timeout but recheck navigation fails", failAt: 10, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 11, wantErr: "attach package"},
+		{name: "attach timeout recovers", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 12, wantRecovered: true},
+		{name: "submit timeout recovers", failAt: 11, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 13, wantRecovered: true},
+		{name: "completion wait timeout recovers", failAt: 12, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -300,10 +309,25 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 				// check needs to see growth past that 0 baseline.
 				bankItemCount: func(context.Context) (int, error) { return tt.recoveredJS, nil },
 				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
-				// The post-create-bank visibility check needs a "found"
-				// result; the mocked run field never populates
-				// chromedp.Evaluate's out-parameter to provide one.
-				evalBool: func(context.Context, string) (bool, error) { return true, nil },
+				// The initial existence check and the post-create visibility
+				// check now both poll via this same evalBool hook, sending
+				// the identical bankExistsJS(name) expression — the first hit
+				// must report "not found" (this test wants the create-bank
+				// path taken), the second (post-create) must report "found".
+				// Every other evaluateBool-routed click just needs a clean
+				// "found"/true, matching this test's original blanket
+				// default.
+				evalBool: func() func(context.Context, string) (bool, error) {
+					wantExistsJS := bankExistsJS(`"Bank"`)
+					existsCalls := 0
+					return func(_ context.Context, js string) (bool, error) {
+						if js == wantExistsJS {
+							existsCalls++
+							return existsCalls > 1, nil
+						}
+						return true, nil
+					}
+				}(),
 			}
 			result, err := importer.Import(t.Context(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",

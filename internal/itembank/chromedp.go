@@ -264,7 +264,15 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if c.findBank != nil {
 		found, findErr = c.findBank(browser, name)
 	} else {
-		findErr = run(browser, chromedp.Evaluate(bankExistsJS(name), &found))
+		// Live-confirmed (Copilot review, PR #77): this initial existence
+		// check hits the exact same "React bank list hasn't rendered yet"
+		// race as the post-create visibility check below and every other
+		// read of this list in the file. A one-shot Evaluate here could
+		// misreport an EXISTING bank as absent right after a fresh
+		// navigate/login, sending Import() down the create-bank path and
+		// creating a duplicate — the poll-based checks elsewhere in this
+		// function exist precisely to prevent that class of false negative.
+		found, findErr = c.evaluatePollBool(browser, run, bankExistsJS(name), 15*time.Second)
 	}
 	if findErr != nil {
 		return Result{}, fmt.Errorf("find Item Bank: %w", findErr)
@@ -327,7 +335,14 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if !checked {
 			return Result{}, fmt.Errorf(`share bank with course: "Share with course" checkbox not found or not checked`)
 		}
-		if err := run(browser, chromedp.WaitVisible(createBankSubmitSelector, chromedp.ByQuery)); err != nil {
+		// WaitEnabled, not just WaitVisible (Copilot review, PR #77): a JS
+		// .click() on a disabled button is a no-op, same reasoning as the
+		// Import-button and "Add this bank to quiz" button waits elsewhere in
+		// this file — Canvas can render this submit button before enabling it
+		// (e.g. while still validating the name/checkbox), so a click right
+		// after WaitVisible alone could silently fire on a still-disabled
+		// button, reporting success while never actually submitting.
+		if err := run(browser, chromedp.WaitEnabled(createBankSubmitSelector, chromedp.ByQuery)); err != nil {
 			return Result{}, fmt.Errorf("wait for create bank submit button: %w", err)
 		}
 		submitted, err := c.evaluateBool(browser, run, clickSelectorJS(createBankSubmitSelector))
@@ -553,6 +568,29 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
 			itemCount, countErr = c.pollBankItemCount(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, expectedTotal)
+			// Copilot review (PR #77): pollBankItemCount runs against
+			// sessionCtx (no deadline of its own) precisely so its own up-to-3
+			// retries — up to 180s worst case — aren't bound by browser's
+			// outer deadline. But every step AFTER this one (the location
+			// read below) still uses that same original browser value, which
+			// can have expired while pollBankItemCount was busy on its own
+			// budget. Rebind to a fresh child of sessionCtx so the location
+			// read isn't silently run against an already-dead context.
+			//
+			// Live-confirmed: explicitly calling the OLD workCancel() here
+			// first (mirroring the stuck-import recovery path above, which
+			// only ever reaches its own rebind after browser's deadline has
+			// already fired or is being abandoned) tore down the live
+			// chromedp session outright — not just a Go-level context
+			// cancellation, but something that made the browser tab itself
+			// stop responding to the very next action, surfacing as "context
+			// canceled" on the location read moments later. Unlike the
+			// recovery path, browser is still very much alive and in active
+			// use here, so don't cancel it early — just let it expire on its
+			// own schedule via its already-deferred cancel once the function
+			// returns; briefly holding two live timeout contexts is harmless.
+			browser, workCancel = context.WithTimeout(sessionCtx, importTimeout(req.ExpectedItemCount))
+			defer workCancel()
 		}
 		if countErr != nil {
 			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)

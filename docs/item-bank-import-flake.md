@@ -114,9 +114,10 @@ running the fixed binary headless against `unt.instructure.com/courses/106252`
 repeatedly (not guessed, not diagnosed via a manually-driven browser) and
 capturing the page's live state on failure with a temporary in-process
 screenshot/DOM-dump helper (removed again once each bug was root-caused —
-not shipped). Three distinct click-before-render races, all the same shape
-as Symptom 2 but with the target element simply not existing yet rather than
-being swallowed by an InstUI hit-test miss:
+not shipped). Four distinct failures were found: three click-before-render
+races (items 1, 3 and 4 below), which have the same shape as Symptom 2 but
+with the target element simply not existing yet rather than being swallowed
+by an InstUI hit-test miss, plus one selector logic bug (item 2):
 
 1. **The top-level "Create Bank" button.** `Import()`'s click on it was a
    one-shot `evaluateBool` right after `Navigate` + a 1s `Sleep` — on a cold
@@ -173,6 +174,36 @@ growing stray-bank list (below) is the leading hypothesis, but this has only
 ever been tested against one course on one Canvas tenant. Verifying against
 a different, unrelated course/tenant is the top recommended follow-up before
 broad customer rollout.
+
+A code-review pass on the resulting PR (#77) found and fixed a real,
+separate bug this same live-testing surfaced: after `pollBankItemCount`
+(which deliberately runs against `sessionCtx`, with no deadline of its own,
+so its own up-to-3-attempt/180s-worst-case retry budget isn't bound by the
+rest of `Import()`'s outer deadline), the fix rebound `browser` to a fresh
+child of `sessionCtx` for the steps that follow — but did so by first
+explicitly calling the *old* `workCancel()`. That explicit cancel, even
+though it only ever targeted a Go-level child context (not `sessionCtx`
+itself), tore down the live chromedp session outright rather than just
+letting its deadline lapse — surfacing as "context canceled" on the very
+next action (the final location read), reproducing on 3 of 3 live attempts.
+Removing the explicit cancel — just rebinding to a fresh child and letting
+the old one expire on its own via its already-deferred cancel — fixed it;
+confirmed via 8 further live runs with no repeat of that failure mode.
+Distinguishing this from the pre-existing render-latency flake mattered:
+a naive read of "still failing after a fix" here would have wrongly pointed
+back at the same old symptom instead of this new, different bug the fix
+itself introduced.
+
+Separately, this round of live-testing weakened the "growing stray-bank
+list slows the whole page" hypothesis somewhat: appending to a bank that
+had existed since earlier in the same session found it in ~7.5s (fast), so
+the list itself isn't uniformly slow to read — the latency appears specific
+to *freshly created* banks not yet being indexed/visible, which reads more
+like Canvas-side propagation lag on new writes than a rendering-cost problem
+tied to list length. Also ruled out: Canvas does not redirect to a newly
+created bank's own page after the create-bank dialog's submit — the browser
+stays on the plain `/banks` list URL, so there's no discarded redirect to
+exploit as a faster confirmation path.
 
 ### Stray test banks
 
