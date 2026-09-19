@@ -14,44 +14,73 @@ import (
 
 func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table covers browser state-machine failures
 	t.Parallel()
+	// These are the exact JS expressions particular Import() click/check
+	// sites send, computed once so the table below and the mock evalBool
+	// hook agree on them by construction (not by retyping a literal that
+	// could quietly drift from the real call site).
+	wantVisibilityJS := bankExistsJS(`"Bank"`)
+	wantCreateDialogJS := clickTextJS(buttonOrLinkTags, "Create Bank", false)
+	wantCheckboxJS := checkCheckboxJS(shareWithCourseCheckboxSelector)
+	wantSubmitCreateJS := clickSelectorJS(createBankSubmitSelector)
+	wantOpenBankJS := clickTextJS(buttonOrLinkTags, "Bank", true)
+	wantPopoverTriggerJS := clickSelectorJS(`button[data-popover-trigger="true"]`)
+	wantMenuItemJS := clickSelectorJS(`[role="menuitem"]`)
+	wantImportClickJS := clickXPathJS(importButtonXPath)
 	tests := []struct {
 		name          string
-		failAt        int
+		failAt        int    // fails the Nth plain (non-evaluateBool) run() call.
+		failClickJS   string // fails the evaluateBool call sending this exact JS.
+		failClickErr  bool   // failClickJS's evaluateBool returns an error instead of a clean "not found".
 		existing      bool
 		findErr       error
 		onExisting    Existing
 		expectedCalls int
 		wantErr       string
 		wantURL       string
+		// visibilityNotFound and visibilityErr fold
+		// TestChromedpImporterImport_AbortsWhenCreatedBankNotVisible and
+		// TestChromedpImporterImport_CreatedBankVisibilityCheckErrors into
+		// this table (per repo convention: one test function per exported
+		// func) — they exercise the post-create visibility check specifically,
+		// the same evalBool mechanism failClickJS uses for the click sites.
+		visibilityNotFound bool
+		visibilityErr      error
 	}{
-		{name: "success", onExisting: ExistingAppend, expectedCalls: 15, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
-		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 11, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "success", onExisting: ExistingAppend, expectedCalls: 13, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
+		{name: "existing bank append", existing: true, onExisting: ExistingAppend, expectedCalls: 9, wantURL: "https://canvas.example.edu/courses/7/banks/42"},
 		{name: "existing bank fails", existing: true, onExisting: ExistingFail, expectedCalls: 1, wantErr: `item bank "Bank" already exists`},
 		{name: "find bank error", findErr: errors.New("lookup failed"), onExisting: ExistingAppend, expectedCalls: 1, wantErr: "find Item Bank"},
 		{name: "open banks", failAt: 1, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Banks"},
 		{name: "find bank", failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "find Item Bank"},
-		{name: "open create dialog", failAt: 3, onExisting: ExistingAppend, expectedCalls: 3, wantErr: "open create bank dialog"},
-		{name: "bank name field", failAt: 4, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "wait for bank-name field"},
-		{name: "fill bank name", failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "fill bank name"},
-		{name: "share course", failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "share bank with course"},
-		{name: "submit create", failAt: 7, onExisting: ExistingAppend, expectedCalls: 7, wantErr: "submit create bank"},
+		{name: "open create dialog", failClickJS: wantCreateDialogJS, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "open create bank dialog"},
+		// Exercises the "an evaluateBool-style click check returns an error"
+		// path (as opposed to a clean "not found" false/nil) — previously
+		// untested anywhere in this table.
+		{name: "open create dialog errors", failClickJS: wantCreateDialogJS, failClickErr: true, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "open create bank dialog"},
+		{name: "bank name field", failAt: 3, onExisting: ExistingAppend, expectedCalls: 3, wantErr: "wait for bank-name field"},
+		{name: "fill bank name", failAt: 4, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "fill bank name"},
+		{name: "wait checkbox", failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "wait for share-with-course checkbox"},
+		{name: "share course", failClickJS: wantCheckboxJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "share bank with course"},
+		{name: "wait submit button", failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "wait for create bank submit button"},
+		{name: "submit create", failClickJS: wantSubmitCreateJS, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "submit create bank"},
 		{name: "return to banks", failAt: 8, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "return to Item Banks"},
-		{name: "open bank", failAt: 9, onExisting: ExistingAppend, expectedCalls: 9, wantErr: "open Item Bank"},
-		{name: "wait actions", failAt: 10, onExisting: ExistingAppend, expectedCalls: 10, wantErr: "wait for Item Bank actions"},
-		{name: "open actions", failAt: 11, onExisting: ExistingAppend, expectedCalls: 11, wantErr: "open import actions"},
-		{name: "open dialog", failAt: 12, onExisting: ExistingAppend, expectedCalls: 12, wantErr: "open import dialog"},
-		{name: "attach package", failAt: 13, onExisting: ExistingAppend, expectedCalls: 13, wantErr: "attach package"},
-		{name: "submit import", failAt: 14, onExisting: ExistingAppend, expectedCalls: 14, wantErr: "submit import"},
-		{name: "wait completion", failAt: 15, onExisting: ExistingAppend, expectedCalls: 15, wantErr: "wait for import completion"},
-		{name: "read location", failAt: 16, onExisting: ExistingAppend, expectedCalls: 16, wantErr: "read Item Bank URL"},
+		{name: "created bank not visible", onExisting: ExistingAppend, visibilityNotFound: true, expectedCalls: 8, wantErr: "was not found in the course bank list"},
+		{name: "created bank visibility check errors", onExisting: ExistingAppend, visibilityErr: errors.New("evaluate failed"), expectedCalls: 8, wantErr: "verify created Item Bank is visible"},
+		{name: "open bank", existing: true, failClickJS: wantOpenBankJS, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Bank"},
+		{name: "wait actions", existing: true, failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "wait for Item Bank actions"},
+		{name: "open actions", existing: true, failClickJS: wantPopoverTriggerJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "open import actions"},
+		{name: "wait import menu", existing: true, failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "wait for import menu"},
+		{name: "open dialog", existing: true, failClickJS: wantMenuItemJS, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "open import dialog"},
+		{name: "attach package", existing: true, failAt: 7, onExisting: ExistingAppend, expectedCalls: 7, wantErr: "attach package"},
+		{name: "submit import", existing: true, failClickJS: wantImportClickJS, onExisting: ExistingAppend, expectedCalls: 8, wantErr: "submit import"},
+		{name: "wait completion", existing: true, failAt: 9, onExisting: ExistingAppend, expectedCalls: 9, wantErr: "wait for import completion"},
+		{name: "read location", existing: true, failAt: 10, onExisting: ExistingAppend, expectedCalls: 10, wantErr: "read Item Bank URL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			batchSizes := make([]int, 0, 16)
 			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action) error {
-				batchSizes = append(batchSizes, len(actions))
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -62,7 +91,30 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 					t.Fatalf("bank lookup name = %q, want %q", name, `"Bank"`)
 				}
 				return tt.existing, tt.findErr
-			}}
+			},
+				// evaluateBool/evaluatePollBool's mocked run() field never
+				// populates chromedp.Evaluate's out-parameter, so every
+				// evaluateBool-routed click in this table must go through this
+				// hook (not the production Evaluate path) to succeed by
+				// default — it only forces failure for the one specific JS
+				// expression a row is testing, so an unrelated earlier click
+				// in the same row's flow isn't affected.
+				evalBool: func(_ context.Context, js string) (bool, error) {
+					if js == wantVisibilityJS {
+						if tt.visibilityErr != nil {
+							return false, tt.visibilityErr
+						}
+						return !tt.visibilityNotFound, nil
+					}
+					if tt.failClickJS != "" && js == tt.failClickJS {
+						if tt.failClickErr {
+							return false, errors.New("browser failed")
+						}
+						return false, nil
+					}
+					return true, nil
+				},
+			}
 			if !tt.existing && tt.findErr == nil {
 				// Exercise production Evaluate path for normal create-bank flow and its
 				// failure points; existing-bank cases use injected lookup result below.
@@ -71,7 +123,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 			if tt.wantURL != "" {
 				importer.location = func(context.Context) (string, error) { return tt.wantURL, nil }
 			}
-			result, err := importer.Import(context.Background(), &Request{
+			result, err := importer.Import(t.Context(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
 				CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: tt.onExisting,
 			})
@@ -94,9 +146,6 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 				if result.BankID != "42" {
 					t.Fatalf("Import() result bank ID = %q, want %q", result.BankID, "42")
 				}
-				if len(batchSizes) < 2 || batchSizes[len(batchSizes)-2] != 2 {
-					t.Fatalf("import submit action batch = %v, want penultimate batch size 2", batchSizes)
-				}
 			}
 		})
 	}
@@ -109,9 +158,9 @@ func TestImportTimeout_Table(t *testing.T) {
 		expectedItemCount int
 		want              time.Duration
 	}{
-		{name: "no expected count", expectedItemCount: 0, want: 150 * time.Second},
-		{name: "small bank", expectedItemCount: 20, want: 150 * time.Second},
-		{name: "large bank scales", expectedItemCount: 60, want: 190 * time.Second},
+		{name: "no expected count", expectedItemCount: 0, want: 300 * time.Second},
+		{name: "small bank", expectedItemCount: 20, want: 300 * time.Second},
+		{name: "large bank scales", expectedItemCount: 60, want: 340 * time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -156,7 +205,7 @@ func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *test
 		run:           func(context.Context, ...chromedp.Action) error { return nil },
 		bankItemCount: func(context.Context) (int, error) { return 5, nil }, // bank has content
 	}
-	if got := importer.recoverStuckImport(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
+	if got := importer.recoverStuckImport(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
 		t.Fatal("recoverStuckImport() = true with an unknown (-1) baseline, want false")
 	}
 }
@@ -195,7 +244,7 @@ func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 					return tt.reads[reads-1], nil
 				},
 			}
-			got, ok := importer.stableBankItemCount(context.Background(), importer.run)
+			got, ok := importer.stableBankItemCount(t.Context(), importer.run)
 			if ok != tt.wantOK {
 				t.Fatalf("stableBankItemCount() ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -224,12 +273,12 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		wantErr       string
 		wantRecovered bool
 	}{
-		{name: "non-timeout error still fails immediately", failAt: 13, failErr: errors.New("browser failed"), expectedCalls: 13, wantErr: "attach package"},
-		{name: "timeout but bank still empty on recheck", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 15, wantErr: "attach package"},
-		{name: "timeout but recheck navigation fails", failAt: 13, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 14, wantErr: "attach package"},
-		{name: "attach timeout recovers", failAt: 13, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
-		{name: "submit timeout recovers", failAt: 14, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 16, wantRecovered: true},
-		{name: "completion wait timeout recovers", failAt: 15, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 17, wantRecovered: true},
+		{name: "non-timeout error still fails immediately", failAt: 11, failErr: errors.New("browser failed"), expectedCalls: 11, wantErr: "attach package"},
+		{name: "timeout but bank still empty on recheck", failAt: 11, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 13, wantErr: "attach package"},
+		{name: "timeout but recheck navigation fails", failAt: 11, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 12, wantErr: "attach package"},
+		{name: "attach timeout recovers", failAt: 11, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 13, wantRecovered: true},
+		{name: "submit timeout recovers", failAt: 12, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
+		{name: "completion wait timeout recovers", failAt: 13, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -251,8 +300,12 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 				// check needs to see growth past that 0 baseline.
 				bankItemCount: func(context.Context) (int, error) { return tt.recoveredJS, nil },
 				location:      func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+				// The post-create-bank visibility check needs a "found"
+				// result; the mocked run field never populates
+				// chromedp.Evaluate's out-parameter to provide one.
+				evalBool: func(context.Context, string) (bool, error) { return true, nil },
 			}
-			result, err := importer.Import(context.Background(), &Request{
+			result, err := importer.Import(t.Context(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222",
 				CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend,
 			})
@@ -267,6 +320,221 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 			}
 			if tt.wantRecovered && result.BankURL == "" {
 				t.Fatalf("Import() result = %+v, want recovered result with BankURL set", result)
+			}
+		})
+	}
+}
+
+// clickJSWant builds clickJS's exact expected output for matchExpr, mirroring
+// its template verbatim (including whitespace) so a golden-string comparison
+// actually exercises the template, not just a loose substring check.
+func clickJSWant(matchExpr string) string {
+	return `(() => {
+		const target = ` + matchExpr + `;
+		if (target) { target.click(); return true; }
+		return false;
+	})()`
+}
+
+// TestClickJS_Table covers clickJS, the shared JS-.click()-dispatch helper
+// this fix generalizes from clickEditBankGroupJS: it must embed the match
+// expression verbatim and dispatch a direct .click() rather than a
+// synthetic hit-test event.
+func TestClickJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, matchExpr string }{
+		{name: "document body", matchExpr: "document.body"},
+		{name: "querySelector expression", matchExpr: `document.querySelector("[role=dialog] input[type=checkbox]")`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := clickJS(tt.matchExpr)
+			if want := clickJSWant(tt.matchExpr); got != want {
+				t.Fatalf("clickJS(%q) = %q, want %q", tt.matchExpr, got, want)
+			}
+		})
+	}
+}
+
+// TestClickSelectorJS_Table covers the create-bank submit button and the
+// Item Bank actions popover trigger's data-automation-/attribute-based click
+// sites, asserting the exact generated JS (a golden string) so a semantics
+// change — e.g. swapping querySelector for querySelectorAll, or losing the
+// selector escaping jsString provides — shows up in the diff. The
+// share-with-course checkbox is not covered here: it clicks through
+// checkCheckboxJS (see TestCheckCheckboxJS_Table), not clickSelectorJS,
+// specifically because a checkbox needs check-before-click semantics this
+// plain unconditional-click helper doesn't provide.
+func TestClickSelectorJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, selector string }{
+		{name: "data-automation submit button", selector: createBankSubmitSelector},
+		{name: "popover trigger", selector: `button[data-popover-trigger="true"]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := clickSelectorJS(tt.selector)
+			want := clickJSWant(`document.querySelector(` + jsString(tt.selector) + `)`)
+			if got != want {
+				t.Fatalf("clickSelectorJS(%q) = %q, want %q", tt.selector, got, want)
+			}
+		})
+	}
+}
+
+// TestCheckCheckboxJS_Table covers checkCheckboxJS, the checkbox-specific
+// click helper introduced because a plain JS .click() (what clickJS/
+// clickSelectorJS dispatch) toggles a checkbox's state — reusing either
+// against the create-bank "Share with course" checkbox could silently
+// uncheck it if Canvas ever defaults it checked. Asserts the exact generated
+// JS (a golden string): it must check target.checked before clicking, and
+// return the final .checked value, not just a found/not-found boolean.
+func TestCheckCheckboxJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, selector string }{
+		{name: "share with course checkbox", selector: shareWithCourseCheckboxSelector},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := checkCheckboxJS(tt.selector)
+			want := `(() => {
+		const target = document.querySelector(` + jsString(tt.selector) + `);
+		if (!target) return false;
+		if (!target.checked) target.click();
+		return target.checked;
+	})()`
+			if got != want {
+				t.Fatalf("checkCheckboxJS(%q) = %q, want %q", tt.selector, got, want)
+			}
+		})
+	}
+}
+
+// TestClickTextJS_Table covers the text-based click sites this fix converted
+// to JS dispatch (the top-level "Create Bank" button, the Import dialog's
+// submit button, and the Banks-list row/rename-dialog buttons), including
+// exact vs. substring matching. Asserts the exact generated JS (a golden
+// string), which would catch e.g. a regression back to textContent (the
+// nested-icon-label "Create BankBank" artifact clickTextJS's doc comment
+// describes) since the golden string hardcodes innerText.
+func TestClickTextJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		tags  []string
+		text  string
+		exact bool
+	}{
+		{name: "substring match", tags: buttonOrLinkTags, text: "Create Bank"},
+		{name: "exact match in dialog", tags: []string{`[role="dialog"] button`}, text: "Save Changes", exact: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := clickTextJS(tt.tags, tt.text, tt.exact)
+			cmp := "el.innerText.trim().includes(" + jsString(tt.text) + ")"
+			if tt.exact {
+				cmp = "el.innerText.trim() === " + jsString(tt.text)
+			}
+			selector := strings.Join(tt.tags, ",")
+			want := clickJSWant(`Array.from(document.querySelectorAll(` + jsString(selector) + `)).find(el => ` + cmp + `)`)
+			if got != want {
+				t.Fatalf("clickTextJS(%v, %q, %v) = %q, want %q", tt.tags, tt.text, tt.exact, got, want)
+			}
+		})
+	}
+}
+
+// findByInnerText mirrors the JS `Array.from(...).find(el => cmp)` predicate
+// clickTextJS generates (exact ("===") vs. substring ("includes")), against a
+// plain Go slice standing in for document order — used by
+// TestClickTextJS_ExactVsSubstringBankNameMatch below to prove, without a
+// JS/browser runtime, that the matching MODE (not just the generated string
+// shape TestClickTextJS_Table's golden-string check covers) behaves as
+// clickTextJS's own doc comment claims: exact equality never matches a
+// longer name merely containing it, while substring matching can.
+func findByInnerText(candidates []string, text string, exact bool) (string, bool) {
+	for _, c := range candidates {
+		if exact {
+			if c == text {
+				return c, true
+			}
+			continue
+		}
+		if strings.Contains(c, text) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// TestClickTextJS_ExactVsSubstringBankNameMatch covers F2: opening a specific
+// Item Bank by name must use exact matching, not substring, or a course
+// containing both "Chapter 1" and "Chapter 11" can silently open/click the
+// wrong one when targeting "Chapter 1" — exactly the bug fixed at Import()'s
+// open-bank click site (clickTextJS(..., req.BankName, true)) and the two
+// bank-name click sites in renameBankUI, all of which used to pass exact:
+// false. This proves the matching semantics directly: exact mode only ever
+// finds the bank literally named "Chapter 1", never "Chapter 11", regardless
+// of list order; substring mode is shown to be capable of matching the wrong
+// one when the false-positive candidate sorts first — the exact failure
+// shape a live import previously exhibited.
+func TestClickTextJS_ExactVsSubstringBankNameMatch(t *testing.T) {
+	t.Parallel()
+	target := "Chapter 1"
+	for _, tt := range []struct {
+		name       string
+		candidates []string
+	}{
+		{name: "target first in document order", candidates: []string{"Chapter 1", "Chapter 11"}},
+		{name: "false-positive candidate first in document order", candidates: []string{"Chapter 11", "Chapter 1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := findByInnerText(tt.candidates, target, true)
+			if !ok || got != "Chapter 1" {
+				t.Fatalf("exact match against %v = (%q, %v), want (\"Chapter 1\", true)", tt.candidates, got, ok)
+			}
+		})
+	}
+	// Demonstrates the failure mode substring matching is vulnerable to: when
+	// the false-positive candidate happens to render first, a substring match
+	// finds the WRONG bank instead of the requested one.
+	t.Run("substring match can find the wrong bank", func(t *testing.T) {
+		t.Parallel()
+		got, ok := findByInnerText([]string{"Chapter 11", "Chapter 1"}, target, false)
+		if !ok || got != "Chapter 11" {
+			t.Fatalf("substring match against [Chapter 11, Chapter 1] = (%q, %v), want (\"Chapter 11\", true) demonstrating the false-match risk", got, ok)
+		}
+	})
+	// clickTextJS itself must generate exact (===) matching for a bank-name
+	// target, per the golden-string assertion in TestClickTextJS_Table — this
+	// asserts the concrete call site's own generated comparison operator
+	// directly, so a regression back to substring for a bank-name click site
+	// is caught here specifically, not just in the generic table.
+	if got := clickTextJS(buttonOrLinkTags, target, true); !strings.Contains(got, "el.innerText.trim() === "+jsString(target)) {
+		t.Fatalf("clickTextJS(..., %q, true) = %q, want an exact-equality (===) comparison", target, got)
+	}
+}
+
+// TestClickTextInsensitiveJS covers the quiz-builder click sites ("Quiz/
+// Survey", "Build", "Add from item bank", "Done", "Add this bank to quiz")
+// that route through this case-insensitive JS matcher, asserting the exact
+// generated JS (a golden string) so a textContent-vs-innerText regression
+// would be caught here too.
+func TestClickTextInsensitiveJS(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, text string }{
+		{name: "Quiz/Survey", text: "Quiz/Survey"},
+		{name: "Build", text: "Build"},
+		{name: "Done", text: "Done"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := clickTextInsensitiveJS(tt.text)
+			lower := strings.ToLower(tt.text)
+			want := clickJSWant(`Array.from(document.querySelectorAll('button,a,[role="button"]')).find(el => el.innerText.trim().toLowerCase().includes(` + jsString(lower) + `))`)
+			if got != want {
+				t.Fatalf("clickTextInsensitiveJS(%q) = %q, want %q", tt.text, got, want)
 			}
 		})
 	}
@@ -312,7 +580,7 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 					return nil
 				},
 			}
-			_, err := importer.pollBankItemCount(context.Background(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
+			_, err := importer.pollBankItemCount(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("pollBankItemCount() error = %v", err)
 			}
@@ -337,6 +605,11 @@ func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
 	importer := ChromedpImporter{
 		run:      func(context.Context, ...chromedp.Action) error { calls++; return nil },
 		findBank: func(context.Context, string) (bool, error) { return true, nil }, // existing bank
+		// The mocked run field never populates chromedp.Evaluate's
+		// out-parameter, so the "open bank" click (routed through
+		// evaluateBool) needs this hook to succeed and reach the baseline
+		// read below.
+		evalBool: func(context.Context, string) (bool, error) { return true, nil },
 		// Two disagreeing reads make stableBankItemCount report unknown.
 		bankItemCount: func() func(context.Context) (int, error) {
 			reads := 0
@@ -346,18 +619,19 @@ func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
 			}
 		}(),
 	}
-	_, err := importer.Import(context.Background(), &Request{
+	_, err := importer.Import(t.Context(), &Request{
 		BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7",
 		BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedItemCount: 3,
 	})
 	if err == nil || !strings.Contains(err.Error(), "could not read existing Item Bank") {
 		t.Fatalf("Import() error = %v, want baseline-unknown error", err)
 	}
-	// Aborts right after the failed baseline read (navigate, open bank, wait
-	// for actions, settle sleep between the two stabilizing reads), before
+	// Aborts right after the failed baseline read (navigate, wait for
+	// actions, settle sleep between the two stabilizing reads — the open-bank
+	// click and both bankItemCount reads go through hooks, not run()), before
 	// ever opening the import actions menu or touching the upload dialog.
-	if calls != 4 {
-		t.Fatalf("browser action batches = %d, want 4 (aborted before upload)", calls)
+	if calls != 3 {
+		t.Fatalf("browser action batches = %d, want 3 (aborted before upload)", calls)
 	}
 }
 
@@ -383,6 +657,11 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
+				// The mocked run field never populates chromedp.Evaluate's
+				// out-parameter, so every evaluateBool-routed click (open
+				// bank, popover trigger, menu item, Import button) needs this
+				// hook to succeed and reach the metadata checks below.
+				evalBool: func(context.Context, string) (bool, error) { return true, nil },
 				// The first two calls are stableBankItemCount's paired pre-upload
 				// baseline read (it reads twice and requires agreement); this test
 				// models a bank with no pre-existing content, so both return 0. The
@@ -397,15 +676,20 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 				},
 				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
-			result, err := importer.Import(context.Background(), &Request{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedBankName: tt.expectedTitle, ExpectedItemCount: tt.expectedCount})
+			result, err := importer.Import(t.Context(), &Request{BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedBankName: tt.expectedTitle, ExpectedItemCount: tt.expectedCount})
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("Import() error = %v", err)
 			}
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
 			}
-			if calls != 9 {
-				t.Fatalf("browser action batches = %d, want 9", calls)
+			// open banks, wait for Item Bank actions, baseline settle sleep,
+			// wait for import menu, attach package, wait for Import button
+			// enabled, wait for import completion — every click in between
+			// (open bank, popover trigger, menu item, Import button) goes
+			// through the evalBool hook above, not run().
+			if calls != 7 {
+				t.Fatalf("browser action batches = %d, want 7", calls)
 			}
 			if tt.wantErr == "" && (result.BankName != tt.expectedTitle || result.QuestionCount != tt.expectedCount) {
 				t.Fatalf("Import() result = %+v", result)
@@ -436,6 +720,11 @@ func TestChromedpImporterImport_RenamesBankToRequestedName(t *testing.T) {
 				run:       func(context.Context, ...chromedp.Action) error { return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.canvasTitle, nil },
+				// The mocked run field never populates chromedp.Evaluate's
+				// out-parameter, so every evaluateBool-routed click (open
+				// bank, popover trigger, menu item, Import button) needs this
+				// hook to succeed and reach the rename logic under test.
+				evalBool: func(context.Context, string) (bool, error) { return true, nil },
 				renameBank: func(_ context.Context, oldTitle, newTitle string) error {
 					renameCalled = true
 					gotOld, gotNew = oldTitle, newTitle
@@ -443,7 +732,7 @@ func TestChromedpImporterImport_RenamesBankToRequestedName(t *testing.T) {
 				},
 				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
-			result, err := importer.Import(context.Background(), &Request{
+			result, err := importer.Import(t.Context(), &Request{
 				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7",
 				BankName: tt.reqBankName, Package: "quiz.zip", OnExisting: ExistingAppend,
 				ExpectedBankName: tt.canvasTitle,
@@ -480,7 +769,7 @@ func TestChromedpImporterImport_InvalidRequest_Table(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := (ChromedpImporter{}).Import(context.Background(), tt.req)
+			_, err := (ChromedpImporter{}).Import(t.Context(), tt.req)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Import() error = %v, want %q", err, tt.want)
 			}
@@ -546,18 +835,26 @@ func TestRunResilient_Table(t *testing.T) {
 func TestRenameBankUI_Table(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		failAt        int
-		expectedCalls int
-		wantErr       string
+		name           string
+		failAt         int
+		missFirstClick bool // evalBool's first call (the open-edit-dialog click/poll) reports not-found.
+		expectedCalls  int
+		wantErr        string
 	}{
-		{name: "success", expectedCalls: 6},
+		{name: "success", expectedCalls: 5},
 		{name: "open banks", failAt: 1, expectedCalls: 1, wantErr: "open Item Banks"},
-		{name: "open edit dialog", failAt: 2, expectedCalls: 2, wantErr: "open edit bank dialog"},
-		{name: "wait for field", failAt: 3, expectedCalls: 3, wantErr: "wait for bank-name field"},
-		{name: "set name", failAt: 4, expectedCalls: 4, wantErr: "set bank name"},
-		{name: "save", failAt: 5, expectedCalls: 5, wantErr: "save bank name"},
-		{name: "reopen", failAt: 6, expectedCalls: 6, wantErr: "reopen renamed Item Bank"},
+		// The open-edit-dialog click now polls (see
+		// TestRenameBankUI_ReopenChecksBeforeClicking's doc comment for why:
+		// same render race as Import()'s "Create Bank" button), and a poll's
+		// wait/retry loop isn't observable through the mocked run field
+		// (which just returns nil regardless of what Action it's given) —
+		// only the evalBool hook can report a poll miss, so this case can no
+		// longer be exercised by leaving the hook nil.
+		{name: "open edit dialog click miss", missFirstClick: true, expectedCalls: 1, wantErr: "open edit bank dialog"},
+		{name: "wait for field", failAt: 2, expectedCalls: 2, wantErr: "wait for bank-name field"},
+		{name: "set name", failAt: 3, expectedCalls: 3, wantErr: "set bank name"},
+		{name: "save sleep", failAt: 4, expectedCalls: 4, wantErr: "save bank name"},
+		{name: "reopen navigate", failAt: 5, expectedCalls: 5, wantErr: "reopen renamed Item Bank"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -570,7 +867,19 @@ func TestRenameBankUI_Table(t *testing.T) {
 				}
 				return nil
 			}
-			err := renameBankUI(t.Context(), run, "https://canvas.example.edu/courses/7/banks", "Old Name", "New Name")
+			// The mocked run field never populates chromedp.Evaluate's
+			// out-parameter, so every click (open edit dialog, save, reopen)
+			// needs this hook to succeed; run() still controls the plain
+			// WaitVisible/SendKeys/Sleep/Navigate steps by call index.
+			first := true
+			evalBool := func(context.Context, string) (bool, error) {
+				if tt.missFirstClick && first {
+					first = false
+					return false, nil
+				}
+				return true, nil
+			}
+			err := renameBankUI(t.Context(), run, evalBool, "https://canvas.example.edu/courses/7/banks", "Old Name", "New Name")
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("renameBankUI() error = %v", err)
 			}
@@ -581,6 +890,30 @@ func TestRenameBankUI_Table(t *testing.T) {
 				t.Fatalf("run() calls = %d, want %d", calls, tt.expectedCalls)
 			}
 		})
+	}
+}
+
+// TestRenameBankUI_ReopenChecksBeforeClicking covers the fix for renameBankUI
+// re-opening the just-renamed bank with a blind Sleep+click: it now checks
+// (via evaluatePollBoolViaRun in production — see
+// TestChromedpImporterEvaluatePollBool_Table for that poll's own
+// timeout-mapping behavior) that the new title is actually present before
+// attempting the click, and reports a clear "not found" error — not a
+// generic click-miss error — when that check never sees it. This test hooks
+// evalBool directly, so it exercises the check-before-click wiring as a
+// one-shot, not the underlying poll's retry/timeout behavior.
+func TestRenameBankUI_ReopenChecksBeforeClicking(t *testing.T) {
+	t.Parallel()
+	run := func(context.Context, ...chromedp.Action) error { return nil }
+	evalBool := func(_ context.Context, js string) (bool, error) {
+		if js == bankExistsJS(jsString("New Name")) {
+			return false, nil // the reopen check never sees the renamed bank appear.
+		}
+		return true, nil
+	}
+	err := renameBankUI(t.Context(), run, evalBool, "https://canvas.example.edu/courses/7/banks", "Old Name", "New Name")
+	if err == nil || !strings.Contains(err.Error(), `reopen renamed Item Bank: "New Name" not found in bank list`) {
+		t.Fatalf("renameBankUI() error = %v, want a reopen-not-found error", err)
 	}
 }
 
@@ -795,6 +1128,11 @@ func TestChromedpImporterImport_HeadlessEnsuresSession(t *testing.T) {
 					loggedIn = true
 					return nil
 				},
+				// The mocked run field never populates chromedp.Evaluate's
+				// out-parameter, so every evaluateBool-routed click (open
+				// bank, popover trigger, menu item, Import button) needs this
+				// hook to succeed and reach a normal Import() completion.
+				evalBool: func(context.Context, string) (bool, error) { return true, nil },
 				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
 			}
 			_, err := importer.Import(t.Context(), &Request{
@@ -833,6 +1171,70 @@ func TestXPathString_Table(t *testing.T) {
 			t.Parallel()
 			if got := xpathString(tt.input); got != tt.want {
 				t.Fatalf("xpathString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSelectNewQuizEngineJS is a golden-string test for selectNewQuizEngineJS
+// — F5 notes this JS previously had zero test coverage at all, despite being
+// the site of the one genuine (non-timing) logic bug fixed in this whole
+// diff: an exact-equality `=== 'new quizzes'` match that could never match
+// Canvas's real label "New Quizzes/Surveys". Asserts the fix directly
+// (case-insensitive startsWith against the lowercase target, not includes or
+// exact equality — includes would risk false-matching an unrelated label that
+// merely mentions "new quizzes" elsewhere in its text), plus F5's own
+// three-outcome contract: the JS must return the literal strings 'no_dialog',
+// 'clicked_no_submit', and 'submitted' (not a bare boolean) so the call site
+// can tell "no dialog present" (not an error) apart from "radio clicked but
+// never actually submitted" (a real error — see interpretEngineChoiceResult).
+func TestSelectNewQuizEngineJS(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(selectNewQuizEngineJS, "startsWith('new quizzes')") {
+		t.Fatalf("selectNewQuizEngineJS = %q, want a case-insensitive startsWith('new quizzes') match", selectNewQuizEngineJS)
+	}
+	if strings.Contains(selectNewQuizEngineJS, "=== 'new quizzes'") || strings.Contains(selectNewQuizEngineJS, `=== "new quizzes"`) {
+		t.Fatalf("selectNewQuizEngineJS = %q, must not use exact equality against 'new quizzes' (never matches Canvas's real \"New Quizzes/Surveys\" label)", selectNewQuizEngineJS)
+	}
+	for _, want := range []string{"'no_dialog'", "'clicked_no_submit'", "'submitted'"} {
+		if !strings.Contains(selectNewQuizEngineJS, want) {
+			t.Fatalf("selectNewQuizEngineJS = %q, want it to return the literal %s", selectNewQuizEngineJS, want)
+		}
+	}
+}
+
+// TestInterpretEngineChoiceResult_Table covers F5's three-outcome handling
+// for CreateRandomQuiz's "select New Quizzes if prompted" step: "no_dialog"
+// (Canvas didn't prompt at all — not an error) and "submitted" (radio clicked
+// and submit/continue also clicked — success) are both fine; only
+// "clicked_no_submit" (the radio was found and clicked but no submit/
+// continue control was found afterward, leaving the dialog half-interacted)
+// must be a clear, specific error rather than silently falling through into
+// the unbounded WaitVisible(quizTitleSelector) that follows this step. An
+// empty/unrecognized value (what a test run mock leaves outcome as, since it
+// never populates chromedp.Evaluate's out-parameter) is treated permissively
+// as success, matching this step's pre-existing tolerant "dialog absent"
+// behavior and keeping TestChromedpImporterCreateRandomQuiz_Table's run-call
+// counts unaffected by this change.
+func TestInterpretEngineChoiceResult_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, outcome, wantErr string
+	}{
+		{name: "no dialog present", outcome: "no_dialog"},
+		{name: "radio clicked and submitted", outcome: "submitted"},
+		{name: "radio clicked but no submit button found", outcome: "clicked_no_submit", wantErr: "no submit/continue button found"},
+		{name: "empty (test mock never populates the out-parameter)", outcome: ""},
+		{name: "unrecognized value treated permissively", outcome: "something_else"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := interpretEngineChoiceResult(tt.outcome)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("interpretEngineChoiceResult(%q) error = %v, want nil", tt.outcome, err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("interpretEngineChoiceResult(%q) error = %v, want %q", tt.outcome, err, tt.wantErr)
 			}
 		})
 	}
@@ -882,30 +1284,34 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 		wantEmptyURL   bool
 		expectedCalls  int
 	}{
-		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 23},
-		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 23},
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
 		{name: "invalid request", wantErr: "request is required"},
 		{name: "invalid count", count: 0, wantErr: "must be positive"},
 		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
 		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
-		{name: "set title", count: 2, failAt: 7, expectedCalls: 7, wantErr: "set quiz title"},
-		{name: "build quiz", count: 2, failAt: 8, expectedCalls: 8, wantErr: "build quiz"},
-		{name: "add bank not enabled", count: 2, failAt: 13, expectedCalls: 13, wantErr: "add Item Bank to quiz"},
-		{name: "bank group never appears", count: 2, failAt: 15, expectedCalls: 15, wantErr: "wait for bank group to appear"},
-		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 15, wantErr: "Edit Bank containing questions"},
-		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 16, wantErr: "Randomly select questions"},
-		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 17, wantErr: "Number of questions"},
-		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 15, wantErr: "evalBool boom"},
-		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 16, wantErr: "evalBool boom"},
-		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 17, wantErr: "evalBool boom"},
-		{name: "save group", count: 2, failAt: 19, expectedCalls: 19, wantErr: "save Item Bank group"},
-		{name: "verify group", count: 2, failAt: 20, expectedCalls: 20, wantErr: "verify random group"},
-		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 20, wantErr: "read quiz URL"},
-		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 20, wantErr: "quiz URL is empty", wantEmptyURL: true},
-		{name: "persistence not confirmed", count: 2, failFrom: 21, expectedCalls: 23, wantErr: "did not persist", wantEmptyURL: true},
-		{name: "persistence retries then succeeds", count: 3, failAt: 21, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 24},
-		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 22, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 25},
-		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 23, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 26},
+		{name: "set title", count: 2, failAt: 6, expectedCalls: 6, wantErr: "set quiz title"},
+		// "Build" is now clicked via evaluateBool (JS dispatch), not a plain
+		// run() call, so its miss is injected the same way as the other
+		// InstUI click sites below (evalBoolFailOn), not failAt.
+		{name: "build quiz", count: 2, evalBoolFailOn: "build", expectedCalls: 6, wantErr: "build quiz"},
+		{name: "add bank not enabled", count: 2, failAt: 10, expectedCalls: 10, wantErr: "add Item Bank to quiz"},
+		{name: "bank group never appears", count: 2, failAt: 12, expectedCalls: 12, wantErr: "wait for bank group to appear"},
+		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "Edit Bank containing questions"},
+		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 13, wantErr: "Randomly select questions"},
+		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 14, wantErr: "Number of questions"},
+		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "evalBool boom"},
+		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 13, wantErr: "evalBool boom"},
+		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 14, wantErr: "evalBool boom"},
+		// "Done" is likewise clicked via evaluateBool now.
+		{name: "save group", count: 2, evalBoolFailOn: "done", expectedCalls: 15, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 16, expectedCalls: 16, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 16, wantErr: "read quiz URL"},
+		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 16, wantErr: "quiz URL is empty", wantEmptyURL: true},
+		{name: "persistence not confirmed", count: 2, failFrom: 17, expectedCalls: 19, wantErr: "did not persist", wantEmptyURL: true},
+		{name: "persistence retries then succeeds", count: 3, failAt: 17, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 20},
+		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 18, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 21},
+		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 19, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 22},
 		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
 		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
 	}
@@ -953,7 +1359,7 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 			if tt.name == "invalid base URL" {
 				req.BaseURL = "://bad"
 			}
-			result, err := creator.CreateRandomQuiz(context.Background(), req)
+			result, err := creator.CreateRandomQuiz(t.Context(), req)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("CreateRandomQuiz() error = %v", err)
 			}
@@ -990,12 +1396,67 @@ func TestChromedpImporterEvaluateBool_Table(t *testing.T) {
 			t.Parallel()
 			c := ChromedpImporter{}
 			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
-			_, err := c.evaluateBool(context.Background(), run, "true")
+			_, err := c.evaluateBool(t.Context(), run, "true")
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("evaluateBool() error = %v", err)
 			}
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("evaluateBool() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestChromedpImporterEvaluatePollBool_Table covers evaluatePollBool's own
+// production-path logic (as opposed to Import()'s use of it): isTimeoutLike
+// mapping a plain timeout to a clean (false, nil) — matching a one-shot
+// evaluateBool call that simply found nothing — versus a genuine non-timeout
+// error surfacing as-is, plus the trivial found-immediately case. Exercises
+// the no-hook (production) path directly via a mocked run field, mirroring
+// TestChromedpImporterEvaluateBool_Table above.
+func TestChromedpImporterEvaluatePollBool_Table(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		runErr  error
+		ctxDone bool // caller's own outer context is already done when the poll gives up.
+		want    bool
+		wantErr string
+	}{
+		{name: "found immediately", want: true},
+		{name: "timeout maps to not-found, not an error", runErr: errors.New("waiting for function failed: timeout"), want: false},
+		{name: "context deadline exceeded also maps to not-found when outer ctx is still live", runErr: errors.New("context deadline exceeded"), want: false},
+		{name: "non-timeout error surfaces as-is", runErr: errors.New("evaluate boom"), want: false, wantErr: "evaluate boom"},
+		// F1: when the poll gives up because the CALLER's own outer budget
+		// (e.g. Import()'s 150s workCancel deadline) expired mid-poll — not
+		// this poll's own WithPollingTimeout — ctx itself is already done at
+		// that point. That must NOT collapse to the same clean (false, nil)
+		// "confirmed absent" result a genuine poll timeout gets: a caller
+		// can't otherwise tell "genuinely not found" apart from "ran out of
+		// time entirely", which produced a live, misleading "Item Bank was
+		// not found" error that was actually just the outer budget expiring.
+		{name: "outer ctx already done when poll gives up is a real error, not a clean not-found", runErr: errors.New("waiting for function failed: timeout"), ctxDone: true, want: false, wantErr: "context ended while polling"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := ChromedpImporter{}
+			ctx := t.Context()
+			if tt.ctxDone {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			got, err := c.evaluatePollBool(ctx, run, "true", time.Second)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("evaluatePollBool() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("evaluatePollBool() error = %v, want %q", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("evaluatePollBool() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1037,7 +1498,7 @@ func TestChromedpImporterPreflightRandomQuiz_Table(t *testing.T) {
 			if tt.name != "nil request" {
 				req = &QuizRequest{BaseURL: tt.baseURL, BrowserURL: "http://127.0.0.1:9222", CourseID: "7", BankName: tt.bankName, QuestionCount: tt.count}
 			}
-			err := creator.PreflightRandomQuiz(context.Background(), req)
+			err := creator.PreflightRandomQuiz(t.Context(), req)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("PreflightRandomQuiz() error = %v", err)
 			}

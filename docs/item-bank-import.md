@@ -118,11 +118,19 @@ the quiz or overwrites an existing quiz. The profile directory persists a
 live Canvas session and is created with `0700` permissions; treat it with the
 same care as a bearer token.
 
+See docs/item-bank-import-flake.md for the click-dispatch root cause (a
+hit-test click silently missing InstUI's checkbox/button facade elements)
+confirmed live against the create-bank dialog's "Share with course"
+checkbox, and the JS-`.click()`-dispatch fix now used for every InstUI
+button/checkbox click in this flow.
+
 Recorded UNT UI flow (Aug 18 2026, updated Aug 21 2026 against live headless
 runs):
 
 1. `/courses/{course}/banks` → `Create Bank` → `Item Bank` dialog →
-   `Bank Name` → `Create Bank`.
+   `Bank Name` → `Create Bank`. Right after submitting, the flow re-checks
+   the course's bank list for the new bank by name before proceeding — see
+   docs/item-bank-import-flake.md.
 2. Open bank → `More Item Banking Actions` → `Import Content`.
 3. Attach ZIP, submit `Import`, wait for visible completion.
 4. Quiz builder (button text is `Quiz/Survey`, not `+ Quiz`) → `Add from item
