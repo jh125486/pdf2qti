@@ -299,6 +299,8 @@ Minimal example:
 - Addition is componentwise: \(\mathbf{u} + \mathbf{v}\)
   - Example: \((1,2) + (3,4) = (4,6)\)
 - **Scalar multiplication** scales every component
+- The dot product combines corresponding components
+- Vector length measures magnitude
 
 ---
 
