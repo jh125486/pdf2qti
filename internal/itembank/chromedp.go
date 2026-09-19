@@ -73,13 +73,27 @@ func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action) 
 		if lastErr == nil {
 			return nil
 		}
-		msg := lastErr.Error()
-		if !strings.Contains(msg, "context with specified id") && !strings.Contains(msg, "navigated or closed") {
+		if !isNavigationTeardown(lastErr) {
 			return lastErr
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return lastErr
+}
+
+// isNavigationTeardown reports whether err is the CDP "the execution context
+// this action was running in got torn down by a navigation mid-flight" error
+// — runResilient's one specific retry target. Factored out so a call site
+// that itself CAUSES a navigation (see its use in the "open quiz creator"
+// step) can recognize this same error shape after runResilient's retries are
+// exhausted and treat it as likely evidence the triggering action already
+// succeeded, rather than a genuine failure.
+func isNavigationTeardown(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context with specified id") || strings.Contains(msg, "navigated or closed")
 }
 
 // isTimeoutLike reports whether err is a plain timeout — chromedp's "context
