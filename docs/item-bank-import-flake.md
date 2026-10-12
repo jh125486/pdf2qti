@@ -215,6 +215,43 @@ the pre-existing "Audit Probe Bank X1" artifact noted in an earlier session's
 notes. Harmless (private test course), but worth a manual sweep before the
 course is used for anything else.
 
+## Symptom 4: detail page paginates at 50 questions
+
+(Numbered 4 because "Symptom 3" above is already the click-before-render
+race.) `import-bank` failed with `read imported Item Bank question count:
+context deadline exceeded` AFTER the bank had been fully created and
+populated, but only for banks with more than 50 questions.
+
+Root cause, live-confirmed: Canvas New Quizzes now paginates the Item Bank
+detail page at 50 questions per page. On a 76-question bank the page rendered
+50 question cards (numbered 27 through 76), with page controls "1" and "2"
+shown; the old count expression
+`(document.body.innerText.match(/Question Question \d+/g) || []).length`
+returned 50. The expected total (76) could therefore never match, so
+`pollBankItemCount` always ran out its retries.
+
+The Item Banks list page (`/courses/<id>/banks`) is not paginated this way:
+each bank is a `<tr>` whose first cell holds a `<button>` with the bank name
+and whose "Questions" column (third cell: Name, Updated, Questions, Last Used,
+Created, actions) shows the true total as plain text, e.g. `76`.
+
+Fix: every total is now read from the bank's list row via
+`bankListQuestionCountJS` (exact bank-name match, never substring), not from
+the detail page's rendered cards: the ExistingAppend baseline (read before the
+bank is opened), `stableBankItemCount`, `recoverStuckImport`'s growth check,
+and `pollBankItemCount` (which re-navigates fresh to the list on each attempt
+and, once the count matches, opens the bank so the rest of `Import()` still
+reads the detail page's URL). The detail-page card count (`bankItemCountJS`)
+was removed.
+
+Every bank-row finder (`bankListQuestionCountJS`, `clickBankRowJS`, `bankExistsJS`, and the open and
+reopen clicks, which use `clickBankRowJS`) shares one `bankRowButtonFinderJS` definition scoped to
+body-row name buttons, so a bank named "Questions" never matches the sortable header button and
+count and open always resolve the same element. Matches are also restricted to the row's name
+control (the first button in the row), so row action buttons such as "Edit bank <title>" can never
+be mistaken for a bank-name button. The rename path's "Edit bank <title>" lookup (`editBankActionJS`)
+does the inverse and skips each row's name button.
+
 ## Prior "suggested fix direction" (historical, superseded)
 
 Earlier revisions of this doc (before the root cause above was known)

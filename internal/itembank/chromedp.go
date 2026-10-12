@@ -2,6 +2,7 @@ package itembank
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -410,39 +411,37 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			return Result{}, fmt.Errorf("created Item Bank %q was not found in the course bank list afterward (the bank may not have been created, or a click earlier in the create-bank sequence may have silently missed; a stray, unshared Item Bank may now exist in Canvas and need manual cleanup)", req.BankName)
 		}
 	}
-	// Exact match, not substring: bankExistsJS (the existence check and
-	// post-create verify just above) already matches req.BankName exactly, so
-	// this open-bank click must too. A substring match here previously let a
-	// course containing both "Chapter 1" and "Chapter 11" silently open
-	// whichever one happened to render first in the DOM when targeting
-	// "Chapter 1" — the exact checks above correctly confirm "Chapter 1"
-	// exists, but a substring click could then import into "Chapter 11"
-	// instead, reporting success while silently writing to the wrong bank.
-	opened, err := c.evaluateBool(browser, run, clickTextJS(buttonOrLinkTags, req.BankName, true))
-	if err != nil {
-		return Result{}, fmt.Errorf("open Item Bank %q: %w", req.BankName, err)
-	}
-	if !opened {
-		return Result{}, fmt.Errorf("open Item Bank %q: bank not found in list", req.BankName)
-	}
-	if err := run(browser, chromedp.WaitVisible(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
-		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
-	}
 	// Recorded before the import dialog opens so a later timeout-recovery
 	// check (recoverStuckImport) can require the bank's item count to have
-	// actually grown, not just be non-zero — an ExistingAppend import onto a
+	// actually grown, not just be non-zero - an ExistingAppend import onto a
 	// bank that already had content would otherwise satisfy a bare "count >
 	// 0" check even when this run's own upload never completed. A bank this
 	// call just created (found == false) is definitionally empty, no read
 	// needed. For an existing bank the read is best-effort: -1 means unknown,
 	// and callers below must treat that as "can't confirm", not silently
-	// fall back to 0 — a false 0 baseline reintroduces exactly the bug this
+	// fall back to 0 - a false 0 baseline reintroduces exactly the bug this
 	// baseline exists to prevent.
+	//
+	// Read from the Item Banks LIST row, before opening the bank: the bank
+	// detail page paginates its question cards at 50 per page, so counting
+	// rendered cards there undercounts any bank with more than 50 questions
+	// (see bankListQuestionCountJS). The list page is still the loaded
+	// document at this point.
 	baselineItemCount := 0
 	if found {
 		baselineItemCount = -1
-		if n, ok := c.stableBankItemCount(browser, run); ok {
-			baselineItemCount = n
+		// A few bounded attempts: the count cell can still be hydrating on
+		// the first read, and a false "unknown" aborts the whole import below.
+		for attempt := range 3 {
+			if attempt > 0 {
+				if err := run(browser, chromedp.Sleep(time.Second)); err != nil {
+					break
+				}
+			}
+			if n, ok := c.stableBankItemCount(browser, run, req.BankName, ""); ok {
+				baselineItemCount = n
+				break
+			}
 		}
 	}
 	// An unknown baseline on an existing bank can't be told apart from 0
@@ -453,7 +452,24 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if found && baselineItemCount < 0 && req.ExpectedItemCount > 0 {
 		return Result{}, fmt.Errorf("could not read existing Item Bank %q's baseline question count; refusing to import without a way to verify the result", req.BankName)
 	}
-
+	// Exact match, not substring: bankExistsJS (the existence check and
+	// post-create verify just above) already matches req.BankName exactly, so
+	// this open-bank click must too. A substring match here previously let a
+	// course containing both "Chapter 1" and "Chapter 11" silently open
+	// whichever one happened to render first in the DOM when targeting
+	// "Chapter 1" - the exact checks above correctly confirm "Chapter 1"
+	// exists, but a substring click could then import into "Chapter 11"
+	// instead, reporting success while silently writing to the wrong bank.
+	opened, err := c.evaluateBool(browser, run, clickBankRowJS(req.BankName, ""))
+	if err != nil {
+		return Result{}, fmt.Errorf("open Item Bank %q: %w", req.BankName, err)
+	}
+	if !opened {
+		return Result{}, fmt.Errorf("open Item Bank %q: bank not found in list", req.BankName)
+	}
+	if err := run(browser, chromedp.WaitVisible(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
+		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
+	}
 	triggerClicked, err := c.evaluateBool(browser, run, clickSelectorJS(`button[data-popover-trigger="true"]`))
 	if err != nil {
 		return Result{}, fmt.Errorf("open import actions: %w", err)
@@ -975,135 +991,232 @@ func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedp
 // Item Bank after the QTI package's own assessment title until the caller's
 // rename-back step (later in Import()) runs, so a fresh re-navigate during
 // that window can find the bank listed under that title instead of
-// req.BankName. Uses a direct JS .click() (like clickEditBankGroupJS above)
+// req.BankName. Only body-row name buttons match (see bankRowButtonFinderJS),
+// so a bank named "Questions" never clicks the table's header button. Uses a direct JS .click() (like clickEditBankGroupJS above)
 // rather than chromedp.Click's real mouse-event dispatch, so a miss on both
 // names returns false immediately instead of blocking on a selector that
 // will never appear.
 func clickBankRowJS(primary, fallback string) string {
-	find := func(name string) string {
-		return `Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === ` + jsString(name) + `)`
-	}
 	return `(() => {
-		let target = ` + find(primary) + `;
-		if (!target && ` + jsString(fallback) + `) { target = ` + find(fallback) + `; }
+		let target = ` + bankRowButtonFinderJS(jsString(primary)) + `;
+		if (!target && ` + jsString(fallback) + `) { target = ` + bankRowButtonFinderJS(jsString(fallback)) + `; }
 		if (target) { target.click(); return true; }
 		return false;
 	})()`
 }
 
-// reopenBankTasks re-navigates fresh (not Reload — a reload can be served
-// from bfcache/client-side router state and so wouldn't disprove the
-// optimistic-UI theory) to banksURL and opens the bank listed as either
-// bankName or expectedBankName, waiting for its actions button to confirm
-// the detail page — not just the list page — actually finished rendering
-// before a caller polls anything on it.
-func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks {
+// bankHeaderRowFnJS is the JS arrow function that returns a table's header
+// row: its first thead row, or its first row when there is no thead.
+const bankHeaderRowFnJS = `t => t && (t.querySelector('thead tr') || t.querySelector('tr'))`
+
+// bankRowButtonFinderJS returns a JS expression that evaluates to the name
+// <button> of the Item Banks list body row whose innerText.trim() equals the
+// name, or undefined when there is none. nameLiteral must already be a
+// quoted JS string literal (jsString output). It is the single definition of
+// "body-row name button" shared by every bank-row lookup (bankListQuestionCountJS,
+// clickBankRowJS, bankExistsJS), so counting a bank and opening it can never
+// resolve different elements: the button must sit in a <tr>, outside <thead>,
+// and in a row that is not the table's header row. Without that scoping a
+// bank literally named "Questions" would match the sortable "Questions"
+// header button. The button must also be the row's first button (its name
+// control, which may follow a selection checkbox cell): later action buttons
+// such as "Edit bank {title}" are never name buttons, so a bank literally
+// named "Edit bank Other" can't resolve to bank "Other"'s edit action.
+// Matching is exact, never substring.
+func bankRowButtonFinderJS(nameLiteral string) string {
+	return `(() => {
+		const headerOf = ` + bankHeaderRowFnJS + `;
+		return Array.from(document.querySelectorAll('button')).find(b => {
+			const tr = b.closest('tr');
+			return tr && b.innerText.trim() === ` + nameLiteral + ` && !b.closest('thead') && tr !== headerOf(tr.closest('table')) && b === tr.querySelector('button');
+		});
+	})()`
+}
+
+// navigateBanksListTasks re-navigates fresh (not Reload - a reload can be
+// served from bfcache/client-side router state and so wouldn't disprove the
+// optimistic-UI theory) to the Item Banks list at banksURL and settles, so a
+// caller can read the list's rows from a freshly loaded document.
+func navigateBanksListTasks(banksURL string) chromedp.Tasks {
 	return chromedp.Tasks{
 		chromedp.Sleep(2 * time.Second),
 		chromedp.Navigate(banksURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(time.Second),
-		chromedp.Evaluate(clickBankRowJS(bankName, expectedBankName), nil),
+	}
+}
+
+// errBankRowNotFound reports that the bank's row was absent from the list when
+// it was clicked, typically a transient re-render; callers may retry.
+var errBankRowNotFound = errors.New("item bank row not found in list")
+
+// openBankFromListTasks opens, from the Item Banks list page, the bank listed
+// as either bankName or expectedBankName, waiting for its actions button to
+// confirm the detail page - not just the list page - actually finished
+// rendering before a caller reads anything on it.
+func openBankFromListTasks(bankName, expectedBankName string) chromedp.Tasks {
+	return chromedp.Tasks{
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var clicked bool
+			if err := chromedp.Evaluate(clickBankRowJS(bankName, expectedBankName), &clicked).Do(ctx); err != nil {
+				return err
+			}
+			if !clicked {
+				return fmt.Errorf("%w: %q", errBankRowNotFound, bankName)
+			}
+			return nil
+		}),
 		chromedp.Sleep(2 * time.Second),
 		chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery),
 	}
 }
 
-// recoverStuckImport re-navigates fresh to the Item Banks list and reopens
-// the bank, then checks whether its item count actually grew past
-// baselineItemCount (the count read just before the import dialog was
-// opened) — used after a timeout on the attach/submit/wait-completion
-// sequence above to tell "Canvas actually finished the import, the UI/CDP
-// hiccup was spurious" apart from "the import genuinely didn't happen".
+// recoverStuckImport re-navigates fresh to the Item Banks list and checks
+// whether the bank's question count actually grew past baselineItemCount
+// (the count read just before the import dialog was opened) - used after a
+// timeout on the attach/submit/wait-completion sequence above to tell
+// "Canvas actually finished the import, the UI/CDP hiccup was spurious"
+// apart from "the import genuinely didn't happen". The count is read from the
+// bank's row in the list, not from the detail page's rendered cards, because
+// the detail page paginates at 50 questions (see bankListQuestionCountJS).
 // Requiring growth past the baseline (not just count > 0) matters for
 // ExistingAppend: a bank that already had content before this run's own
 // upload would otherwise satisfy a bare non-zero check even when the
 // upload never completed. baselineItemCount == -1 means the pre-upload read
-// failed — treated as non-recoverable rather than falling back to 0, since
+// failed - treated as non-recoverable rather than falling back to 0, since
 // a false 0 baseline reintroduces exactly the false-positive this baseline
-// exists to prevent. A positive result leaves the browser positioned on the
-// bank's page, exactly where the rest of Import() expects to be after a
-// normal completion.
+// exists to prevent. A positive result reopens the bank, leaving the browser
+// positioned on the bank's page, exactly where the rest of Import() expects
+// to be after a normal completion.
 func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	if baselineItemCount < 0 {
 		return false
 	}
 	// sessionCtx is the browser tab's own context, not the deadline-bounded
-	// one the failed step above used — that deadline expiring is exactly one
+	// one the failed step above used - that deadline expiring is exactly one
 	// of the timeout-shaped errors this recovery runs for, so reusing it
 	// would try to navigate/evaluate on an already-dead context.
 	ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
 	defer cancel()
-	if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
+	if err := runResilient(ctx, run, navigateBanksListTasks(banksURL)); err != nil {
 		return false
 	}
-	count, ok := c.stableBankItemCount(ctx, run)
-	return ok && count > baselineItemCount
+	// The list can take a while to hydrate after navigation (see
+	// docs/item-bank-import-flake.md), so a missing row or unstable pair of
+	// reads is retried within the recovery deadline. A stable count at or
+	// below baseline is retried too, since the list may lag a finished import;
+	// only growth past baseline (or running out of attempts) ends the loop.
+	backToList := false
+	for attempt := 0; attempt < recoverReadAttempts; attempt++ {
+		if attempt > 0 {
+			// A failed open can leave the browser on the detail page (the
+			// click navigated, then the task was retried there), so return
+			// to the list before reading again.
+			tasks := chromedp.Tasks{chromedp.Sleep(recoverReadInterval)}
+			if backToList {
+				tasks = navigateBanksListTasks(banksURL)
+				backToList = false
+			}
+			if err := runResilient(ctx, run, tasks); err != nil {
+				return false
+			}
+		}
+		count, ok := c.stableBankItemCount(ctx, run, bankName, expectedBankName)
+		if !ok {
+			continue
+		}
+		if count <= baselineItemCount {
+			// A stable pre-import total can be the list lagging a backend
+			// import that already finished, so keep polling for growth.
+			continue
+		}
+		// Growth is confirmed; a row that vanished again is a transient
+		// re-render, so retry the read-and-open rather than give up.
+		err := runResilient(ctx, run, openBankFromListTasks(bankName, expectedBankName))
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, errBankRowNotFound) {
+			backToList = true
+			continue
+		}
+		return false
+	}
+	return false
 }
 
-// stableBankItemCount reads the bank's rendered item count twice, a short
-// settle apart, and only reports it when both reads agree. The count comes
-// from document.body.innerText over a virtualized card list that can still
-// be mid-render right after a page load — a single transient read (0, or
-// partial) would otherwise corrupt a baseline used to compute an
-// ExistingAppend import's expected final total, or let recoverStuckImport
-// compare against a stale pre-render snapshot.
-func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpRun) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
-	read := func() (int, bool) {
-		if c.bankItemCount != nil {
-			n, err := c.bankItemCount(ctx)
-			return n, err == nil
-		}
-		var n int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &n))
-		return n, err == nil
+const (
+	// recoverReadAttempts is sized to fit recoverStuckImport's 60-second
+	// context: each attempt costs up to recoverReadInterval plus the one-second
+	// settle inside stableBankItemCount, and the initial list navigation takes
+	// about three seconds, so 10 attempts use roughly 43 seconds and leave room
+	// for the final reopen.
+	recoverReadAttempts = 10
+	recoverReadInterval = 3 * time.Second
+)
+
+// bankListItemCount reads the bank's total question count once, from its row
+// in the Item Banks list currently loaded in the browser. ok is false when
+// no row matches (not rendered yet, or not listed under either name) or the
+// read itself failed. Tests substitute bankItemCount for the same reason
+// they substitute evalBool: the mocked run field never populates
+// chromedp.Evaluate's out-parameter.
+func (c ChromedpImporter) bankListItemCount(ctx context.Context, run chromedpRun, bankName, expectedBankName string) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if c.bankItemCount != nil {
+		n, err := c.bankItemCount(ctx)
+		return n, err == nil && n >= 0
 	}
-	first, ok := read()
+	var n int
+	err := run(ctx, chromedp.Evaluate(bankListQuestionCountJS(bankName, expectedBankName), &n))
+	return n, err == nil && n >= 0
+}
+
+// stableBankItemCount reads the bank's list-row question count twice, a
+// short settle apart, and only reports it when both reads agree. The list
+// can still be mid-render right after a page load - a single transient read
+// (a missing row, or a partial count) would otherwise corrupt a baseline
+// used to compute an ExistingAppend import's expected final total, or let
+// recoverStuckImport compare against a stale pre-render snapshot.
+func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpRun, bankName, expectedBankName string) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	first, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
 	if !ok {
 		return 0, false
 	}
 	if err := run(ctx, chromedp.Sleep(time.Second)); err != nil {
 		return 0, false
 	}
-	second, ok := read()
+	second, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
 	if !ok || second != first {
 		return 0, false
 	}
 	return first, true
 }
 
-// pollBankItemCount waits for the imported bank's rendered question count to
-// match expected, retrying by re-navigating fresh to the bank's own page
-// when the in-page poll times out. bankItemCountMatchesJS's 30s window
-// observed too tight for larger banks (60+ questions); this mirrors
+// pollBankItemCount waits for the imported bank's total question count to
+// match expected, then leaves the browser on the bank's detail page. The
+// count is read from the bank's row in the Item Banks list, never from the
+// detail page's rendered cards: Canvas paginates the detail page at 50
+// questions, so a card count can never reach the total for a larger bank
+// (see bankListQuestionCountJS). Every attempt navigates fresh to banksURL
+// (not Reload), polls the list row until the count matches, and on a match
+// opens the bank (the rest of Import() reads the detail page's URL). A
+// timeout on an attempt retries from a fresh document, mirroring
 // confirmQuizPersisted's re-navigate-and-recheck pattern for the same class
-// of "backend already succeeded, UI/count hasn't caught up yet" race, just
-// further upstream on the plain bank-import path (no --create-random-quiz).
-// It only confirms the count matches — callers still read the actual value
-// via bankItemCountJS afterward. Only a timeout-shaped error triggers a
-// retry; a selector/logic error, closed-target error, or cancellation
-// returns immediately instead of burning the retry budget on an error a
-// re-navigate can't fix.
-// pollBankItemCount takes sessionCtx — the browser tab's own context, not the
-// deadline-bounded one Import()'s other steps use — because a timeout-shaped
+// of "backend already succeeded, UI/count hasn't caught up yet" race. Only a
+// timeout-shaped error triggers a retry; a selector/logic error,
+// closed-target error, or cancellation returns immediately instead of
+// burning the retry budget on an error a re-navigate can't fix.
+//
+// pollBankItemCount takes sessionCtx - the browser tab's own context, not the
+// deadline-bounded one Import()'s other steps use - because a timeout-shaped
 // error triggering a retry here can be that outer deadline itself expiring,
 // in which case reusing it would try to navigate/evaluate on an already-dead
 // context. Each attempt gets its own fresh bounded child instead.
 func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, expected int) (int, error) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
-	for attempt := range 3 {
+	for range 3 {
 		ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
-		if attempt > 0 {
-			if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
-				cancel()
-				if !isTimeoutLike(err) {
-					return 0, err
-				}
-				lastErr = err
-				continue
-			}
-		}
-		if err := runResilient(ctx, run, chromedp.Poll(bankItemCountMatchesJS(expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+		if err := runResilient(ctx, run, navigateBanksListTasks(banksURL)); err != nil {
 			cancel()
 			if !isTimeoutLike(err) {
 				return 0, err
@@ -1111,11 +1224,28 @@ func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chro
 			lastErr = err
 			continue
 		}
-		var itemCount int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &itemCount))
+		if err := runResilient(ctx, run, chromedp.Poll(bankListCountMatchesJS(bankName, expectedBankName, expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+			cancel()
+			if !isTimeoutLike(err) {
+				return 0, err
+			}
+			lastErr = err
+			continue
+		}
+		itemCount, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
+		if !ok {
+			cancel()
+			lastErr = fmt.Errorf("read Item Bank %q question count from list: row not found", bankName)
+			continue
+		}
+		err := runResilient(ctx, run, openBankFromListTasks(bankName, expectedBankName))
 		cancel()
 		if err != nil {
-			return 0, err
+			if !isTimeoutLike(err) && !errors.Is(err, errBankRowNotFound) {
+				return 0, err
+			}
+			lastErr = err
+			continue
 		}
 		return itemCount, nil
 	}
@@ -1173,7 +1303,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 	// Chapter 11" controls silently click the wrong one when renaming
 	// "Chapter 1" — the same bank-name mismatch bug fixed at Import()'s
 	// open-bank click site (see its doc comment).
-	opened, err := pollCheck(ctx, clickTextJS(buttonOrLinkTags, "Edit bank "+oldTitle, true), 15*time.Second)
+	opened, err := pollCheck(ctx, editBankActionJS(oldTitle), 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("open edit bank dialog: %w", err)
 	}
@@ -1231,7 +1361,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 	// Import()'s post-create-bank check reads, and a course accumulating
 	// many banks over repeated runs may render that list more slowly).
 	// Bumped to 30s to match this file's other bank-list-reading polls
-	// (addFromBankReadyJS, bankItemCountMatchesJS) that already use that
+	// (addFromBankReadyJS, bankListCountMatchesJS) that already use that
 	// budget for the same kind of Canvas-side latency.
 	visible, err := pollCheck(ctx, bankExistsJS(jsString(newTitle)), 30*time.Second)
 	if err != nil {
@@ -1243,7 +1373,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 	// Exact match, not substring — same bank-name mismatch bug fixed at
 	// Import()'s open-bank click site: a substring match could reopen a
 	// different bank whose name merely contains newTitle as a prefix.
-	reopened, err := clickCheck(ctx, clickTextJS(buttonOrLinkTags, newTitle, true))
+	reopened, err := clickCheck(ctx, clickBankRowJS(newTitle, ""))
 	if err != nil {
 		return fmt.Errorf("reopen renamed Item Bank: %w", err)
 	}
@@ -1421,13 +1551,6 @@ func markQuestionCountInputJS() string {
 const (
 	quizTitleSelector = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
 	bankTitleJS       = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
-	// Each question card's type label reads e.g. "Multiple Choice | Question
-	// Question 18" (recorded live on the bank detail page; Canvas has no
-	// data-testid or stable class on these cards). Counting matches of that
-	// repeated "Question Question N" fragment in the page's rendered text is
-	// more reliable than any single selector, since the question list is
-	// virtualized and not every card selector matches every render.
-	bankItemCountJS = `(document.body.innerText.match(/Question Question \d+/g) || []).length`
 	// Live-confirmed: the engine-choice dialog's radio label reads "New
 	// Quizzes/Surveys", not a bare "New Quizzes" — the exact-equality match
 	// this used to use never matched it, so the radio was never selected,
@@ -1508,8 +1631,52 @@ func bankTitleMatchesJS(title string) string {
 	return `(() => { const h = document.querySelector('h1'); return Boolean(h && h.innerText.trim() === ` + jsString(title) + `); })()`
 }
 
-func bankItemCountMatchesJS(count int) string {
-	return fmt.Sprintf("(%s) === %d", bankItemCountJS, count)
+// bankListQuestionCountJS builds a JS expression for the total question
+// count of the bank listed as primary - or, if not found, as fallback (same
+// fallback semantics as clickBankRowJS) - read from the Item Banks list page.
+// It evaluates to the integer count, or -1 when no row matches or the count
+// cell isn't a number yet.
+//
+// The count comes from the list, not the bank detail page, because Canvas New
+// Quizzes paginates the detail page at 50 questions per page (live check on
+// a 76-question bank: 50 cards rendered, numbered 27..76, with page controls
+// "1" and "2"), so counting rendered cards there can never reach a larger
+// bank's true total. Each list row is a <tr> whose first cell holds a
+// <button> with the bank name; the total sits in the column whose header
+// text starts with "Questions", case-insensitively, so trailing screen-reader
+// text like a sort label is tolerated (index 2 when the header can't be
+// found). Row lookup uses the shared bankRowButtonFinderJS (body rows only), so a
+// bank literally named "Questions" can't match the header button, and the cell must be digits and commas only
+// (never a prefix parse). Matching is exact (innerText.trim() ===), never
+// substring, like clickBankRowJS and bankExistsJS: "Chapter 1" must not match
+// "Chapter 11".
+func bankListQuestionCountJS(primary, fallback string) string {
+	return `(() => {
+		const headerOf = ` + bankHeaderRowFnJS + `;
+		let btn = ` + bankRowButtonFinderJS(jsString(primary)) + `;
+		if (!btn && ` + jsString(fallback) + `) { btn = ` + bankRowButtonFinderJS(jsString(fallback)) + `; }
+		if (!btn) { return -1; }
+		const row = btn.closest('tr');
+		let col = 2;
+		const headRow = headerOf(row.closest('table'));
+		if (headRow) {
+			const idx = Array.from(headRow.children).findIndex(h => h.innerText.trim().toLowerCase().startsWith('questions'));
+			if (idx >= 0) { col = idx; }
+		}
+		const cell = row.children[col];
+		if (!cell) { return -1; }
+		const text = cell.innerText.trim();
+		if (!/^[\d,]+$/.test(text)) { return -1; }
+		const n = parseInt(text.replace(/,/g, ''), 10);
+		return Number.isNaN(n) ? -1 : n;
+	})()`
+}
+
+// bankListCountMatchesJS builds the in-page poll predicate for
+// pollBankItemCount: true once the bank's list-row question count equals
+// count (see bankListQuestionCountJS).
+func bankListCountMatchesJS(primary, fallback string, count int) string {
+	return fmt.Sprintf("(%s) === %d", bankListQuestionCountJS(primary, fallback), count)
 }
 
 // textXPathInsensitive builds the case-insensitive text-match XPath
@@ -1598,6 +1765,17 @@ func clickTextJS(tags []string, text string, exact bool) string {
 	return clickJS(`Array.from(document.querySelectorAll(` + jsString(selector) + `)).find(el => ` + cmp + `)`)
 }
 
+// editBankActionJS clicks the Banks list row's "Edit bank {title}" action.
+// It skips a row's first button (the bank-name control, see
+// bankRowButtonFinderJS), so renaming "X" can't click the name button of a
+// bank literally titled "Edit bank X".
+func editBankActionJS(title string) string {
+	return clickJS(`Array.from(document.querySelectorAll(` + jsString(strings.Join(buttonOrLinkTags, ",")) + `)).find(el => {
+			const tr = el.closest('tr');
+			return el.innerText.trim() === ` + jsString("Edit bank "+title) + ` && !(tr && el === tr.querySelector('button'));
+		})`)
+}
+
 // clickTextInsensitiveJS is clickTextJS's case-insensitive-substring
 // counterpart, matching among button/a/[role="button"] elements — the same
 // element set textXPathInsensitive's XPath matched, kept for the InstUI
@@ -1677,8 +1855,12 @@ const createBankSubmitSelector = `[data-automation="sdk-create-bank-button"]`
 // unambiguously targets it.
 const shareWithCourseCheckboxSelector = `[role=dialog] input[type=checkbox]`
 
+// bankExistsJS builds a JS boolean expression: true when a body row of the
+// Item Banks list has a name button equal to name (an already-quoted JS
+// string literal). Uses bankRowButtonFinderJS, so a header button with the
+// same text never counts.
 func bankExistsJS(name string) string {
-	return `Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim() === ` + name + `)`
+	return `Boolean(` + bankRowButtonFinderJS(name) + `)`
 }
 
 func jsString(s string) string { return fmt.Sprintf("%q", s) }
