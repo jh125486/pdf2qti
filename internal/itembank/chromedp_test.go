@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 	wantCreateDialogJS := clickTextJS(buttonOrLinkTags, "Create Bank", false)
 	wantCheckboxJS := checkCheckboxJS(shareWithCourseCheckboxSelector)
 	wantSubmitCreateJS := clickSelectorJS(createBankSubmitSelector)
-	wantOpenBankJS := clickTextJS(buttonOrLinkTags, "Bank", true)
+	wantOpenBankJS := clickBankRowJS("Bank", "")
 	wantPopoverTriggerJS := clickSelectorJS(`button[data-popover-trigger="true"]`)
 	wantMenuItemJS := clickSelectorJS(`[role="menuitem"]`)
 	wantImportClickJS := clickXPathJS(importButtonXPath)
@@ -69,8 +70,8 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 		{name: "return to banks", failAt: 7, onExisting: ExistingAppend, expectedCalls: 7, wantErr: "return to Item Banks"},
 		{name: "created bank not visible", onExisting: ExistingAppend, visibilityNotFound: true, expectedCalls: 7, wantErr: "was not found in the course bank list"},
 		{name: "created bank visibility check errors", onExisting: ExistingAppend, visibilityErr: errors.New("evaluate failed"), expectedCalls: 7, wantErr: "verify created Item Bank is visible"},
-		{name: "open bank", existing: true, failClickJS: wantOpenBankJS, onExisting: ExistingAppend, expectedCalls: 1, wantErr: "open Item Bank"},
-		{name: "wait actions", existing: true, failAt: 2, onExisting: ExistingAppend, expectedCalls: 2, wantErr: "wait for Item Bank actions"},
+		{name: "open bank", existing: true, failClickJS: wantOpenBankJS, onExisting: ExistingAppend, expectedCalls: 4, wantErr: "open Item Bank"},
+		{name: "wait actions", existing: true, failAt: 5, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "wait for Item Bank actions"},
 		{name: "open actions", existing: true, failClickJS: wantPopoverTriggerJS, onExisting: ExistingAppend, expectedCalls: 5, wantErr: "open import actions"},
 		{name: "wait import menu", existing: true, failAt: 6, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "wait for import menu"},
 		{name: "open dialog", existing: true, failClickJS: wantMenuItemJS, onExisting: ExistingAppend, expectedCalls: 6, wantErr: "open import dialog"},
@@ -219,10 +220,197 @@ func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *test
 	}
 }
 
+// TestChromedpImporterRecoverStuckImport_Table covers the list-row growth
+// check: recoverStuckImport must compare the bank's LIST total (not the
+// paginated detail page's card count) against the pre-upload baseline, and
+// only report recovery when the count strictly grew.
+func TestChromedpImporterRecoverStuckImport_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name     string
+		baseline int
+		reads    []int // successive list-row reads: stable pair
+		runErrAt int   // 1-indexed run() batch that fails, 0 means none
+		runErr   error // error that batch returns; defaults to a generic browser failure
+		want     bool
+		renavs   int // list navigations expected after the initial one
+	}{
+		{name: "list total grew past one detail page", baseline: 30, reads: []int{76, 76}, want: true},
+		{name: "fresh bank grew from zero", baseline: 0, reads: []int{3, 3}, want: true},
+		{name: "count equals baseline", baseline: 30, reads: []int{30, 30}, want: false},
+		{name: "count below baseline", baseline: 30, reads: []int{12, 12}, want: false},
+		{name: "list row never appears", baseline: 0, reads: []int{-1}, want: false},
+		{name: "row missing then present", baseline: 0, reads: []int{-1, -1, -1, 76, 76}, want: true},
+		{name: "unstable pair then stable", baseline: 0, reads: []int{3, 76, 76, 76}, want: true},
+		{name: "stable at baseline after hydrating", baseline: 30, reads: []int{-1, -1, 30, 30}, want: false},
+		{name: "list lags at baseline then shows growth", baseline: 30, reads: []int{30, 30, 30, 30, 76, 76}, want: true},
+		{name: "unstable reads forever", baseline: 0, reads: []int{3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76}, want: false},
+		{name: "list navigation fails", baseline: 0, reads: []int{3, 3}, runErrAt: 1, want: false},
+		{name: "reopening the bank fails", baseline: 0, reads: []int{3, 3}, runErrAt: 3, want: false},
+		{name: "reopen row miss is retried", baseline: 0, reads: []int{3, 3, 3, 3}, runErrAt: 3, runErr: errBankRowNotFound, want: true, renavs: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			reads := 0
+			navs := 0
+			navLen := len(navigateBanksListTasks(""))
+			importer := ChromedpImporter{
+				run: func(_ context.Context, actions ...chromedp.Action) error {
+					calls++
+					if tasks, ok := actions[0].(chromedp.Tasks); ok && len(tasks) == navLen {
+						navs++
+					}
+					if calls == tt.runErrAt {
+						if tt.runErr != nil {
+							return tt.runErr
+						}
+						return errors.New("browser failed")
+					}
+					return nil
+				},
+				bankItemCount: func(context.Context) (int, error) {
+					reads++
+					return tt.reads[min(reads, len(tt.reads))-1], nil
+				},
+			}
+			if got := importer.recoverStuckImport(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", tt.baseline); got != tt.want {
+				t.Fatalf("recoverStuckImport() = %v, want %v", got, tt.want)
+			}
+			// A failed reopen must send recovery back to the list before it reads again.
+			if tt.runErr != nil && navs-1 != tt.renavs {
+				t.Fatalf("list navigations after the first = %d, want %d", navs-1, tt.renavs)
+			}
+		})
+	}
+}
+
+// TestChromedpImporterImport_ListBaselineAndExpectedTotals covers Import()'s
+// handling of list-row counts: the ExistingAppend baseline is read from the
+// list BEFORE the bank is opened, and the expected totals for fresh and
+// append imports are checked against the final count. The bankItemCount hook
+// bypasses pollBankItemCount here, so this does NOT prove the pagination
+// fix; TestChromedpImporterPollBankItemCount_UsesListPredicate does.
+func TestChromedpImporterImport_ListBaselineAndExpectedTotals(t *testing.T) { //nolint:gocyclo // table covers baseline/append/error branches
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		existing      bool
+		baselineReads []int // successive list-row baseline reads for an existing bank
+		finalRead     int
+		expected      int
+		wantErr       string
+	}{
+		{name: "fresh bank total matches expected", finalRead: 76, expected: 76},
+		{name: "append onto 30 existing reaches expected total", existing: true, baselineReads: []int{30, 30}, finalRead: 76, expected: 46},
+		{name: "append onto 60 existing reaches expected total", existing: true, baselineReads: []int{60, 60}, finalRead: 76, expected: 16},
+		{name: "final count short of expected fails", finalRead: 50, expected: 76, wantErr: "question count = 50, want 76"},
+		{name: "baseline row missing on every attempt aborts", existing: true, baselineReads: []int{-1, -1, -1}, finalRead: 76, expected: 46, wantErr: "could not read existing Item Bank"},
+		{name: "baseline still hydrating on first attempt is retried", existing: true, baselineReads: []int{-1, 30, 30}, finalRead: 76, expected: 46},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reads := 0
+			openedAfterReads := -1
+			wantOpenJS := clickBankRowJS("Bank", "")
+			importer := ChromedpImporter{
+				run:      func(context.Context, ...chromedp.Action) error { return nil },
+				findBank: func(context.Context, string) (bool, error) { return tt.existing, nil },
+				evalBool: func(_ context.Context, js string) (bool, error) {
+					if js == wantOpenJS {
+						openedAfterReads = reads
+					}
+					return true, nil
+				},
+				bankItemCount: func(context.Context) (int, error) {
+					reads++
+					if tt.existing && reads <= len(tt.baselineReads) {
+						return tt.baselineReads[reads-1], nil
+					}
+					return tt.finalRead, nil
+				},
+				location: func(context.Context) (string, error) { return "https://canvas.example.edu/courses/7/banks/42", nil },
+			}
+			result, err := importer.Import(t.Context(), &Request{
+				BaseURL: "https://canvas.example.edu", BrowserURL: "http://127.0.0.1:9222", CourseID: "7",
+				BankName: "Bank", Package: "quiz.zip", OnExisting: ExistingAppend, ExpectedItemCount: tt.expected,
+			})
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
+			}
+			if tt.wantErr == "" && result.QuestionCount != tt.finalRead {
+				t.Fatalf("Import() QuestionCount = %d, want %d", result.QuestionCount, tt.finalRead)
+			}
+			// The baseline must be read from the list BEFORE the bank is opened.
+			if tt.existing && tt.wantErr == "" {
+				if openedAfterReads == -1 {
+					t.Fatal("bank open via clickBankRowJS was never observed")
+				}
+				if openedAfterReads != len(tt.baselineReads) {
+					t.Fatalf("bank opened after %d list reads, want %d (baseline read first)", openedAfterReads, len(tt.baselineReads))
+				}
+			}
+		})
+	}
+}
+
+// TestChromedpImporterPollBankItemCount_UsesListPredicate is the regression
+// guard for the detail-page pagination bug (50 cards per page, so banks over
+// 50 questions never matched): it drives the real pollBankItemCount path
+// through the run mock, extracts the expression the poll action would
+// evaluate in the page, and requires it to be the list-row predicate and not
+// the old detail-page card regex.
+func TestChromedpImporterPollBankItemCount_UsesListPredicate(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name              string
+		primary, fallback string
+		expected          int
+	}{
+		{name: "76-question bank, primary only", primary: "Bank", expected: 76},
+		{name: "primary with fallback name", primary: "Chapter 1", fallback: "Chapter 1 Quiz", expected: 51},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var predicates []string
+			importer := ChromedpImporter{
+				run: func(_ context.Context, actions ...chromedp.Action) error {
+					if _, isTasks := actions[0].(chromedp.Tasks); !isTasks {
+						// chromedp.Poll's unexported predicate field holds
+						// "return (<expression>);"; reflect can read a string
+						// field without it being exported.
+						predicates = append(predicates, reflect.ValueOf(actions[0]).Elem().FieldByName("predicate").String())
+					}
+					return nil
+				},
+				bankItemCount: func(context.Context) (int, error) { return tt.expected, nil },
+			}
+			got, err := importer.pollBankItemCount(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", tt.primary, tt.fallback, tt.expected)
+			if err != nil {
+				t.Fatalf("pollBankItemCount() error = %v", err)
+			}
+			if got != tt.expected {
+				t.Fatalf("pollBankItemCount() = %d, want %d", got, tt.expected)
+			}
+			if len(predicates) != 1 {
+				t.Fatalf("poll actions = %d, want 1", len(predicates))
+			}
+			if want := "return (" + bankListCountMatchesJS(tt.primary, tt.fallback, tt.expected) + ");"; predicates[0] != want {
+				t.Fatalf("poll predicate = %q, want the list-row predicate %q", predicates[0], want)
+			}
+			if strings.Contains(predicates[0], "Question Question") || strings.Contains(predicates[0], "innerText.match") {
+				t.Fatalf("poll predicate = %q, must not use the old detail-page card count", predicates[0])
+			}
+		})
+	}
+}
+
 // TestChromedpImporterStableBankItemCount_Table covers a bug found in
-// review: the rendered item count comes from a virtualized card list that
-// can still be mid-render, so a single read can return a transient 0 or
-// partial count. stableBankItemCount must require two reads to agree before
+// review: the list row's count can still be mid-render, so a single read can
+// return a transient 0 or partial count. stableBankItemCount must require two reads to agree before
 // trusting the value, and report unknown (not a guess) when they don't.
 func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 	t.Parallel()
@@ -239,6 +427,8 @@ func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 		{name: "first read errors", reads: []int{0, 0}, readErrAt: 1, wantOK: false},
 		{name: "second read errors", reads: []int{4, 0}, readErrAt: 2, wantOK: false},
 		{name: "settle sleep fails", reads: []int{4, 4}, sleepErr: errors.New("navigate interrupted"), wantOK: false},
+		{name: "row missing reports unknown", reads: []int{-1, -1}, wantOK: false},
+		{name: "total above one detail page", reads: []int{76, 76}, wantOK: true, wantResult: 76},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -253,7 +443,7 @@ func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 					return tt.reads[reads-1], nil
 				},
 			}
-			got, ok := importer.stableBankItemCount(t.Context(), importer.run)
+			got, ok := importer.stableBankItemCount(t.Context(), importer.run, "Bank", "")
 			if ok != tt.wantOK {
 				t.Fatalf("stableBankItemCount() ok = %v, want %v", ok, tt.wantOK)
 			}
@@ -283,11 +473,11 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 		wantRecovered bool
 	}{
 		{name: "non-timeout error still fails immediately", failAt: 10, failErr: errors.New("browser failed"), expectedCalls: 10, wantErr: "attach package"},
-		{name: "timeout but bank still empty on recheck", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 12, wantErr: "attach package"},
+		{name: "timeout but bank still empty on recheck", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 0, expectedCalls: 30, wantErr: "attach package"}, // 10 failing batches + list nav + 1 settle + 9 retries x (interval + settle)
 		{name: "timeout but recheck navigation fails", failAt: 10, failErr: errors.New("context deadline exceeded"), recoverErr: errors.New("navigate failed"), expectedCalls: 11, wantErr: "attach package"},
-		{name: "attach timeout recovers", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 12, wantRecovered: true},
-		{name: "submit timeout recovers", failAt: 11, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 13, wantRecovered: true},
-		{name: "completion wait timeout recovers", failAt: 12, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
+		{name: "attach timeout recovers", failAt: 10, failErr: errors.New("context deadline exceeded"), recoveredJS: 3, expectedCalls: 13, wantRecovered: true},
+		{name: "submit timeout recovers", failAt: 11, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 14, wantRecovered: true},
+		{name: "completion wait timeout recovers", failAt: 12, failErr: errors.New("waiting for function failed: timeout"), recoveredJS: 3, expectedCalls: 15, wantRecovered: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -530,13 +720,10 @@ func TestClickTextJS_ExactVsSubstringBankNameMatch(t *testing.T) {
 			t.Fatalf("substring match against [Chapter 11, Chapter 1] = (%q, %v), want (\"Chapter 11\", true) demonstrating the false-match risk", got, ok)
 		}
 	})
-	// clickTextJS itself must generate exact (===) matching for a bank-name
-	// target, per the golden-string assertion in TestClickTextJS_Table — this
-	// asserts the concrete call site's own generated comparison operator
-	// directly, so a regression back to substring for a bank-name click site
-	// is caught here specifically, not just in the generic table.
-	if got := clickTextJS(buttonOrLinkTags, target, true); !strings.Contains(got, "el.innerText.trim() === "+jsString(target)) {
-		t.Fatalf("clickTextJS(..., %q, true) = %q, want an exact-equality (===) comparison", target, got)
+	// The bank-name click site (clickBankRowJS) must generate exact (===)
+	// matching, so a regression back to substring is caught here specifically.
+	if got := clickBankRowJS(target, ""); !strings.Contains(got, "b.innerText.trim() === "+jsString(target)) {
+		t.Fatalf("clickBankRowJS(%q, \"\") = %q, want an exact-equality (===) comparison", target, got)
 	}
 }
 
@@ -564,55 +751,85 @@ func TestClickTextInsensitiveJS(t *testing.T) {
 	}
 }
 
-// TestChromedpImporterPollBankItemCount_Table covers symptom 2 directly: a
-// bankItemCountMatchesJS poll timeout retries by re-navigating fresh to the
-// bank and rechecking, instead of failing on the first 30s window. Tested as
-// a standalone unit (rather than through Import()) because the mocked `run`
-// field never populates chromedp.Evaluate's out-parameter, so Import()'s
-// final numeric question-count comparison can't be exercised this way — same
-// reasoning as evaluateBool's doc comment.
-func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
+// TestChromedpImporterPollBankItemCount_Table covers symptom 2 and the
+// pagination discovery: the count is polled against the Item Banks LIST row
+// (never the detail page's paginated cards), a poll timeout retries by
+// re-navigating fresh to the list and rechecking, and a successful match
+// opens the bank so the browser ends on its detail page. Tested as a
+// standalone unit (rather than through Import()) because the mocked `run`
+// field never populates chromedp.Evaluate's out-parameter - the bankItemCount
+// hook supplies the list-row value instead, same reasoning as evaluateBool's
+// doc comment.
+func TestChromedpImporterPollBankItemCount_Table(t *testing.T) { //nolint:gocyclo // table covers the retry/open state machine
 	t.Parallel()
 	for _, tt := range []struct {
 		name          string
-		pollFailCount int // number of leading poll attempts that time out
+		pollFailCount int   // number of leading poll attempts that time out
+		pollErr       error // error those failing polls return
+		openFailCount int   // number of leading open-bank attempts that time out
+		listCount     int   // list-row count the bankItemCount hook reports
+		wantCount     int
 		wantErr       string
 		expectedCalls int
+		wantOpens     int // total open-bank batches, failed attempts included
 	}{
-		{name: "succeeds first try", pollFailCount: 0, expectedCalls: 2},
-		{name: "succeeds after one retry", pollFailCount: 1, expectedCalls: 4},
-		{name: "succeeds after two retries", pollFailCount: 2, expectedCalls: 6},
-		{name: "exhausts retries and fails", pollFailCount: 3, wantErr: "waiting for function failed: timeout", expectedCalls: 5},
+		{name: "succeeds first try", listCount: 3, wantCount: 3, expectedCalls: 3, wantOpens: 1},
+		{name: "76-question bank uses the list total", listCount: 76, wantCount: 76, expectedCalls: 3, wantOpens: 1},
+		{name: "list count lagging then matching", pollFailCount: 1, listCount: 3, wantCount: 3, expectedCalls: 5, wantOpens: 1},
+		{name: "succeeds after two retries", pollFailCount: 2, listCount: 3, wantCount: 3, expectedCalls: 7, wantOpens: 1},
+		{name: "exhausts retries and fails", pollFailCount: 3, wantErr: "waiting for function failed: timeout", expectedCalls: 6},
+		{name: "non-timeout poll error returns immediately", pollFailCount: 1, pollErr: errors.New("browser failed"), wantErr: "browser failed", expectedCalls: 2},
+		{name: "list row missing after match is retried then fails", listCount: -1, wantErr: "row not found", expectedCalls: 6},
+		{name: "open bank timeout retries from a fresh list", openFailCount: 1, listCount: 3, wantCount: 3, expectedCalls: 6, wantOpens: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pollAttempts := 0
+			openAttempts := 0
 			calls := 0
 			importer := ChromedpImporter{
 				run: func(_ context.Context, actions ...chromedp.Action) error {
 					calls++
 					// runResilient always calls run with a single chromedp.Action, so
-					// len(actions) can't distinguish the re-navigate batch (a
-					// chromedp.Tasks bundling 5 sub-actions) from the lone Poll call;
-					// type-assert instead.
-					if _, isNavigate := actions[0].(chromedp.Tasks); !isNavigate {
+					// len(actions) can't distinguish the list-navigate batch (a
+					// chromedp.Tasks bundling 4 sub-actions) or the open-bank batch (3)
+					// from the lone Poll call; type-assert and count instead.
+					tasks, isTasks := actions[0].(chromedp.Tasks)
+					if !isTasks {
 						pollAttempts++
 						if pollAttempts <= tt.pollFailCount {
+							if tt.pollErr != nil {
+								return tt.pollErr
+							}
 							return errors.New("waiting for function failed: timeout")
+						}
+						return nil
+					}
+					if len(tasks) == len(openBankFromListTasks("", "")) {
+						openAttempts++
+						if openAttempts <= tt.openFailCount {
+							return errors.New("context deadline exceeded")
 						}
 					}
 					return nil
 				},
+				bankItemCount: func(context.Context) (int, error) { return tt.listCount, nil },
 			}
-			_, err := importer.pollBankItemCount(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
+			got, err := importer.pollBankItemCount(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", 3)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("pollBankItemCount() error = %v", err)
 			}
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("pollBankItemCount() error = %v, want %q", err, tt.wantErr)
 			}
+			if tt.wantErr == "" && got != tt.wantCount {
+				t.Fatalf("pollBankItemCount() = %d, want %d", got, tt.wantCount)
+			}
 			if calls != tt.expectedCalls {
 				t.Fatalf("browser action batches = %d, want %d", calls, tt.expectedCalls)
+			}
+			if openAttempts != tt.wantOpens {
+				t.Fatalf("open-bank batches = %d, want %d", openAttempts, tt.wantOpens)
 			}
 		})
 	}
@@ -650,12 +867,13 @@ func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not read existing Item Bank") {
 		t.Fatalf("Import() error = %v, want baseline-unknown error", err)
 	}
-	// Aborts right after the failed baseline read (navigate, wait for
-	// actions, settle sleep between the two stabilizing reads — the open-bank
-	// click and both bankItemCount reads go through hooks, not run()), before
-	// ever opening the import actions menu or touching the upload dialog.
-	if calls != 3 {
-		t.Fatalf("browser action batches = %d, want 3 (aborted before upload)", calls)
+	// Aborts right after the bounded baseline retries (navigate, then per
+	// attempt a settle sleep between the two stabilizing list-row reads, plus
+	// a 1s sleep between attempts - 3 attempts: 1 + 3 + 2 = 6; the reads go
+	// through the bankItemCount hook, not run()), before ever opening the
+	// bank, the import actions menu, or the upload dialog.
+	if calls != 6 {
+		t.Fatalf("browser action batches = %d, want 6 (aborted before upload)", calls)
 	}
 }
 
@@ -707,7 +925,7 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("Import() error = %v, want %q", err, tt.wantErr)
 			}
-			// open banks, wait for Item Bank actions, baseline settle sleep,
+			// open banks, baseline settle sleep, wait for Item Bank actions,
 			// wait for import menu, attach package, wait for Import button
 			// enabled, wait for import completion — every click in between
 			// (open bank, popover trigger, menu item, Import button) goes
@@ -956,7 +1174,112 @@ func TestBankTitleMatchesJS_Table(t *testing.T) {
 	}
 }
 
-func TestBankItemCountMatchesJS_Table(t *testing.T) {
+// TestBankListQuestionCountJS_Table asserts the generated list-row read is
+// exact-match (never substring), quoted via jsString, anchored on the row's
+// <tr>, and reads the "Questions" column with a cell-index-2 fallback - so
+// "Chapter 1" can never read "Chapter 11"'s count (the bank-name bug class
+// fixed in #77) and the detail page's 50-card pagination cap never applies.
+// This only inspects the generated string; TestBankListQuestionCountJS_Chrome
+// executes the JS for real (when Chrome is available).
+func TestBankListQuestionCountJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name              string
+		primary, fallback string
+	}{
+		{name: "plain name", primary: "Chapter 1"},
+		{name: "primary with fallback", primary: "Chapter 1", fallback: "Chapter 1 Quiz"},
+		{name: "quoted name", primary: `Bank "One"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := bankListQuestionCountJS(tt.primary, tt.fallback)
+			for _, want := range []string{
+				bankRowButtonFinderJS(jsString(tt.primary)),
+				"b.innerText.trim() === " + jsString(tt.primary),
+				"b.closest('tr')",
+				".toLowerCase().startsWith('questions')",
+				"!b.closest('thead')",
+				`/^[\d,]+$/`,
+				"let col = 2;",
+				"return -1;",
+				"if (!btn && " + jsString(tt.fallback) + ")",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("bankListQuestionCountJS(%q, %q) = %q, want it to contain %q", tt.primary, tt.fallback, got, want)
+				}
+			}
+			if tt.fallback != "" && !strings.Contains(got, "b.innerText.trim() === "+jsString(tt.fallback)) {
+				t.Fatalf("bankListQuestionCountJS(%q, %q) = %q, want an exact match on the fallback name", tt.primary, tt.fallback, got)
+			}
+			if strings.Contains(got, "includes(") || strings.Contains(got, "indexOf(") {
+				t.Fatalf("bankListQuestionCountJS(%q, %q) = %q, want exact matching only, no substring match", tt.primary, tt.fallback, got)
+			}
+			if strings.Contains(got, "parseInt(cell") {
+				t.Fatalf("bankListQuestionCountJS(%q, %q) = %q, want a strict digits-and-commas check before parsing, not a bare parseInt of the cell", tt.primary, tt.fallback, got)
+			}
+		})
+	}
+}
+
+// TestBankRowButtonFinderJS_Table asserts every bank-row lookup embeds the one
+// shared body-row finder and none builds its own bare button scan.
+func TestBankRowButtonFinderJS_Table(t *testing.T) {
+	t.Parallel()
+	const name = "Questions"
+	lit := jsString(name)
+	finder := bankRowButtonFinderJS(lit)
+	fallbackFinder := bankRowButtonFinderJS(jsString("Other"))
+	for _, tt := range []struct {
+		name string
+		js   string
+	}{
+		{name: "bankListQuestionCountJS", js: bankListQuestionCountJS(name, "Other")},
+		{name: "clickBankRowJS", js: clickBankRowJS(name, "Other")},
+		{name: "bankExistsJS", js: bankExistsJS(lit)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(tt.js, finder) {
+				t.Fatalf("%s = %q, want it to embed the shared finder %q", tt.name, tt.js, finder)
+			}
+			// Exactly one scan of all buttons per finder use: the finder's own.
+			if got, want := strings.Count(tt.js, "querySelectorAll('button')"), strings.Count(tt.js, finder)+strings.Count(tt.js, fallbackFinder); got != want {
+				t.Fatalf("%s has %d button scans but %d shared finders, want no bare scan", tt.name, got, want)
+			}
+			for _, want := range []string{"!b.closest('thead')", "b.closest('tr')", "headerOf(tr.closest('table'))", "b === tr.querySelector('button')"} {
+				if !strings.Contains(finder, want) {
+					t.Fatalf("finder = %q, want it to contain %q", finder, want)
+				}
+			}
+		})
+	}
+}
+
+// TestEditBankActionJS_Table asserts the rename lookup is an exact match on
+// "Edit bank {title}" that excludes the row's first (name) button.
+func TestEditBankActionJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, title string }{
+		{name: "plain", title: "Chapter 1"},
+		{name: "quoted", title: `Bank "One"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := editBankActionJS(tt.title)
+			for _, want := range []string{
+				"el.innerText.trim() === " + jsString("Edit bank "+tt.title),
+				"el === tr.querySelector('button')",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("editBankActionJS(%q) = %q, want it to contain %q", tt.title, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBankListCountMatchesJS_Table(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name  string
@@ -964,15 +1287,16 @@ func TestBankItemCountMatchesJS_Table(t *testing.T) {
 	}{
 		{name: "zero", count: 0},
 		{name: "eighteen", count: 18},
+		{name: "past one detail page", count: 76},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := bankItemCountMatchesJS(tt.count)
-			if !strings.Contains(got, fmt.Sprintf("%d", tt.count)) {
-				t.Fatalf("bankItemCountMatchesJS(%d) = %q, want it to embed the count", tt.count, got)
+			got := bankListCountMatchesJS("Bank", "Other", tt.count)
+			if !strings.HasSuffix(got, fmt.Sprintf(") === %d", tt.count)) {
+				t.Fatalf("bankListCountMatchesJS(%d) = %q, want it to compare against the count", tt.count, got)
 			}
-			if !strings.Contains(got, bankItemCountJS) {
-				t.Fatalf("bankItemCountMatchesJS(%d) = %q, want it to embed bankItemCountJS", tt.count, got)
+			if !strings.Contains(got, bankListQuestionCountJS("Bank", "Other")) {
+				t.Fatalf("bankListCountMatchesJS(%d) = %q, want it to embed bankListQuestionCountJS", tt.count, got)
 			}
 		})
 	}
