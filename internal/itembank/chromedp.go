@@ -50,6 +50,14 @@ const (
 // shared between the WaitEnabled check and the click that follows it (via
 // clickXPathJS) so both resolve to the exact same element — see the doc
 // comment at its use site in Import().
+// Fixed settle delays around Canvas navigations and clicks, where the SPA
+// needs a moment to finish autosaving or re-rendering before the next step.
+const (
+	preNavigateDelay = 2 * time.Second
+	postLoadDelay    = 2 * time.Second
+	postClickDelay   = 2 * time.Second
+)
+
 const importButtonXPath = `//*[@role='dialog']//button[contains(normalize-space(), 'Import')]`
 
 // buttonOrLinkTags is the shared button/link tag set clickTextJS matches
@@ -949,11 +957,11 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedpRun, quizURL, bankName string, count int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for range 3 {
-		if err := runResilient(ctx, run, chromedp.Steps( //nolint:gocritic // dupOption: the two settle sleeps are intentional
-			chromedp.Sleep(2*time.Second),
+		if err := runResilient(ctx, run, chromedp.Steps(
+			chromedp.Sleep(preNavigateDelay),
 			chromedp.Navigate(quizURL),
 			chromedp.WaitReady(chromedp.CSS("body")),
-			chromedp.Sleep(2*time.Second),
+			chromedp.Sleep(postLoadDelay),
 		)); err != nil {
 			lastErr = err
 			continue
@@ -999,13 +1007,13 @@ func clickBankRowJS(primary, fallback string) string {
 // the detail page — not just the list page — actually finished rendering
 // before a caller polls anything on it.
 func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Action[chromedp.Void] {
-	return chromedp.Steps( //nolint:gocritic // dupOption: the two settle sleeps are intentional
-		chromedp.Sleep(2*time.Second),
+	return chromedp.Steps(
+		chromedp.Sleep(preNavigateDelay),
 		chromedp.Navigate(banksURL),
 		chromedp.WaitReady(chromedp.CSS("body")),
 		chromedp.Sleep(time.Second),
 		chromedp.Evaluate[chromedp.Void](clickBankRowJS(bankName, expectedBankName)),
-		chromedp.Sleep(2*time.Second),
+		chromedp.Sleep(postClickDelay),
 		chromedp.WaitVisible(chromedp.CSS(`button[aria-haspopup="true"]`)),
 	)
 }
