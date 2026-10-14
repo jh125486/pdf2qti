@@ -949,7 +949,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedpRun, quizURL, bankName string, count int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for range 3 {
-		if err := runResilient(ctx, run, chromedp.Steps(
+		if err := runResilient(ctx, run, chromedp.Steps( //nolint:gocritic // dupOption: the two settle sleeps are intentional
 			chromedp.Sleep(2*time.Second),
 			chromedp.Navigate(quizURL),
 			chromedp.WaitReady(chromedp.CSS("body")),
@@ -999,7 +999,7 @@ func clickBankRowJS(primary, fallback string) string {
 // the detail page — not just the list page — actually finished rendering
 // before a caller polls anything on it.
 func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Action[chromedp.Void] {
-	return chromedp.Steps(
+	return chromedp.Steps( //nolint:gocritic // dupOption: the two settle sleeps are intentional
 		chromedp.Sleep(2*time.Second),
 		chromedp.Navigate(banksURL),
 		chromedp.WaitReady(chromedp.CSS("body")),
