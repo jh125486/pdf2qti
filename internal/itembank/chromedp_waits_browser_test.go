@@ -6,11 +6,12 @@ package itembank
 
 import (
 	"context"
-	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,21 +41,36 @@ func afterDelay(js string) string {
 // dynamic fixtures' flip, short enough to keep negative cases quick.
 const shortPoll = 1500 * time.Millisecond
 
-// fixtureServer serves, for any path, the HTML given in the "p" query
-// parameter, so a test can build both the origin and the path it needs.
-func fixtureServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, r.URL.Query().Get("p"))
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+// fixtures is an httptest server that serves, for any path, a page the test
+// registered earlier via fixtureURL (looked up by an opaque id, never echoing
+// request input), so a test controls both the origin and the path it needs.
+type fixtures struct {
+	*httptest.Server
+	mu    sync.Mutex
+	pages map[string]string
 }
 
-// fixtureURL is path on srv, serving html.
-func fixtureURL(srv *httptest.Server, path, html string) string {
-	return srv.URL + path + "?p=" + url.QueryEscape(html)
+func fixtureServer(t *testing.T) *fixtures {
+	t.Helper()
+	f := &fixtures{pages: map[string]string{}}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		page := f.pages[r.URL.Query().Get("id")]
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, page)
+	}))
+	t.Cleanup(f.Close)
+	return f
+}
+
+// fixtureURL registers html on srv and returns its URL under path.
+func fixtureURL(srv *fixtures, path, html string) string {
+	srv.mu.Lock()
+	id := strconv.Itoa(len(srv.pages))
+	srv.pages[id] = html
+	srv.mu.Unlock()
+	return srv.URL + path + "?id=" + id
 }
 
 // newTab returns a fresh bounded tab context in the shared browser.
