@@ -84,7 +84,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 			t.Parallel()
 			calls := 0
 			bankExistsCalls := 0
-			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action) error {
+			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -211,7 +211,7 @@ func TestIsTimeoutLike_Table(t *testing.T) {
 func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *testing.T) {
 	t.Parallel()
 	importer := ChromedpImporter{
-		run:           func(context.Context, ...chromedp.Action) error { return nil },
+		run:           func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 		bankItemCount: func(context.Context) (int, error) { return 5, nil }, // bank has content
 	}
 	if got := importer.recoverStuckImport(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
@@ -244,7 +244,7 @@ func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 			t.Parallel()
 			reads := 0
 			importer := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error { return tt.sleepErr },
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error { return tt.sleepErr },
 				bankItemCount: func(context.Context) (int, error) {
 					reads++
 					if reads == tt.readErrAt {
@@ -293,7 +293,7 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 			t.Parallel()
 			calls := 0
 			importer := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error {
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if calls == tt.failAt {
 						return tt.failErr
@@ -588,18 +588,22 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) {
 			t.Parallel()
 			pollAttempts := 0
 			calls := 0
+			// chromedp.Action[T] is a func type and Steps/Poll return opaque
+			// closures, so actions can't be type-asserted; track call order
+			// instead: pollBankItemCount re-navigates (the reopen batch) exactly
+			// once after each failed poll, before polling again.
+			afterFailedPoll := false
 			importer := ChromedpImporter{
-				run: func(_ context.Context, actions ...chromedp.Action) error {
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error {
 					calls++
-					// runResilient always calls run with a single chromedp.Action, so
-					// len(actions) can't distinguish the re-navigate batch (a
-					// chromedp.Tasks bundling 5 sub-actions) from the lone Poll call;
-					// type-assert instead.
-					if _, isNavigate := actions[0].(chromedp.Tasks); !isNavigate {
-						pollAttempts++
-						if pollAttempts <= tt.pollFailCount {
-							return errors.New("waiting for function failed: timeout")
-						}
+					if afterFailedPoll {
+						afterFailedPoll = false
+						return nil
+					}
+					pollAttempts++
+					if pollAttempts <= tt.pollFailCount {
+						afterFailedPoll = true
+						return errors.New("waiting for function failed: timeout")
 					}
 					return nil
 				},
@@ -627,7 +631,7 @@ func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	importer := ChromedpImporter{
-		run:      func(context.Context, ...chromedp.Action) error { calls++; return nil },
+		run:      func(context.Context, ...chromedp.Action[chromedp.Void]) error { calls++; return nil },
 		findBank: func(context.Context, string) (bool, error) { return true, nil }, // existing bank
 		// The mocked run field never populates chromedp.Evaluate's
 		// out-parameter, so the "open bank" click (routed through
@@ -678,7 +682,7 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 			calls := 0
 			bankItemCountCalls := 0
 			importer := ChromedpImporter{
-				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
+				run:       func(context.Context, ...chromedp.Action[chromedp.Void]) error { calls++; return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
 				// The mocked run field never populates chromedp.Evaluate's
@@ -741,7 +745,7 @@ func TestChromedpImporterImport_RenamesBankToRequestedName(t *testing.T) {
 			var renameCalled bool
 			var gotOld, gotNew string
 			importer := ChromedpImporter{
-				run:       func(context.Context, ...chromedp.Action) error { return nil },
+				run:       func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.canvasTitle, nil },
 				// The mocked run field never populates chromedp.Evaluate's
@@ -835,7 +839,7 @@ func TestRunResilient_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls <= tt.failTimes {
 					return errors.New(tt.errMsg)
@@ -884,7 +888,7 @@ func TestRenameBankUI_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -928,7 +932,7 @@ func TestRenameBankUI_Table(t *testing.T) {
 // one-shot, not the underlying poll's retry/timeout behavior.
 func TestRenameBankUI_ReopenChecksBeforeClicking(t *testing.T) {
 	t.Parallel()
-	run := func(context.Context, ...chromedp.Action) error { return nil }
+	run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil }
 	evalBool := func(_ context.Context, js string) (bool, error) {
 		if js == bankExistsJS(jsString("New Name")) {
 			return false, nil // the reopen check never sees the renamed bank appear.
@@ -1022,7 +1026,7 @@ func TestChromedpImporterEnsureSession_Table(t *testing.T) {
 			var submitLoginCalled bool
 			var gotUser, gotPass string
 			importer := ChromedpImporter{
-				run:               func(context.Context, ...chromedp.Action) error { return nil },
+				run:               func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				loginPageDetected: func(context.Context) (bool, error) { return tt.loginPage, tt.loginPageErr },
 				submitLogin: func(_ context.Context, user, pass string) error {
 					submitLoginCalled = true
@@ -1030,7 +1034,7 @@ func TestChromedpImporterEnsureSession_Table(t *testing.T) {
 					return tt.submitLoginErr
 				},
 			}
-			err := importer.ensureSession(t.Context(), func(context.Context, ...chromedp.Action) error { return nil },
+			err := importer.ensureSession(t.Context(), func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				"https://canvas.example.edu", tt.username, tt.password)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("ensureSession() error = %v", err)
@@ -1061,7 +1065,7 @@ func TestChromedpImporterEnsureSession_ProductionPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -1103,7 +1107,7 @@ func TestChromedpImporterEnsureSession_ProductionLoginFill(t *testing.T) {
 			// everything after that (fill, submit, poll) runs through the
 			// real chromedp.Action construction via the run stub below, so
 			// this exercises that code without a real browser.
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -1142,7 +1146,7 @@ func TestChromedpImporterImport_HeadlessEnsuresSession(t *testing.T) {
 			t.Parallel()
 			var loginChecked, loggedIn bool
 			importer := ChromedpImporter{
-				run:      func(context.Context, ...chromedp.Action) error { return nil },
+				run:      func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				findBank: func(context.Context, string) (bool, error) { return true, nil },
 				loginPageDetected: func(context.Context) (bool, error) {
 					loginChecked = true
@@ -1344,7 +1348,7 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 			t.Parallel()
 			calls := 0
 			creator := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error {
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if tt.failAt != 0 && calls == tt.failAt {
 						return errors.New("browser failed")
@@ -1419,7 +1423,7 @@ func TestChromedpImporterEvaluateBool_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := ChromedpImporter{}
-			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return tt.runErr }
 			_, err := c.evaluateBool(t.Context(), run, "true")
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("evaluateBool() error = %v", err)
@@ -1471,7 +1475,7 @@ func TestChromedpImporterEvaluatePollBool_Table(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return tt.runErr }
 			got, err := c.evaluatePollBool(ctx, run, "true", time.Second)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("evaluatePollBool() error = %v", err)
@@ -1509,7 +1513,7 @@ func TestChromedpImporterPreflightRandomQuiz_Table(t *testing.T) {
 			t.Parallel()
 			calls := 0
 			creator := ChromedpImporter{
-				run: func(context.Context, ...chromedp.Action) error {
+				run: func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if calls == tt.failAt {
 						return errors.New("browser failed")

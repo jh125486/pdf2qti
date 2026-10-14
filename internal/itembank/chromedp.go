@@ -10,6 +10,7 @@ import (
 
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
+	"github.com/chromedp/chromedp/remote"
 )
 
 // ChromedpImporter drives only documented Canvas UI actions. When BrowserURL
@@ -28,7 +29,7 @@ type ChromedpImporter struct {
 	quizExists        func(context.Context, string) (bool, error)
 	loginPageDetected func(context.Context) (bool, error)
 	submitLogin       func(context.Context, string, string) error
-	// evalBool overrides evaluateBool's default chromedp.Evaluate(js, &ok)
+	// evalBool overrides evaluateBool's default evaluateInto(js, &ok)
 	// path. Production leaves this nil; tests set it because the mocked
 	// `run` field never populates out-parameters passed to chromedp actions,
 	// so any check that reads a boolean result must go through this hook to
@@ -36,7 +37,7 @@ type ChromedpImporter struct {
 	evalBool func(context.Context, string) (bool, error)
 }
 
-type chromedpRun func(context.Context, ...chromedp.Action) error
+type chromedpRun func(context.Context, ...chromedp.Action[chromedp.Void]) error
 
 const (
 	buildQuizStep          = "build quiz"
@@ -66,7 +67,7 @@ var buttonOrLinkTags = []string{"button", "a"}
 // reliably long enough. Any other error (including everything unit tests
 // inject) returns immediately on the first attempt, so this is a no-op
 // outside that one specific race.
-func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action) error {
+func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action[chromedp.Void]) error {
 	var lastErr error
 	for range 4 {
 		lastErr = run(ctx, action)
@@ -158,7 +159,7 @@ func newBrowserContext(ctx context.Context, browserURL, profileDir string) (cont
 	var allocCtx context.Context
 	var allocCancel context.CancelFunc
 	if browserURL != "" {
-		allocCtx, allocCancel = chromedp.NewRemoteAllocator(ctx, browserURL)
+		allocCtx, allocCancel = remote.NewAllocator(ctx, browserURL)
 	} else {
 		if strings.TrimSpace(profileDir) == "" {
 			return nil, nil, fmt.Errorf("chrome profile directory is required for headless Canvas automation")
@@ -188,7 +189,7 @@ func newBrowserContext(ctx context.Context, browserURL, profileDir string) (cont
 // a no-op once the profile's session is valid, so most invocations pay only
 // the cost of the initial navigate+check.
 func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, base, username, password string) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
-	if err := run(ctx, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(ctx, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("open Canvas: %w", err)
 	}
 	var loginPage bool
@@ -196,7 +197,7 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 	if c.loginPageDetected != nil {
 		loginPage, checkErr = c.loginPageDetected(ctx)
 	} else {
-		checkErr = run(ctx, chromedp.Evaluate(loginPageDetectedJS, &loginPage))
+		checkErr = run(ctx, evaluateInto(loginPageDetectedJS, &loginPage))
 	}
 	if checkErr != nil {
 		return fmt.Errorf("check Canvas login state: %w", checkErr)
@@ -211,21 +212,21 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 		return c.submitLogin(ctx, username, password)
 	}
 	if err := run(ctx,
-		chromedp.WaitVisible(usernameSelector, chromedp.ByQuery),
-		chromedp.SendKeys(usernameSelector, username, chromedp.ByQuery),
-		chromedp.SendKeys(passwordSelector, password, chromedp.ByQuery),
-		chromedp.Click(loginButtonSelector, chromedp.ByQuery),
+		chromedp.WaitVisible(chromedp.CSS(usernameSelector)),
+		chromedp.SendKeys(chromedp.CSS(usernameSelector), username),
+		chromedp.SendKeys(chromedp.CSS(passwordSelector), password),
+		chromedp.Click(chromedp.CSS(loginButtonSelector)),
 		// Submitting triggers a real navigation (often through an SSO
 		// redirect chain); evaluating JS in the same instant the execution
 		// context is torn down for that navigation intermittently fails
 		// with a CDP "target navigated or closed" error. Let the new
 		// document settle and become ready before polling its state.
 		chromedp.Sleep(2*time.Second),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.WaitReady(chromedp.CSS("body")),
 	); err != nil {
 		return fmt.Errorf("submit Canvas login: %w", err)
 	}
-	if err := runResilient(ctx, run, chromedp.Poll(loginSucceededJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+	if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](loginSucceededJS, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
 		return fmt.Errorf("log in to Canvas (check CANVAS_USERNAME / CANVAS_PASSWORD): %w", err)
 	}
 	return nil
@@ -259,7 +260,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
@@ -269,7 +270,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	base.Path = "/courses/" + url.PathEscape(req.CourseID) + "/banks"
 	base.RawQuery = ""
 
-	if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return Result{}, fmt.Errorf("open Item Banks: %w", err)
 	}
 	name := jsString(req.BankName)
@@ -311,10 +312,10 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if !opened {
 			return Result{}, fmt.Errorf(`open create bank dialog: "Create Bank" button not found`)
 		}
-		if err := run(browser, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.WaitVisible(chromedp.CSS("[role=dialog] input"))); err != nil {
 			return Result{}, fmt.Errorf("wait for bank-name field: %w", err)
 		}
-		if err := run(browser, chromedp.SendKeys("[role=dialog] input", req.BankName, chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.SendKeys(chromedp.CSS("[role=dialog] input"), req.BankName)); err != nil {
 			return Result{}, fmt.Errorf("fill bank name: %w", err)
 		}
 		// The wait above resolves to "[role=dialog] input" (the bank-NAME text
@@ -322,7 +323,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// specifically for the checkbox itself before clicking it so the click
 		// target always matches an element this step actually confirmed is
 		// visible first.
-		if err := run(browser, chromedp.WaitVisible(shareWithCourseCheckboxSelector, chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.WaitVisible(chromedp.CSS(shareWithCourseCheckboxSelector))); err != nil {
 			return Result{}, fmt.Errorf("wait for share-with-course checkbox: %w", err)
 		}
 		// Live-confirmed root cause (docs/item-bank-import-flake.md): a
@@ -356,7 +357,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// (e.g. while still validating the name/checkbox), so a click right
 		// after WaitVisible alone could silently fire on a still-disabled
 		// button, reporting success while never actually submitting.
-		if err := run(browser, chromedp.WaitEnabled(createBankSubmitSelector, chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.WaitEnabled(chromedp.CSS(createBankSubmitSelector))); err != nil {
 			return Result{}, fmt.Errorf("wait for create bank submit button: %w", err)
 		}
 		submitted, err := c.evaluateBool(browser, run, clickSelectorJS(createBankSubmitSelector))
@@ -369,7 +370,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		if err := run(browser, chromedp.Sleep(500*time.Millisecond)); err != nil {
 			return Result{}, fmt.Errorf("submit create bank: %w", err)
 		}
-		if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 			return Result{}, fmt.Errorf("return to Item Banks: %w", err)
 		}
 		// Verify the bank actually exists in the course's bank list before
@@ -425,7 +426,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if !opened {
 		return Result{}, fmt.Errorf("open Item Bank %q: bank not found in list", req.BankName)
 	}
-	if err := run(browser, chromedp.WaitVisible(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
+	if err := run(browser, chromedp.WaitVisible(chromedp.CSS(`button[data-popover-trigger="true"]`))); err != nil {
 		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
 	}
 	// Recorded before the import dialog opens so a later timeout-recovery
@@ -464,7 +465,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	// Nothing settled between opening the popover and clicking its menu item
 	// before — the menu is InstUI-animated in, so wait for it to actually
 	// render before trying to click inside it.
-	if err := run(browser, chromedp.WaitVisible(`[role="menuitem"]`, chromedp.ByQuery)); err != nil {
+	if err := run(browser, chromedp.WaitVisible(chromedp.CSS(`[role="menuitem"]`))); err != nil {
 		return Result{}, fmt.Errorf("wait for import menu: %w", err)
 	}
 	menuItemClicked, err := c.evaluateBool(browser, run, clickSelectorJS(`[role="menuitem"]`))
@@ -476,7 +477,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	}
 	var stage string
 	var stageErr error
-	if err := run(browser, chromedp.SetUploadFiles("input[type=file]", []string{req.Package}, chromedp.ByQuery)); err != nil {
+	if err := run(browser, chromedp.SetUploadFiles(chromedp.CSS("input[type=file]"), []string{req.Package})); err != nil {
 		stage, stageErr = attachPackageStep, err
 	}
 	if stageErr == nil {
@@ -489,7 +490,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		// Import-containing button (e.g. one that later reads "Importing…")
 		// could otherwise let the wait and the click resolve to different
 		// elements.
-		if err := run(browser, chromedp.WaitEnabled(importButtonXPath, chromedp.BySearch)); err != nil {
+		if err := run(browser, chromedp.WaitEnabled(chromedp.Search(importButtonXPath))); err != nil {
 			stage, stageErr = submitImportStep, err
 		}
 		if stageErr == nil {
@@ -502,7 +503,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		}
 	}
 	if stageErr == nil {
-		if err := run(browser, chromedp.Poll(`document.body.innerText.includes('has imported successfully!')`, nil, chromedp.WithPollingTimeout(60*time.Second))); err != nil {
+		if err := run(browser, chromedp.Poll[chromedp.Void](`document.body.innerText.includes('has imported successfully!')`, chromedp.WithPollingTimeout(60*time.Second))); err != nil {
 			stage, stageErr = waitImportCompleteStep, err
 		}
 	}
@@ -532,8 +533,8 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			bankTitle, titleErr = c.bankTitle(browser)
 		} else {
 			titleErr = run(browser,
-				chromedp.Poll(bankTitleMatchesJS(req.ExpectedBankName), nil, chromedp.WithPollingTimeout(30*time.Second)),
-				chromedp.Evaluate(bankTitleJS, &bankTitle),
+				chromedp.Poll[chromedp.Void](bankTitleMatchesJS(req.ExpectedBankName), chromedp.WithPollingTimeout(30*time.Second)),
+				evaluateInto(bankTitleJS, &bankTitle),
 			)
 		}
 		if titleErr != nil {
@@ -618,7 +619,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if c.location != nil {
 		location, locationErr = c.location(browser)
 	} else {
-		locationErr = run(browser, chromedp.Location(&location))
+		locationErr = run(browser, capture(chromedp.Location(), &location))
 	}
 	if locationErr != nil {
 		return Result{}, fmt.Errorf("read Item Bank URL: %w", locationErr)
@@ -645,14 +646,14 @@ func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequ
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
 			return err
 		}
 	}
-	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("open Quizzes: %w", err)
 	}
 	return c.checkQuizCollision(browser, run, QuizTitle(req.BankName))
@@ -694,7 +695,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
@@ -703,7 +704,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	}
 
 	quizTitle := QuizTitle(req.BankName)
-	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return QuizResult{}, fmt.Errorf("open Quizzes: %w", err)
 	}
 	if err := c.checkQuizCollision(browser, run, quizTitle); err != nil {
@@ -737,7 +738,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
 		}},
 		{"wait for quiz setup", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](quizSetupReadyJS, chromedp.WithPollingTimeout(10*time.Second)))
 		}},
 		// selectNewQuizEngineJS reports one of three outcomes rather than a
 		// plain boolean: Canvas doesn't always prompt for an engine choice
@@ -752,16 +753,16 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		// otherwise).
 		{"select New Quizzes if prompted", func(ctx context.Context) error {
 			var outcome string
-			if err := runResilient(ctx, run, chromedp.Evaluate(selectNewQuizEngineJS, &outcome)); err != nil {
+			if err := runResilient(ctx, run, evaluateInto(selectNewQuizEngineJS, &outcome)); err != nil {
 				return err
 			}
 			return interpretEngineChoiceResult(outcome)
 		}},
 		{"wait for quiz title", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery))
+			return runResilient(ctx, run, chromedp.WaitVisible(chromedp.CSS(quizTitleSelector)))
 		}},
 		{"set quiz title", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery))
+			return runResilient(ctx, run, chromedp.SetValue(chromedp.CSS(quizTitleSelector), quizTitle))
 		}},
 		{buildQuizStep, func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Build"))
@@ -779,7 +780,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
 		}},
 		{"wait for Item Bank action", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](addFromBankReadyJS, chromedp.WithPollingTimeout(30*time.Second)))
 		}},
 		{"open Item Bank picker", func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Add from item bank"))
@@ -795,7 +796,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			// Wait for the picker dialog itself to render before searching it
 			// for the bank entry — nothing previously waited between opening
 			// the picker and clicking inside it.
-			if err := runResilient(ctx, run, chromedp.WaitVisible(`[role="dialog"]`, chromedp.ByQuery)); err != nil {
+			if err := runResilient(ctx, run, chromedp.WaitVisible(chromedp.CSS(`[role="dialog"]`))); err != nil {
 				return err
 			}
 			// Live-confirmed: the dialog shell can render before its bank
@@ -826,7 +827,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			// switches to JS dispatch, for the same InstUI hit-test-miss
 			// reason as the create-bank checkbox in Import().
 			addBankXPath := textXPathInsensitive("Add this bank to quiz")
-			if err := runResilient(ctx, run, chromedp.WaitEnabled(addBankXPath, chromedp.BySearch)); err != nil {
+			if err := runResilient(ctx, run, chromedp.WaitEnabled(chromedp.Search(addBankXPath))); err != nil {
 				return err
 			}
 			ok, err := c.evaluateBool(ctx, run, clickXPathJS(addBankXPath))
@@ -844,7 +845,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return runResilient(ctx, run, chromedp.Sleep(1*time.Second))
 		}},
 		{"wait for bank group to appear", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankGroupPresentJS, chromedp.WithPollingTimeout(30*time.Second)))
 		}},
 		{"edit Item Bank group", func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickEditBankGroupJS)
@@ -885,15 +886,15 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return nil
 		}},
 		{"set question count", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Tasks{
+			return runResilient(ctx, run, chromedp.Steps(
 				// Deliberately left as chromedp.Click, not JS dispatch: the
 				// following SendKeys needs real keyboard focus on this InstUI
 				// NumberInput, which a JS .click() doesn't reliably give it.
 				// Do not "fix" this into clickJS/evaluateBool without checking
 				// that focus still works for the SendKeys below.
-				chromedp.Click(questionCountSelector, chromedp.ByQuery),
-				chromedp.SendKeys(questionCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery),
-			})
+				chromedp.Click(chromedp.CSS(questionCountSelector)),
+				chromedp.SendKeys(chromedp.CSS(questionCountSelector), fmt.Sprintf("%d", req.QuestionCount)),
+			))
 		}},
 		{"save Item Bank group", func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Done"))
@@ -906,7 +907,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return nil
 		}},
 		{"verify random group", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](randomGroupJS(req.BankName, req.QuestionCount), chromedp.WithPollingTimeout(10*time.Second)))
 		}},
 	}
 	for _, step := range steps {
@@ -919,7 +920,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	if c.quizLocation != nil {
 		quizURL, locationErr = c.quizLocation(browser)
 	} else {
-		locationErr = run(browser, chromedp.Location(&quizURL))
+		locationErr = run(browser, capture(chromedp.Location(), &quizURL))
 	}
 	if locationErr != nil {
 		return QuizResult{}, fmt.Errorf("read quiz URL: %w", locationErr)
@@ -948,20 +949,20 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedpRun, quizURL, bankName string, count int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for range 3 {
-		if err := runResilient(ctx, run, chromedp.Tasks{
-			chromedp.Sleep(2 * time.Second),
+		if err := runResilient(ctx, run, chromedp.Steps(
+			chromedp.Sleep(2*time.Second),
 			chromedp.Navigate(quizURL),
-			chromedp.WaitReady("body", chromedp.ByQuery),
-			chromedp.Sleep(2 * time.Second),
-		}); err != nil {
+			chromedp.WaitReady(chromedp.CSS("body")),
+			chromedp.Sleep(2*time.Second),
+		)); err != nil {
 			lastErr = err
 			continue
 		}
-		if err := runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankGroupPresentJS, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
 			lastErr = err
 			continue
 		}
-		if err := runResilient(ctx, run, chromedp.Poll(randomGroupJS(bankName, count), nil, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](randomGroupJS(bankName, count), chromedp.WithPollingTimeout(10*time.Second))); err != nil {
 			lastErr = err
 			continue
 		}
@@ -997,16 +998,16 @@ func clickBankRowJS(primary, fallback string) string {
 // bankName or expectedBankName, waiting for its actions button to confirm
 // the detail page — not just the list page — actually finished rendering
 // before a caller polls anything on it.
-func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks {
-	return chromedp.Tasks{
-		chromedp.Sleep(2 * time.Second),
+func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Action[chromedp.Void] {
+	return chromedp.Steps(
+		chromedp.Sleep(2*time.Second),
 		chromedp.Navigate(banksURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.WaitReady(chromedp.CSS("body")),
 		chromedp.Sleep(time.Second),
-		chromedp.Evaluate(clickBankRowJS(bankName, expectedBankName), nil),
-		chromedp.Sleep(2 * time.Second),
-		chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery),
-	}
+		chromedp.Evaluate[chromedp.Void](clickBankRowJS(bankName, expectedBankName)),
+		chromedp.Sleep(2*time.Second),
+		chromedp.WaitVisible(chromedp.CSS(`button[aria-haspopup="true"]`)),
+	)
 }
 
 // recoverStuckImport re-navigates fresh to the Item Banks list and reopens
@@ -1055,7 +1056,7 @@ func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpR
 			return n, err == nil
 		}
 		var n int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &n))
+		err := run(ctx, evaluateInto(bankItemCountJS, &n))
 		return n, err == nil
 	}
 	first, ok := read()
@@ -1103,7 +1104,7 @@ func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chro
 				continue
 			}
 		}
-		if err := runResilient(ctx, run, chromedp.Poll(bankItemCountMatchesJS(expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankItemCountMatchesJS(expected), chromedp.WithPollingTimeout(30*time.Second))); err != nil {
 			cancel()
 			if !isTimeoutLike(err) {
 				return 0, err
@@ -1112,7 +1113,7 @@ func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chro
 			continue
 		}
 		var itemCount int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &itemCount))
+		err := run(ctx, evaluateInto(bankItemCountJS, &itemCount))
 		cancel()
 		if err != nil {
 			return 0, err
@@ -1157,7 +1158,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 		clickCheck = evalBool
 		pollCheck = func(ctx context.Context, js string, _ time.Duration) (bool, error) { return evalBool(ctx, js) }
 	}
-	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 		return fmt.Errorf("open Item Banks: %w", err)
 	}
 	// The accessible name ("Edit bank {title}") comes from a visually-hidden
@@ -1180,7 +1181,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 	if !opened {
 		return fmt.Errorf("open edit bank dialog: %q not found", "Edit bank "+oldTitle)
 	}
-	if err := run(ctx, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
+	if err := run(ctx, chromedp.WaitVisible(chromedp.CSS("[role=dialog] input"))); err != nil {
 		return fmt.Errorf("wait for bank-name field: %w", err)
 	}
 	// chromedp.Clear sets the DOM value directly, which this React-controlled
@@ -1197,8 +1198,8 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 		// SendKeys needs real keyboard focus on this React-controlled input,
 		// which a JS .click() doesn't reliably give it. Do not "fix" this into
 		// clickJS/evaluateBool without checking that focus still works.
-		chromedp.Click("[role=dialog] input", chromedp.ByQuery),
-		chromedp.SendKeys("[role=dialog] input", kb.End+clearOldTitle+newTitle, chromedp.ByQuery),
+		chromedp.Click(chromedp.CSS("[role=dialog] input")),
+		chromedp.SendKeys(chromedp.CSS("[role=dialog] input"), kb.End+clearOldTitle+newTitle),
 	); err != nil {
 		return fmt.Errorf("set bank name: %w", err)
 	}
@@ -1215,7 +1216,7 @@ func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Co
 	// Settle with a Sleep after the navigate, like the rest of this file's
 	// navigate+JS-click sites — WaitReady("body") alone confirms the document
 	// is ready, not that the React bank list has actually finished rendering.
-	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("reopen renamed Item Bank: %w", err)
 	}
 	// Same "body-ready isn't React-ready" race Import()'s post-create-bank
@@ -1259,7 +1260,7 @@ func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRu
 	if c.quizExists != nil {
 		collision, err = c.quizExists(ctx, title)
 	} else {
-		err = run(ctx, chromedp.Evaluate(quizExistsJS(title), &collision))
+		err = run(ctx, evaluateInto(quizExistsJS(title), &collision))
 	}
 	if err != nil {
 		return fmt.Errorf("check quiz title collision: %w", err)
@@ -1288,7 +1289,7 @@ func (c ChromedpImporter) evaluateBool(ctx context.Context, run chromedpRun, js 
 // instead of discarding it.
 func evaluateBoolViaRun(ctx context.Context, run chromedpRun, js string) (bool, error) {
 	var ok bool
-	err := runResilient(ctx, run, chromedp.Evaluate(js, &ok))
+	err := runResilient(ctx, run, evaluateInto(js, &ok))
 	return ok, err
 }
 
@@ -1333,7 +1334,7 @@ func (c ChromedpImporter) evaluatePollBool(ctx context.Context, run chromedpRun,
 // "not found"; only report the clean (false, nil) when ctx is still live and
 // it was genuinely this poll's own timeout that elapsed.
 func evaluatePollBoolViaRun(ctx context.Context, run chromedpRun, js string, timeout time.Duration) (bool, error) {
-	err := runResilient(ctx, run, chromedp.Poll(js, nil, chromedp.WithPollingTimeout(timeout)))
+	err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](js, chromedp.WithPollingTimeout(timeout)))
 	if err != nil {
 		if isTimeoutLike(err) {
 			if ctx.Err() != nil {
@@ -1701,4 +1702,27 @@ func xpathString(s string) string {
 		}
 	}
 	return "concat(" + strings.Join(quoted, ",") + ")"
+}
+
+// capture adapts a value-returning chromedp action to the void-only
+// chromedpRun seam: it runs a and stores its result in *out, preserving the
+// out-parameter style the pre-generic chromedp API used. Under a mocked run
+// the action never executes, so *out stays at its zero value — the same
+// reason the evalBool-style test hooks exist.
+func capture[T any](a chromedp.Action[T], out *T) chromedp.Action[chromedp.Void] {
+	return func(ctx context.Context, t *chromedp.Target) (chromedp.Void, error) {
+		v, err := a(ctx, t)
+		if err != nil {
+			return chromedp.Void{}, err
+		}
+		*out = v
+		return chromedp.Void{}, nil
+	}
+}
+
+// evaluateInto evaluates js and stores the decoded result in *out. Like the
+// old Evaluate(js, &out), a JS null/undefined result for a non-nilable T is
+// returned as chromedp.ErrJSNull / chromedp.ErrJSUndefined.
+func evaluateInto[T any](js string, out *T) chromedp.Action[chromedp.Void] {
+	return capture(chromedp.Evaluate[T](js), out)
 }
