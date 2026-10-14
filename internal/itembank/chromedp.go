@@ -232,7 +232,7 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 	// navigated or closed" error. runResilient retries exactly that error, and
 	// the poll itself only succeeds once the new document no longer shows the
 	// login form, so no fixed settle delay is needed.
-	if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](loginSucceededJS, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+	if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](loginSucceededJS(canvasOrigin(base)), chromedp.WithPollingTimeout(20*time.Second))); err != nil {
 		return fmt.Errorf("log in to Canvas (check CANVAS_USERNAME / CANVAS_PASSWORD): %w", err)
 	}
 	return nil
@@ -1597,8 +1597,29 @@ const (
 	loginButtonSelector = `form button[type="submit"]`
 
 	loginPageDetectedJS = `Boolean(document.querySelector('#username'))`
-	loginSucceededJS    = `!document.querySelector('#username')`
 )
+
+// loginSucceededJS is true once the page shows no login form AND is back on
+// origin (the Canvas origin ensureSession logged in to). The origin check
+// keeps the poll from passing on an SSO interstitial or IdP page that merely
+// lacks a #username field while the redirect chain back into Canvas is still
+// in flight. An empty origin (unparseable base URL) falls back to the
+// form-absence check alone.
+func loginSucceededJS(origin string) string {
+	if origin == "" {
+		return `!document.querySelector('#username')`
+	}
+	return `!document.querySelector('#username') && location.origin === ` + jsString(origin)
+}
+
+// canvasOrigin returns base's scheme://host, or "" when it can't be parsed.
+func canvasOrigin(base string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
 
 // interpretEngineChoiceResult turns selectNewQuizEngineJS's three-way string
 // result into an error/no-error decision for CreateRandomQuiz's "select New

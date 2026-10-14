@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -272,6 +273,8 @@ func TestChromedpImporterRecoverStuckImport_Table(t *testing.T) {
 		{name: "unstable reads forever", baseline: 0, reads: []int{3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76}, want: false},
 		{name: "list navigation fails", baseline: 0, reads: []int{3, 3}, runErrAt: 1, want: false},
 		{name: "reopening the bank fails", baseline: 0, reads: []int{3, 3}, runErrAt: 3, want: false},
+		{name: "row-ready wait timeout is tolerated and the read proceeds", baseline: 0, reads: []int{-1, 76, 76}, runErrAt: 2, runErr: errors.New("waiting for function failed: timeout"), want: true},
+		{name: "row-ready wait hard failure aborts recovery", baseline: 0, reads: []int{-1, 76, 76}, runErrAt: 2, want: false},
 		{name: "reopen row miss is retried", baseline: 0, reads: []int{3, 3, 3, 3}, runErrAt: 3, runErr: errBankRowNotFound, want: true, renavs: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1067,38 +1070,54 @@ func TestNewBrowserContext_RequiresProfileDirWhenHeadless(t *testing.T) {
 func TestRunResilient_Table(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name      string
-		failTimes int
-		errMsg    string
-		wantCalls int
-		wantErr   string
+		name        string
+		failTimes   int
+		errMsg      string
+		wantCalls   int
+		wantErr     string
+		wantElapsed time.Duration
 	}{
 		{name: "succeeds first try", wantCalls: 1},
 		{name: "retries transient context error then succeeds", failTimes: 2, errMsg: "Cannot find context with specified id (-32000)", wantCalls: 3},
 		{name: "retries navigated-or-closed error then succeeds", failTimes: 1, errMsg: "Inspected target navigated or closed (-32000)", wantCalls: 2},
-		{name: "exhausts retries on persistent transient error", failTimes: 99, errMsg: "context with specified id", wantCalls: 4, wantErr: "context with specified id"},
+		{name: "exhausts retries on persistent transient error", failTimes: 99, errMsg: "context with specified id", wantCalls: 4, wantErr: "context with specified id", wantElapsed: 2 * time.Second},
+		{name: "teardown mid-wait retries then fails when it never clears", failTimes: 99, errMsg: "Inspected target navigated or closed (-32000)", wantCalls: 4, wantErr: "navigated or closed", wantElapsed: 2 * time.Second},
 		{name: "non-transient error returns immediately", failTimes: 99, errMsg: "browser failed", wantCalls: 1, wantErr: "browser failed"},
+		{name: "poll timeout is not retried", failTimes: 99, errMsg: "waiting for function failed: timeout", wantCalls: 1, wantErr: "timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			calls := 0
-			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
-				calls++
-				if calls <= tt.failTimes {
-					return errors.New(tt.errMsg)
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
+					calls++
+					if calls <= tt.failTimes {
+						return errors.New(tt.errMsg)
+					}
+					return nil
 				}
-				return nil
-			}
-			err := runResilient(t.Context(), run, chromedp.Sleep(0))
-			if tt.wantErr == "" && err != nil {
-				t.Fatalf("runResilient() error = %v", err)
-			}
-			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Fatalf("runResilient() error = %v, want %q", err, tt.wantErr)
-			}
-			if calls != tt.wantCalls {
-				t.Fatalf("run() calls = %d, want %d", calls, tt.wantCalls)
-			}
+				start := time.Now()
+				err := runResilient(t.Context(), run, chromedp.Sleep(0))
+				elapsed := time.Since(start)
+				if tt.wantErr == "" && err != nil {
+					t.Fatalf("runResilient() error = %v", err)
+				}
+				if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+					t.Fatalf("runResilient() error = %v, want %q", err, tt.wantErr)
+				}
+				if calls != tt.wantCalls {
+					t.Fatalf("run() calls = %d, want %d", calls, tt.wantCalls)
+				}
+				// Fake time: each transient failure backs off 500ms, including
+				// the last one before giving up.
+				wantElapsed := tt.wantElapsed
+				if wantElapsed == 0 && tt.failTimes > 0 && tt.failTimes < 4 && tt.errMsg != "browser failed" {
+					wantElapsed = time.Duration(tt.failTimes) * 500 * time.Millisecond
+				}
+				if elapsed != wantElapsed {
+					t.Fatalf("runResilient() elapsed = %v, want %v", elapsed, wantElapsed)
+				}
+			})
 		})
 	}
 }
