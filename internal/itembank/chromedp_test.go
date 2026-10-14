@@ -220,6 +220,23 @@ func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *test
 	}
 }
 
+func TestRadioLabelPresentJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, text, want string
+	}{
+		{name: "lowercases the needle", text: "Randomly select questions", want: `"randomly select questions"`},
+		{name: "escapes quotes", text: `Say "x"`, want: `say \"x\"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := radioLabelPresentJS(tt.text); !strings.Contains(got, tt.want) || !strings.Contains(got, "querySelectorAll('label')") {
+				t.Fatalf("radioLabelPresentJS(%q) = %q, want label query containing %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 // sameBatch reports whether a and b were built by the same func literal, i.e.
 // are the same kind of action batch. chromedp.Action[T] is a func type, so a
 // mocked run can't type-assert on it; the code pointer is the identity shared
@@ -1644,34 +1661,34 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 		wantEmptyURL   bool
 		expectedCalls  int
 	}{
-		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
-		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 15},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 15},
 		{name: "invalid request", wantErr: "request is required"},
 		{name: "invalid count", count: 0, wantErr: "must be positive"},
 		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
 		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
-		{name: "set title", count: 2, failAt: 6, expectedCalls: 6, wantErr: "set quiz title"},
+		{name: "set title", count: 2, failAt: 5, expectedCalls: 5, wantErr: "set quiz title"},
 		// "Build" is now clicked via evaluateBool (JS dispatch), not a plain
 		// run() call, so its miss is injected the same way as the other
 		// InstUI click sites below (evalBoolFailOn), not failAt.
-		{name: "build quiz", count: 2, evalBoolFailOn: "build", expectedCalls: 6, wantErr: "build quiz"},
-		{name: "add bank not enabled", count: 2, failAt: 10, expectedCalls: 10, wantErr: "add Item Bank to quiz"},
-		{name: "bank group never appears", count: 2, failAt: 12, expectedCalls: 12, wantErr: "wait for bank group to appear"},
-		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "Edit Bank containing questions"},
-		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 13, wantErr: "Randomly select questions"},
-		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 14, wantErr: "Number of questions"},
-		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "evalBool boom"},
-		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 13, wantErr: "evalBool boom"},
-		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 14, wantErr: "evalBool boom"},
+		{name: "build quiz", count: 2, evalBoolFailOn: "build", expectedCalls: 5, wantErr: "build quiz"},
+		{name: "add bank not enabled", count: 2, failAt: 8, expectedCalls: 8, wantErr: "add Item Bank to quiz"},
+		{name: "bank group never appears", count: 2, failAt: 9, expectedCalls: 9, wantErr: "wait for bank group to appear"},
+		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 9, wantErr: "Edit Bank containing questions"},
+		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 10, wantErr: "Randomly select questions"},
+		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 10, wantErr: "Number of questions"},
+		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 9, wantErr: "evalBool boom"},
+		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 10, wantErr: "evalBool boom"},
+		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 10, wantErr: "evalBool boom"},
 		// "Done" is likewise clicked via evaluateBool now.
-		{name: "save group", count: 2, evalBoolFailOn: "done", expectedCalls: 15, wantErr: "save Item Bank group"},
-		{name: "verify group", count: 2, failAt: 16, expectedCalls: 16, wantErr: "verify random group"},
-		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 16, wantErr: "read quiz URL"},
-		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 16, wantErr: "quiz URL is empty", wantEmptyURL: true},
-		{name: "persistence not confirmed", count: 2, failFrom: 17, expectedCalls: 19, wantErr: "did not persist", wantEmptyURL: true},
-		{name: "persistence retries then succeeds", count: 3, failAt: 17, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 20},
-		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 18, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 21},
-		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 19, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 22},
+		{name: "save group", count: 2, evalBoolFailOn: "done", expectedCalls: 11, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 12, expectedCalls: 12, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 12, wantErr: "read quiz URL"},
+		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 12, wantErr: "quiz URL is empty", wantEmptyURL: true},
+		{name: "persistence not confirmed", count: 2, failFrom: 13, expectedCalls: 15, wantErr: "did not persist", wantEmptyURL: true},
+		{name: "persistence retries then succeeds", count: 3, failAt: 13, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 16},
+		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 14, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
+		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 15, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 18},
 		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
 		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
 	}
