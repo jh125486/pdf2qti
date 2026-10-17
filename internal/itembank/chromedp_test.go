@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -85,7 +86,7 @@ func TestChromedpImporterImport_Table(t *testing.T) { //nolint:gocyclo // table 
 			t.Parallel()
 			calls := 0
 			bankExistsCalls := 0
-			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action) error {
+			importer := ChromedpImporter{run: func(_ context.Context, actions ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -212,12 +213,37 @@ func TestIsTimeoutLike_Table(t *testing.T) {
 func TestChromedpImporterRecoverStuckImport_UnknownBaselineNeverRecovers(t *testing.T) {
 	t.Parallel()
 	importer := ChromedpImporter{
-		run:           func(context.Context, ...chromedp.Action) error { return nil },
+		run:           func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 		bankItemCount: func(context.Context) (int, error) { return 5, nil }, // bank has content
 	}
 	if got := importer.recoverStuckImport(t.Context(), importer.run, "https://canvas.example.edu/courses/7/banks", "Bank", "", -1); got {
 		t.Fatal("recoverStuckImport() = true with an unknown (-1) baseline, want false")
 	}
+}
+
+func TestRadioLabelPresentJS_Table(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, text, want string
+	}{
+		{name: "lowercases the needle", text: "Randomly select questions", want: `"randomly select questions"`},
+		{name: "escapes quotes", text: `Say "x"`, want: `say \"x\"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := radioLabelPresentJS(tt.text); !strings.Contains(got, tt.want) || !strings.Contains(got, "querySelectorAll('label')") {
+				t.Fatalf("radioLabelPresentJS(%q) = %q, want label query containing %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
+// sameBatch reports whether a and b were built by the same func literal, i.e.
+// are the same kind of action batch. chromedp.Action[T] is a func type, so a
+// mocked run can't type-assert on it; the code pointer is the identity shared
+// by every closure a given literal produces.
+func sameBatch(a, b chromedp.Action[chromedp.Void]) bool {
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
 }
 
 // TestChromedpImporterRecoverStuckImport_Table covers the list-row growth
@@ -247,6 +273,8 @@ func TestChromedpImporterRecoverStuckImport_Table(t *testing.T) {
 		{name: "unstable reads forever", baseline: 0, reads: []int{3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76, 3, 76}, want: false},
 		{name: "list navigation fails", baseline: 0, reads: []int{3, 3}, runErrAt: 1, want: false},
 		{name: "reopening the bank fails", baseline: 0, reads: []int{3, 3}, runErrAt: 3, want: false},
+		{name: "row-ready wait timeout is tolerated and the read proceeds", baseline: 0, reads: []int{-1, 76, 76}, runErrAt: 2, runErr: errors.New("waiting for function failed: timeout"), want: true},
+		{name: "row-ready wait hard failure aborts recovery", baseline: 0, reads: []int{-1, 76, 76}, runErrAt: 2, want: false},
 		{name: "reopen row miss is retried", baseline: 0, reads: []int{3, 3, 3, 3}, runErrAt: 3, runErr: errBankRowNotFound, want: true, renavs: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -254,11 +282,11 @@ func TestChromedpImporterRecoverStuckImport_Table(t *testing.T) {
 			calls := 0
 			reads := 0
 			navs := 0
-			navLen := len(navigateBanksListTasks(""))
+			navBatch := navigateBanksListTasks("")
 			importer := ChromedpImporter{
-				run: func(_ context.Context, actions ...chromedp.Action) error {
+				run: func(_ context.Context, actions ...chromedp.Action[chromedp.Void]) error {
 					calls++
-					if tasks, ok := actions[0].(chromedp.Tasks); ok && len(tasks) == navLen {
+					if sameBatch(actions[0], navBatch) {
 						navs++
 					}
 					if calls == tt.runErrAt {
@@ -314,7 +342,7 @@ func TestChromedpImporterImport_ListBaselineAndExpectedTotals(t *testing.T) { //
 			openedAfterReads := -1
 			wantOpenJS := clickBankRowJS("Bank", "")
 			importer := ChromedpImporter{
-				run:      func(context.Context, ...chromedp.Action) error { return nil },
+				run:      func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				findBank: func(context.Context, string) (bool, error) { return tt.existing, nil },
 				evalBool: func(_ context.Context, js string) (bool, error) {
 					if js == wantOpenJS {
@@ -359,10 +387,12 @@ func TestChromedpImporterImport_ListBaselineAndExpectedTotals(t *testing.T) { //
 
 // TestChromedpImporterPollBankItemCount_UsesListPredicate is the regression
 // guard for the detail-page pagination bug (50 cards per page, so banks over
-// 50 questions never matched): it drives the real pollBankItemCount path
-// through the run mock, extracts the expression the poll action would
-// evaluate in the page, and requires it to be the list-row predicate and not
-// the old detail-page card regex.
+// 50 questions never matched). chromedp.Poll now returns an opaque closure, so
+// the predicate it evaluates can no longer be read back out of the action;
+// instead this checks that pollBankItemCount issues exactly one poll for a
+// matching list total, and that the predicate it is built from
+// (bankListCountMatchesJS) is the list-row predicate and not the old
+// detail-page card regex.
 func TestChromedpImporterPollBankItemCount_UsesListPredicate(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -375,14 +405,13 @@ func TestChromedpImporterPollBankItemCount_UsesListPredicate(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var predicates []string
+			polls := 0
+			navBatch := navigateBanksListTasks("")
+			openBatch := openBankFromListTasks("", "")
 			importer := ChromedpImporter{
-				run: func(_ context.Context, actions ...chromedp.Action) error {
-					if _, isTasks := actions[0].(chromedp.Tasks); !isTasks {
-						// chromedp.Poll's unexported predicate field holds
-						// "return (<expression>);"; reflect can read a string
-						// field without it being exported.
-						predicates = append(predicates, reflect.ValueOf(actions[0]).Elem().FieldByName("predicate").String())
+				run: func(_ context.Context, actions ...chromedp.Action[chromedp.Void]) error {
+					if !sameBatch(actions[0], navBatch) && !sameBatch(actions[0], openBatch) {
+						polls++
 					}
 					return nil
 				},
@@ -395,14 +424,15 @@ func TestChromedpImporterPollBankItemCount_UsesListPredicate(t *testing.T) {
 			if got != tt.expected {
 				t.Fatalf("pollBankItemCount() = %d, want %d", got, tt.expected)
 			}
-			if len(predicates) != 1 {
-				t.Fatalf("poll actions = %d, want 1", len(predicates))
+			if polls != 1 {
+				t.Fatalf("poll actions = %d, want 1", polls)
 			}
-			if want := "return (" + bankListCountMatchesJS(tt.primary, tt.fallback, tt.expected) + ");"; predicates[0] != want {
-				t.Fatalf("poll predicate = %q, want the list-row predicate %q", predicates[0], want)
+			predicate := bankListCountMatchesJS(tt.primary, tt.fallback, tt.expected)
+			if !strings.Contains(predicate, bankRowButtonFinderJS(jsString(tt.primary))) {
+				t.Fatalf("poll predicate = %q, want it built on the list-row finder", predicate)
 			}
-			if strings.Contains(predicates[0], "Question Question") || strings.Contains(predicates[0], "innerText.match") {
-				t.Fatalf("poll predicate = %q, must not use the old detail-page card count", predicates[0])
+			if strings.Contains(predicate, "Question Question") || strings.Contains(predicate, "innerText.match") {
+				t.Fatalf("poll predicate = %q, must not use the old detail-page card count", predicate)
 			}
 		})
 	}
@@ -434,7 +464,7 @@ func TestChromedpImporterStableBankItemCount_Table(t *testing.T) {
 			t.Parallel()
 			reads := 0
 			importer := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error { return tt.sleepErr },
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error { return tt.sleepErr },
 				bankItemCount: func(context.Context) (int, error) {
 					reads++
 					if reads == tt.readErrAt {
@@ -483,7 +513,7 @@ func TestChromedpImporterImport_RecoversFromUploadTimeout(t *testing.T) {
 			t.Parallel()
 			calls := 0
 			importer := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error {
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if calls == tt.failAt {
 						return tt.failErr
@@ -787,15 +817,17 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) { //nolint:gocycl
 			pollAttempts := 0
 			openAttempts := 0
 			calls := 0
+			openBatch := openBankFromListTasks("", "")
+			navBatch := navigateBanksListTasks("")
 			importer := ChromedpImporter{
-				run: func(_ context.Context, actions ...chromedp.Action) error {
+				run: func(_ context.Context, actions ...chromedp.Action[chromedp.Void]) error {
 					calls++
-					// runResilient always calls run with a single chromedp.Action, so
-					// len(actions) can't distinguish the list-navigate batch (a
-					// chromedp.Tasks bundling 4 sub-actions) or the open-bank batch (3)
-					// from the lone Poll call; type-assert and count instead.
-					tasks, isTasks := actions[0].(chromedp.Tasks)
-					if !isTasks {
+					// runResilient always calls run with a single action; identify
+					// the list-navigate and open-bank batches by their func literal
+					// (sameBatch), and treat everything else as the lone Poll call.
+					isNav := sameBatch(actions[0], navBatch)
+					isOpen := sameBatch(actions[0], openBatch)
+					if !isNav && !isOpen {
 						pollAttempts++
 						if pollAttempts <= tt.pollFailCount {
 							if tt.pollErr != nil {
@@ -805,7 +837,7 @@ func TestChromedpImporterPollBankItemCount_Table(t *testing.T) { //nolint:gocycl
 						}
 						return nil
 					}
-					if len(tasks) == len(openBankFromListTasks("", "")) {
+					if isOpen {
 						openAttempts++
 						if openAttempts <= tt.openFailCount {
 							return errors.New("context deadline exceeded")
@@ -844,7 +876,7 @@ func TestChromedpImporterImport_AbortsOnUnknownBaseline(t *testing.T) {
 	t.Parallel()
 	calls := 0
 	importer := ChromedpImporter{
-		run:      func(context.Context, ...chromedp.Action) error { calls++; return nil },
+		run:      func(context.Context, ...chromedp.Action[chromedp.Void]) error { calls++; return nil },
 		findBank: func(context.Context, string) (bool, error) { return true, nil }, // existing bank
 		// The mocked run field never populates chromedp.Evaluate's
 		// out-parameter, so the "open bank" click (routed through
@@ -896,7 +928,7 @@ func TestChromedpImporterImport_VerifiesMetadata(t *testing.T) {
 			calls := 0
 			bankItemCountCalls := 0
 			importer := ChromedpImporter{
-				run:       func(context.Context, ...chromedp.Action) error { calls++; return nil },
+				run:       func(context.Context, ...chromedp.Action[chromedp.Void]) error { calls++; return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.title, tt.titleErr },
 				// The mocked run field never populates chromedp.Evaluate's
@@ -959,7 +991,7 @@ func TestChromedpImporterImport_RenamesBankToRequestedName(t *testing.T) {
 			var renameCalled bool
 			var gotOld, gotNew string
 			importer := ChromedpImporter{
-				run:       func(context.Context, ...chromedp.Action) error { return nil },
+				run:       func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				findBank:  func(context.Context, string) (bool, error) { return true, nil },
 				bankTitle: func(context.Context) (string, error) { return tt.canvasTitle, nil },
 				// The mocked run field never populates chromedp.Evaluate's
@@ -1038,38 +1070,54 @@ func TestNewBrowserContext_RequiresProfileDirWhenHeadless(t *testing.T) {
 func TestRunResilient_Table(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name      string
-		failTimes int
-		errMsg    string
-		wantCalls int
-		wantErr   string
+		name        string
+		failTimes   int
+		errMsg      string
+		wantCalls   int
+		wantErr     string
+		wantElapsed time.Duration
 	}{
 		{name: "succeeds first try", wantCalls: 1},
 		{name: "retries transient context error then succeeds", failTimes: 2, errMsg: "Cannot find context with specified id (-32000)", wantCalls: 3},
 		{name: "retries navigated-or-closed error then succeeds", failTimes: 1, errMsg: "Inspected target navigated or closed (-32000)", wantCalls: 2},
-		{name: "exhausts retries on persistent transient error", failTimes: 99, errMsg: "context with specified id", wantCalls: 4, wantErr: "context with specified id"},
+		{name: "exhausts retries on persistent transient error", failTimes: 99, errMsg: "context with specified id", wantCalls: 4, wantErr: "context with specified id", wantElapsed: 2 * time.Second},
+		{name: "teardown mid-wait retries then fails when it never clears", failTimes: 99, errMsg: "Inspected target navigated or closed (-32000)", wantCalls: 4, wantErr: "navigated or closed", wantElapsed: 2 * time.Second},
 		{name: "non-transient error returns immediately", failTimes: 99, errMsg: "browser failed", wantCalls: 1, wantErr: "browser failed"},
+		{name: "poll timeout is not retried", failTimes: 99, errMsg: "waiting for function failed: timeout", wantCalls: 1, wantErr: "timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
-				calls++
-				if calls <= tt.failTimes {
-					return errors.New(tt.errMsg)
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
+					calls++
+					if calls <= tt.failTimes {
+						return errors.New(tt.errMsg)
+					}
+					return nil
 				}
-				return nil
-			}
-			err := runResilient(t.Context(), run, chromedp.Sleep(0))
-			if tt.wantErr == "" && err != nil {
-				t.Fatalf("runResilient() error = %v", err)
-			}
-			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Fatalf("runResilient() error = %v, want %q", err, tt.wantErr)
-			}
-			if calls != tt.wantCalls {
-				t.Fatalf("run() calls = %d, want %d", calls, tt.wantCalls)
-			}
+				start := time.Now()
+				err := runResilient(t.Context(), run, chromedp.Sleep(0))
+				elapsed := time.Since(start)
+				if tt.wantErr == "" && err != nil {
+					t.Fatalf("runResilient() error = %v", err)
+				}
+				if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+					t.Fatalf("runResilient() error = %v, want %q", err, tt.wantErr)
+				}
+				if calls != tt.wantCalls {
+					t.Fatalf("run() calls = %d, want %d", calls, tt.wantCalls)
+				}
+				// Fake time: each transient failure backs off 500ms, including
+				// the last one before giving up.
+				wantElapsed := tt.wantElapsed
+				if wantElapsed == 0 && tt.failTimes > 0 && tt.failTimes < 4 && tt.errMsg != "browser failed" {
+					wantElapsed = time.Duration(tt.failTimes) * 500 * time.Millisecond
+				}
+				if elapsed != wantElapsed {
+					t.Fatalf("runResilient() elapsed = %v, want %v", elapsed, wantElapsed)
+				}
+			})
 		})
 	}
 }
@@ -1102,7 +1150,7 @@ func TestRenameBankUI_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -1146,7 +1194,7 @@ func TestRenameBankUI_Table(t *testing.T) {
 // one-shot, not the underlying poll's retry/timeout behavior.
 func TestRenameBankUI_ReopenChecksBeforeClicking(t *testing.T) {
 	t.Parallel()
-	run := func(context.Context, ...chromedp.Action) error { return nil }
+	run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil }
 	evalBool := func(_ context.Context, js string) (bool, error) {
 		if js == bankExistsJS(jsString("New Name")) {
 			return false, nil // the reopen check never sees the renamed bank appear.
@@ -1346,7 +1394,7 @@ func TestChromedpImporterEnsureSession_Table(t *testing.T) {
 			var submitLoginCalled bool
 			var gotUser, gotPass string
 			importer := ChromedpImporter{
-				run:               func(context.Context, ...chromedp.Action) error { return nil },
+				run:               func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				loginPageDetected: func(context.Context) (bool, error) { return tt.loginPage, tt.loginPageErr },
 				submitLogin: func(_ context.Context, user, pass string) error {
 					submitLoginCalled = true
@@ -1354,7 +1402,7 @@ func TestChromedpImporterEnsureSession_Table(t *testing.T) {
 					return tt.submitLoginErr
 				},
 			}
-			err := importer.ensureSession(t.Context(), func(context.Context, ...chromedp.Action) error { return nil },
+			err := importer.ensureSession(t.Context(), func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				"https://canvas.example.edu", tt.username, tt.password)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("ensureSession() error = %v", err)
@@ -1385,7 +1433,7 @@ func TestChromedpImporterEnsureSession_ProductionPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			calls := 0
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -1427,7 +1475,7 @@ func TestChromedpImporterEnsureSession_ProductionLoginFill(t *testing.T) {
 			// everything after that (fill, submit, poll) runs through the
 			// real chromedp.Action construction via the run stub below, so
 			// this exercises that code without a real browser.
-			run := func(context.Context, ...chromedp.Action) error {
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 				calls++
 				if calls == tt.failAt {
 					return errors.New("browser failed")
@@ -1466,7 +1514,7 @@ func TestChromedpImporterImport_HeadlessEnsuresSession(t *testing.T) {
 			t.Parallel()
 			var loginChecked, loggedIn bool
 			importer := ChromedpImporter{
-				run:      func(context.Context, ...chromedp.Action) error { return nil },
+				run:      func(context.Context, ...chromedp.Action[chromedp.Void]) error { return nil },
 				findBank: func(context.Context, string) (bool, error) { return true, nil },
 				loginPageDetected: func(context.Context) (bool, error) {
 					loginChecked = true
@@ -1632,34 +1680,34 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 		wantEmptyURL   bool
 		expectedCalls  int
 	}{
-		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
-		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 19},
+		{name: "append title", count: 3, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 15},
+		{name: "existing quiz suffix", count: 2, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 15},
 		{name: "invalid request", wantErr: "request is required"},
 		{name: "invalid count", count: 0, wantErr: "must be positive"},
 		{name: "invalid base URL", count: 2, wantErr: "invalid Canvas base URL"},
 		{name: "open quizzes", count: 2, failAt: 1, expectedCalls: 1, wantErr: "open Quizzes"},
-		{name: "set title", count: 2, failAt: 6, expectedCalls: 6, wantErr: "set quiz title"},
+		{name: "set title", count: 2, failAt: 5, expectedCalls: 5, wantErr: "set quiz title"},
 		// "Build" is now clicked via evaluateBool (JS dispatch), not a plain
 		// run() call, so its miss is injected the same way as the other
 		// InstUI click sites below (evalBoolFailOn), not failAt.
-		{name: "build quiz", count: 2, evalBoolFailOn: "build", expectedCalls: 6, wantErr: "build quiz"},
-		{name: "add bank not enabled", count: 2, failAt: 10, expectedCalls: 10, wantErr: "add Item Bank to quiz"},
-		{name: "bank group never appears", count: 2, failAt: 12, expectedCalls: 12, wantErr: "wait for bank group to appear"},
-		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "Edit Bank containing questions"},
-		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 13, wantErr: "Randomly select questions"},
-		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 14, wantErr: "Number of questions"},
-		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 12, wantErr: "evalBool boom"},
-		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 13, wantErr: "evalBool boom"},
-		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 14, wantErr: "evalBool boom"},
+		{name: "build quiz", count: 2, evalBoolFailOn: "build", expectedCalls: 5, wantErr: "build quiz"},
+		{name: "add bank not enabled", count: 2, failAt: 8, expectedCalls: 8, wantErr: "add Item Bank to quiz"},
+		{name: "bank group never appears", count: 2, failAt: 9, expectedCalls: 9, wantErr: "wait for bank group to appear"},
+		{name: "edit control missing", count: 2, evalBoolFailOn: "Edit Bank containing questions", expectedCalls: 9, wantErr: "Edit Bank containing questions"},
+		{name: "random option missing", count: 2, evalBoolFailOn: "randomly select questions", expectedCalls: 10, wantErr: "Randomly select questions"},
+		{name: "question count field missing", count: 2, evalBoolFailOn: "Number of questions", expectedCalls: 10, wantErr: "Number of questions"},
+		{name: "evalBool error propagates", count: 2, evalBoolErrOn: "Edit Bank containing questions", expectedCalls: 9, wantErr: "evalBool boom"},
+		{name: "random option evalBool error", count: 2, evalBoolErrOn: "randomly select questions", expectedCalls: 10, wantErr: "evalBool boom"},
+		{name: "question count evalBool error", count: 2, evalBoolErrOn: "Number of questions", expectedCalls: 10, wantErr: "evalBool boom"},
 		// "Done" is likewise clicked via evaluateBool now.
-		{name: "save group", count: 2, evalBoolFailOn: "done", expectedCalls: 15, wantErr: "save Item Bank group"},
-		{name: "verify group", count: 2, failAt: 16, expectedCalls: 16, wantErr: "verify random group"},
-		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 16, wantErr: "read quiz URL"},
-		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 16, wantErr: "quiz URL is empty", wantEmptyURL: true},
-		{name: "persistence not confirmed", count: 2, failFrom: 17, expectedCalls: 19, wantErr: "did not persist", wantEmptyURL: true},
-		{name: "persistence retries then succeeds", count: 3, failAt: 17, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 20},
-		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 18, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 21},
-		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 19, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 22},
+		{name: "save group", count: 2, evalBoolFailOn: "done", expectedCalls: 11, wantErr: "save Item Bank group"},
+		{name: "verify group", count: 2, failAt: 12, expectedCalls: 12, wantErr: "verify random group"},
+		{name: "read URL", count: 2, locationErr: errors.New("location unavailable"), expectedCalls: 12, wantErr: "read quiz URL"},
+		{name: "empty quiz URL", count: 2, locationURL: "  ", expectedCalls: 12, wantErr: "quiz URL is empty", wantEmptyURL: true},
+		{name: "persistence not confirmed", count: 2, failFrom: 13, expectedCalls: 15, wantErr: "did not persist", wantEmptyURL: true},
+		{name: "persistence retries then succeeds", count: 3, failAt: 13, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 16},
+		{name: "persistence bank-group check fails then retries succeed", count: 3, failAt: 14, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 17},
+		{name: "persistence random-group check fails then retries succeed", count: 3, failAt: 15, wantURL: "https://canvas.example.edu/courses/7/quizzes/9", wantTitle: "Bank Quiz", expectedCalls: 18},
 		{name: "collision", count: 2, collision: true, expectedCalls: 1, wantErr: "already exists"},
 		{name: "collision check error", count: 2, collisionErr: errors.New("lookup unavailable"), expectedCalls: 1, wantErr: "check quiz title collision"},
 	}
@@ -1668,7 +1716,7 @@ func TestChromedpImporterCreateRandomQuiz_Table(t *testing.T) { //nolint:gocyclo
 			t.Parallel()
 			calls := 0
 			creator := ChromedpImporter{
-				run: func(_ context.Context, _ ...chromedp.Action) error {
+				run: func(_ context.Context, _ ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if tt.failAt != 0 && calls == tt.failAt {
 						return errors.New("browser failed")
@@ -1743,7 +1791,7 @@ func TestChromedpImporterEvaluateBool_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := ChromedpImporter{}
-			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return tt.runErr }
 			_, err := c.evaluateBool(t.Context(), run, "true")
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("evaluateBool() error = %v", err)
@@ -1795,7 +1843,7 @@ func TestChromedpImporterEvaluatePollBool_Table(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			run := func(context.Context, ...chromedp.Action) error { return tt.runErr }
+			run := func(context.Context, ...chromedp.Action[chromedp.Void]) error { return tt.runErr }
 			got, err := c.evaluatePollBool(ctx, run, "true", time.Second)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("evaluatePollBool() error = %v", err)
@@ -1833,7 +1881,7 @@ func TestChromedpImporterPreflightRandomQuiz_Table(t *testing.T) {
 			t.Parallel()
 			calls := 0
 			creator := ChromedpImporter{
-				run: func(context.Context, ...chromedp.Action) error {
+				run: func(context.Context, ...chromedp.Action[chromedp.Void]) error {
 					calls++
 					if calls == tt.failAt {
 						return errors.New("browser failed")

@@ -75,7 +75,7 @@ func startBankChrome(t *testing.T) context.Context {
 	t.Cleanup(allocCancel)
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	t.Cleanup(browserCancel)
-	if err := chromedp.Run(browserCtx); err != nil {
+	if err := chromedp.Do(browserCtx); err != nil {
 		t.Skipf("cannot launch Chrome at %s: %v", chromePath, err)
 	}
 	return browserCtx
@@ -148,13 +148,13 @@ func TestBankRowFinders_Chrome(t *testing.T) {
 			var count int
 			var exists, clickedOK bool
 			var clicked string
-			err := chromedp.Run(ctx,
+			err := chromedp.Do(ctx,
 				chromedp.Navigate("data:text/html;charset=utf-8,"+url.PathEscape(tt.page)),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				chromedp.Evaluate(bankListQuestionCountJS(tt.primary, tt.fallback), &count),
-				chromedp.Evaluate(bankExistsJS(jsString(tt.primary)), &exists),
-				chromedp.Evaluate(clickBankRowJS(tt.primary, tt.fallback), &clickedOK),
-				chromedp.Evaluate(`window.clicked || ""`, &clicked),
+				chromedp.WaitReady(chromedp.CSS("body")),
+				evaluateInto(bankListQuestionCountJS(tt.primary, tt.fallback), &count),
+				evaluateInto(bankExistsJS(jsString(tt.primary)), &exists),
+				evaluateInto(clickBankRowJS(tt.primary, tt.fallback), &clickedOK),
+				evaluateInto(`window.clicked || ""`, &clicked),
 			)
 			if err != nil {
 				t.Fatalf("running bank row helpers in Chrome: %v", err)
@@ -199,7 +199,7 @@ func TestBankListQuestionCountJS_Chrome(t *testing.T) {
 	// Start the shared browser on browserCtx itself (not a derived timeout
 	// ctx, whose cancel would tear the browser down); per-case tabs are
 	// children of browserCtx.
-	if err := chromedp.Run(browserCtx); err != nil {
+	if err := chromedp.Do(browserCtx); err != nil {
 		t.Skipf("cannot launch Chrome at %s: %v", chromePath, err)
 	}
 
@@ -240,10 +240,10 @@ func TestBankListQuestionCountJS_Chrome(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tabCtx, 60*time.Second)
 			defer cancel()
 			var got int
-			err := chromedp.Run(ctx,
+			err := chromedp.Do(ctx,
 				chromedp.Navigate("data:text/html;charset=utf-8,"+url.PathEscape(tt.page)),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				chromedp.Evaluate(bankListQuestionCountJS(tt.primary, tt.fallback), &got),
+				chromedp.WaitReady(chromedp.CSS("body")),
+				evaluateInto(bankListQuestionCountJS(tt.primary, tt.fallback), &got),
 			)
 			if err != nil {
 				t.Fatalf("running bankListQuestionCountJS(%q, %q) in Chrome: %v", tt.primary, tt.fallback, err)
@@ -279,11 +279,11 @@ func TestEditBankActionJS_Chrome(t *testing.T) {
 			defer cancel()
 			var ok bool
 			var clicked string
-			err := chromedp.Run(ctx,
+			err := chromedp.Do(ctx,
 				chromedp.Navigate("data:text/html;charset=utf-8,"+url.PathEscape(tt.page)),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				chromedp.Evaluate(editBankActionJS(tt.title), &ok),
-				chromedp.Evaluate(`window.clicked || ""`, &clicked),
+				chromedp.WaitReady(chromedp.CSS("body")),
+				evaluateInto(editBankActionJS(tt.title), &ok),
+				evaluateInto(`window.clicked || ""`, &clicked),
 			)
 			if err != nil {
 				t.Fatalf("running editBankActionJS in Chrome: %v", err)
@@ -320,10 +320,10 @@ func TestOpenBankFromListTasks_ClickResult_Chrome(t *testing.T) {
 			defer tabCancel()
 			ctx, cancel := context.WithTimeout(tabCtx, 60*time.Second)
 			defer cancel()
-			err := chromedp.Run(ctx,
+			err := chromedp.Do(ctx,
 				chromedp.Navigate("data:text/html;charset=utf-8,"+url.PathEscape(tt.page)),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-				openBankFromListTasks(tt.primary, tt.fallback)[0],
+				chromedp.WaitReady(chromedp.CSS("body")),
+				clickBankRowAction(tt.primary, tt.fallback),
 			)
 			if gotNotFound := errors.Is(err, errBankRowNotFound); gotNotFound != tt.wantNotFound {
 				t.Fatalf("click action error = %v, want errBankRowNotFound=%v", err, tt.wantNotFound)
