@@ -233,6 +233,8 @@ func TestExecuteTemplate_Table(t *testing.T) {
 		expected string
 	}{
 		{name: "simple map", tmpl: "Chapter {{.chapter}}", data: map[string]any{"chapter": 5}, expected: "Chapter 5"},
+		{name: "zero-padded single digit", tmpl: `Chapter {{printf "%02d" .chapter}} Quiz`, data: map[string]any{"chapter": 4}, expected: "Chapter 04 Quiz"},
+		{name: "zero-padded two digits unchanged", tmpl: `Chapter {{printf "%02d" .chapter}} Quiz`, data: map[string]any{"chapter": 12}, expected: "Chapter 12 Quiz"},
 		{name: "no vars", tmpl: "Hello World", data: nil, expected: "Hello World"},
 		{name: "invalid template syntax", tmpl: "{{.unclosed", wantErr: true},
 		{name: "execute error", tmpl: "{{call .}}", data: 42, wantErr: true},
