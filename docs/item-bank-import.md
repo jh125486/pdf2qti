@@ -51,7 +51,7 @@ export CANVAS_PASSWORD="$(op read op://Private/Canvas/password)"
 
 pdf2qti import-bank \
   --course-id 147966 \
-  --bank-name '2120: Chapter 1 Quiz' \
+  --bank-name '2120: Chapter 01 Quiz' \
   --package /absolute/path/ch01_qti.zip \
   --on-existing append
 ```
@@ -66,7 +66,7 @@ by hand, and pass `--browser-url`:
 open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir=/private/tmp/pdf2qti-canvas-profile
 
 pdf2qti import-bank --browser-url http://127.0.0.1:9222 \
-  --course-id 147966 --bank-name '2120: Chapter 1 Quiz' \
+  --course-id 147966 --bank-name '2120: Chapter 01 Quiz' \
   --package /absolute/path/ch01_qti.zip --on-existing append
 ```
 
@@ -101,7 +101,7 @@ final name.
 ```sh
 pdf2qti import-bank \
   --course-id 147966 \
-  --bank-name '2120: Chapter 1 Quiz' \
+  --bank-name '2120: Chapter 01 Quiz' \
   --package /absolute/path/ch01_qti.zip \
   --on-existing append \
   --create-random-quiz=10
@@ -174,7 +174,7 @@ commands.ImportBankCmd
 Command inputs:
 
 - `--course-id` (scope used to open New Quizzes)
-- `--bank-name` (required; e.g. `2120: Chapter 1`)
+- `--bank-name` (required; e.g. `2120: Chapter 01`)
 - `--package` (required QTI ZIP)
 - `--on-existing=fail|append` (default `fail`)
 - `--create-random-quiz=N` (optional; create an unpublished random bank group)

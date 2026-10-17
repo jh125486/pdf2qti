@@ -56,7 +56,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
   "version": 1,
   "defaults": {
     "quiz": {
-      "titleTemplate": "Chapter {{.chapter}} Quiz",
+      "titleTemplate": "Chapter {{printf \"%02d\" .chapter}} Quiz",
       "counts": { "tf": 5, "ma": 3, "mc": 10 },
       "mcOptions": { "min": 4, "max": 4 },
       "maOptions": { "min": 4, "max": 6 }
