@@ -94,6 +94,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 | Field | Description |
 |---|---|
 | `version` | Config schema version (must be `1`) |
+| `courseName` | Optional course-wide display name used as the PPTX title-slide subtitle |
 | `defaults` | Global defaults for `quiz`, `generation`, `validation`, and `workflow` |
 | `sources` | Array of PDF or Markdown context sources; each source can override any default |
 | `modules` | Array of modules grouping one or more `sources` (by `sourceIds`) for the `module` command |
@@ -146,10 +147,28 @@ Each `module` requires an `id`, a `name`, and `sourceIds` (one or more `source.i
 ## Usage
 
 ```
-pdf2qti [--config <file>] <command>
+pdf2qti [--config <file>] [--http-timeout <duration>] <command>
 ```
 
-`--config` / `-c` defaults to `quiz_input.json`.
+Global flags:
+
+- `-c`, `--config` — config file path (defaults to `quiz_input.json`)
+- `--http-timeout` — per-request LLM HTTP timeout (defaults to `5m`)
+
+### Commands at a glance
+
+| Command | Purpose |
+|---|---|
+| `distill` | Read PDF or Markdown input and distill it into `<outDir>/<id>_context.json` |
+| `generate` | Generate `<outDir>/<id>_quiz.md` from distilled context |
+| `validate` | Validate generated or hand-edited quiz Markdown |
+| `approve` | Convert approved quiz Markdown into `<outDir>/<id>.zip` QTI |
+| `slides` | Generate `<outDir>/<id>_slides.md` slide-deck Markdown |
+| `pptx` | Render slide-deck Markdown plus a PPTX template into a `.pptx` |
+| `module` | Build one combined slide-deck Markdown doc for a configured module |
+| `page` | Render HTML from a distilled context JSON and an HTML template |
+| `publish` | Render and publish Canvas Learning Objectives / Materials pages |
+| `import-bank` | Import a generated QTI ZIP into a Canvas New Quizzes Item Bank |
 
 ### Pipeline overview
 
@@ -260,13 +279,85 @@ template path is a positional argument. `-v`/`--vars` passes extra `key=value` t
 variables (`;`-separated for multiple) available inside the template alongside the distilled
 context data.
 
-Mermaid diagram blocks (see [`slides.md`](slides.md)) render as PNGs on their own dedicated
-slides. A template used with such a deck needs a `Diagram` layout with `title`, `body`, and `pic`
+`slides` and `module` generate bullet-based content slides; they do not generate Mermaid blocks.
+You can add a Mermaid block by hand to proto-deck Markdown, and `pptx` renders it as a PNG on its
+own dedicated slide. See [`slides.md`](slides.md) for the diagram block format. A template used
+with such a deck needs a `Diagram` layout with `title`, `body`, and `pic`
 placeholders — `body` gets the visible caption, `pic` is replaced by the rendered diagram, and its
 alt text becomes the image's screen-reader description. Requires [`mmdc`](https://github.com/mermaid-js/mermaid-cli)
 on `PATH`; if a diagram fails to render, its slide still ships with title and caption, missing only
 the picture, and the failure is reported back as a warning rather than failing the whole render.
 A template with no `Diagram` layout is still valid for a deck that has no diagram slides.
+
+#### Markdown schema for `pptx` input
+
+`slides` and `module` generate proto-deck Markdown in the shape below. `pptx` also accepts
+hand-written blocks in document order; it does not require a summary block or require one to be
+last. A `summary` block is rendered as an ordinary content slide. The canonical format reference
+is [`slides.md`](slides.md):
+
+1. A first block containing only the deck title as `# Title`
+2. `---`
+3. An agenda block:
+   - `<!-- meta: 1 agenda -->`
+   - `# Agenda`
+   - 3-8 top-level `- bullet` items
+4. Zero or more content-slide blocks:
+   - `<!-- meta: N <tag> -->`
+   - `# Slide Title`
+   - generated decks use 5-8 bullets
+5. A final summary block (generated-deck convention):
+   - `<!-- meta: N summary -->`
+   - `# Summary`
+   - generated decks include one top-level recap bullet per agenda item
+
+Rules:
+
+- `slides` and `module` generate 1-based sequential `N` values with no gaps. `pptx` parses
+  hand-written blocks in document order and does not reject gaps in their meta numbers.
+- `<tag>` is the source/chapter ID; consecutive slides with the same tag share a PPTX section
+- Bullets use `- text`; indented `  - text` sub-bullets render one level deep. Deeper indentation
+  is not preserved as additional nesting.
+- Inline math uses `\(...\)` or `\[...\]`
+- Inline code uses single backticks
+- Hand-authored diagram slides use exactly one Mermaid fenced block, one `<!-- alt: ... -->` line, and one `> caption` line, with no bullets
+- `pptx` enforces 3-8 agenda bullets; generated content slides follow the 5-8 bullet convention
+
+Minimal example:
+
+````markdown
+# Chapter 1: Vectors and Matrices
+
+---
+
+<!-- meta: 1 agenda -->
+# Agenda
+
+- Vector operations
+- Matrix multiplication
+- Systems of linear equations
+
+---
+
+<!-- meta: 2 ch01 -->
+# Vector Operations
+
+- A **vector** is an ordered list of numbers
+- Addition is componentwise: \(\mathbf{u} + \mathbf{v}\)
+  - Example: \((1,2) + (3,4) = (4,6)\)
+- **Scalar multiplication** scales every component
+- The dot product combines corresponding components
+- Vector length measures magnitude
+
+---
+
+<!-- meta: 3 summary -->
+# Summary
+
+- Vectors combine via componentwise **addition**
+- Matrix multiplication combines rows and columns
+- Systems of linear equations can be represented with matrices
+````
 
 ### `module` — Build a combined slide-deck Markdown doc across chapters
 
@@ -314,6 +405,44 @@ For each selected source context (`<outDir>/<id>_context.json`), `publish`:
 5. Adds both pages to that module
 
 Set `CANVAS_TOKEN` (or pass `--canvas-token`) before running.
+
+### `import-bank` — Import a QTI ZIP into a Canvas New Quizzes Item Bank
+
+```bash
+pdf2qti import-bank \
+  --course-id 147966 \
+  --bank-name '2120: Chapter 1 Quiz' \
+  --package /absolute/path/ch01.zip \
+  --on-existing append \
+  --create-random-quiz=10
+```
+
+Imports a QTI ZIP emitted by `approve` into a Canvas New Quizzes Item Bank through the Canvas UI.
+The command validates that the ZIP contains a root `imsmanifest.xml`, a manifest-referenced QTI
+assessment XML file, a non-empty assessment title, and at least one question before opening a
+browser workflow.
+
+Important flags:
+
+- `--course-id` — Canvas course ID
+- `--bank-name` — exact final Item Bank name
+- `--package` — QTI ZIP to import
+- `--base-url` — Canvas base URL (default: `https://unt.instructure.com`)
+- `--on-existing=fail|append` — fail on existing bank, or append into it
+- `--create-random-quiz=N` — optionally create an unpublished random New Quiz after import
+- `--dry-run` — validate inputs and report the action without changing Canvas
+- `--browser-url` — attach to an already-running Chrome remote-debugging session
+- `--chrome-profile-dir` — persisted Chrome profile directory used for the Canvas session
+- `--username` / `--password` or `CANVAS_USERNAME` / `CANVAS_PASSWORD` — login credentials used only if the saved browser session is missing/expired
+
+Notes:
+
+- `--dry-run` is the safest first run
+- Default `--on-existing=fail` avoids modifying an existing bank accidentally
+- Canvas may rename the imported Item Bank to the QTI assessment title during import; `import-bank`
+  renames it back to `--bank-name` before returning
+- `--create-random-quiz=N` rejects values larger than the package's question count
+- See [`docs/item-bank-import.md`](docs/item-bank-import.md) for the full workflow and operational details
 
 ## Quiz Draft Format
 
