@@ -12,6 +12,7 @@ import (
 var markdownHeading = regexp.MustCompile(`^ {0,3}##(?:[\t ]+(.*))?$`)
 var markdownTopHeading = regexp.MustCompile(`^#(?:[\t ]|$)`)
 var markdownClosingHashes = regexp.MustCompile(`[\t ]+#+[\t ]*$`)
+var markdownListMarker = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])[ ]+`)
 var markdownSectionID = regexp.MustCompile(`^Section[\t ]+(\d+(?:\.\d+)*)(?:[\t ]|$)`)
 
 type markdownSection struct {
@@ -83,14 +84,11 @@ func markdownSections(text string) ([]markdownSection, int) {
 	var sections []markdownSection
 	preambleEnd := len(text)
 	offset := 0
-	var fence byte
-	fenceLength := 0
+	var fence markdownFence
 	for _, line := range strings.SplitAfter(text, "\n") {
 		trimmed := strings.TrimLeft(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), " ")
 		indent := len(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")) - len(trimmed)
-		if indent <= 3 && isFenceLine(trimmed) {
-			fence, fenceLength = updateFence(trimmed, fence, fenceLength)
-		} else if fence == 0 && indent <= 3 {
+		if !fence.consume(trimmed, indent) && fence.marker == 0 && indent <= 3 {
 			heading := markdownHeading.FindStringSubmatch(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"))
 			topLevel := markdownTopHeading.MatchString(trimmed)
 			if len(heading) > 0 || topLevel {
@@ -108,6 +106,55 @@ func markdownSections(text string) ([]markdownSection, int) {
 		offset += len(line)
 	}
 	return sections, preambleEnd
+}
+
+// markdownFence retains the list content indent so a closing fence may be more
+// than three columns from the document margin, while still within three columns
+// of its container. List markers inside an active code fence remain literal text.
+type markdownFence struct {
+	marker          byte
+	length          int
+	containerIndent int
+}
+
+func (f *markdownFence) consume(line string, indent int) bool {
+	// Leaving the list also ends its fenced code block. Blank lines do not end
+	// the container; a dedented nonblank line must be reconsidered as Markdown.
+	if f.containerIndent > 0 && indent < f.containerIndent && strings.TrimSpace(line) != "" {
+		*f = markdownFence{}
+	}
+	if f.marker != 0 {
+		if indent < f.containerIndent || indent > f.containerIndent+3 || !isFenceLine(line) {
+			return false
+		}
+		f.marker, f.length = updateFence(line, f.marker, f.length)
+		return true
+	}
+	if indent > 3 {
+		return false
+	}
+	candidate, listIndent := stripMarkdownListMarkers(line)
+	if !isFenceLine(candidate) {
+		return false
+	}
+	f.marker, f.length = updateFence(candidate, 0, 0)
+	f.containerIndent = 0
+	if listIndent > 0 {
+		f.containerIndent = indent + listIndent
+	}
+	return true
+}
+
+func stripMarkdownListMarkers(line string) (string, int) {
+	width := 0
+	for {
+		marker := markdownListMarker.FindString(line)
+		if marker == "" {
+			return line, width
+		}
+		width += len(marker)
+		line = line[len(marker):]
+	}
 }
 
 func isFenceLine(line string) bool {
