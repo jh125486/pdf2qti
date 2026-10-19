@@ -194,7 +194,7 @@ func (c *Config) Validate() error {
 		if s.ID == "" {
 			return fmt.Errorf("sources[%d].id must not be empty", i)
 		}
-		if err := validateSourceInput(i, s); err != nil {
+		if err := validateSourceInput(i, &s); err != nil {
 			return err
 		}
 
@@ -227,7 +227,7 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-func validateSourceInput(index int, source Source) error {
+func validateSourceInput(index int, source *Source) error {
 	hasPDF := source.pdfPresent || source.PDF != ""
 	hasContext := source.contextPresent || source.Context != nil
 	if hasPDF == hasContext {

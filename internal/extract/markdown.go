@@ -12,7 +12,7 @@ import (
 var markdownHeading = regexp.MustCompile(`^ {0,3}##(?:[\t ]+(.*))?$`)
 var markdownTopHeading = regexp.MustCompile(`^#(?:[\t ]|$)`)
 var markdownClosingHashes = regexp.MustCompile(`[\t ]+#+[\t ]*$`)
-var markdownListMarker = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])[ ]+`)
+var markdownListMarker = regexp.MustCompile(`^(?:[-+*]|\d{1,9}[.)]) +`)
 var markdownSectionID = regexp.MustCompile(`^Section[\t ]+(\d+(?:\.\d+)*)(?:[\t ]|$)`)
 
 type markdownSection struct {
@@ -44,7 +44,7 @@ func ReadMarkdown(files []config.ContextFile) (string, error) {
 	}
 	text := strings.Join(parts, "\n\n")
 	if text == "" {
-		return "", fmt.Errorf("Markdown context contains no selected text")
+		return "", fmt.Errorf("markdown context contains no selected text")
 	}
 	return text, nil
 }
@@ -65,7 +65,7 @@ func selectMarkdown(text string, file config.ContextFile) (string, error) {
 			for i, section := range sections {
 				available[i] = section.title
 			}
-			return "", fmt.Errorf("Markdown %q: unknown section %q; available sections: %v", file.Path, selector, available)
+			return "", fmt.Errorf("markdown %q: unknown section %q; available sections: %v", file.Path, selector, available)
 		}
 	}
 	var parts []string
@@ -80,9 +80,8 @@ func selectMarkdown(text string, file config.ContextFile) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
-func markdownSections(text string) ([]markdownSection, int) {
-	var sections []markdownSection
-	preambleEnd := len(text)
+func markdownSections(text string) (sections []markdownSection, preambleEnd int) {
+	preambleEnd = len(text)
 	offset := 0
 	var fence markdownFence
 	for _, line := range strings.SplitAfter(text, "\n") {
@@ -145,25 +144,24 @@ func (f *markdownFence) consume(line string, indent int) bool {
 	return true
 }
 
-func stripMarkdownListMarkers(line string) (string, int) {
-	width := 0
+func stripMarkdownListMarkers(line string) (stripped string, width int) {
+	stripped = line
 	for {
-		marker := markdownListMarker.FindString(line)
+		marker := markdownListMarker.FindString(stripped)
 		if marker == "" {
-			return line, width
+			return stripped, width
 		}
 		width += len(marker)
-		line = line[len(marker):]
+		stripped = stripped[len(marker):]
 	}
 }
 
 func isFenceLine(line string) bool {
-	return len(line) > 0 && (line[0] == '`' || line[0] == '~')
+	return line != "" && (line[0] == '`' || line[0] == '~')
 }
 
-func updateFence(line string, fence byte, fenceLength int) (byte, int) {
-	marker := line[0]
-	length := 0
+func updateFence(line string, fence byte, fenceLength int) (marker byte, length int) {
+	marker = line[0]
 	for length < len(line) && line[length] == marker {
 		length++
 	}
