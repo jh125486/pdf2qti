@@ -59,12 +59,12 @@ func TestReadMarkdown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			runMarkdownCase(t, tt)
+			runMarkdownCase(t, &tt)
 		})
 	}
 }
 
-func runMarkdownCase(t *testing.T, tt markdownTestCase) {
+func runMarkdownCase(t *testing.T, tt *markdownTestCase) {
 	t.Helper()
 	dir := t.TempDir()
 	files := make([]config.ContextFile, 0, len(tt.texts))
