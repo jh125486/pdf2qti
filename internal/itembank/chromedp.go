@@ -2,6 +2,7 @@ package itembank
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
+	"github.com/chromedp/chromedp/remote"
 )
 
 // ChromedpImporter drives only documented Canvas UI actions. When BrowserURL
@@ -28,7 +30,7 @@ type ChromedpImporter struct {
 	quizExists        func(context.Context, string) (bool, error)
 	loginPageDetected func(context.Context) (bool, error)
 	submitLogin       func(context.Context, string, string) error
-	// evalBool overrides evaluateBool's default chromedp.Evaluate(js, &ok)
+	// evalBool overrides evaluateBool's default evaluateInto(js, &ok)
 	// path. Production leaves this nil; tests set it because the mocked
 	// `run` field never populates out-parameters passed to chromedp actions,
 	// so any check that reads a boolean result must go through this hook to
@@ -36,7 +38,7 @@ type ChromedpImporter struct {
 	evalBool func(context.Context, string) (bool, error)
 }
 
-type chromedpRun func(context.Context, ...chromedp.Action) error
+type chromedpRun func(context.Context, ...chromedp.Action[chromedp.Void]) error
 
 const (
 	buildQuizStep          = "build quiz"
@@ -45,6 +47,26 @@ const (
 	waitImportCompleteStep = "wait for import completion"
 )
 
+// importButtonXPath matches the import dialog's "Import" submit button. It is
+// shared between the WaitEnabled check and the click that follows it (via
+// clickXPathJS) so both resolve to the exact same element — see the doc
+// comment at its use site in Import().
+// preNavigateDelay is the one remaining fixed settle delay before a fresh
+// navigation away from a page that was just edited (confirmQuizPersisted and
+// navigateBanksListTasks): Canvas exposes no saved/idle signal to poll for
+// there, so the wait before leaving the page can't yet be condition-based.
+const preNavigateDelay = 2 * time.Second
+
+const importButtonXPath = `//*[@role='dialog']//button[contains(normalize-space(), 'Import')]`
+
+// buttonOrLinkTags is the shared button/link tag set clickTextJS matches
+// against at every plain "click the element with this text" site in this
+// file (the top-level "Create Bank" button, a bank row in the Banks list,
+// and the rename dialog's "Edit bank .../Save Changes" controls) — pulled
+// out as a shared var instead of repeating the "button" string literal at
+// each call site (goconst).
+var buttonOrLinkTags = []string{"button", "a"}
+
 // runResilient retries action a few times if it fails with a CDP error
 // indicating the execution context was torn down mid-evaluate by a
 // navigation the previous action triggered — a timing race, not a selector
@@ -52,20 +74,34 @@ const (
 // reliably long enough. Any other error (including everything unit tests
 // inject) returns immediately on the first attempt, so this is a no-op
 // outside that one specific race.
-func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action) error {
+func runResilient(ctx context.Context, run chromedpRun, action chromedp.Action[chromedp.Void]) error {
 	var lastErr error
 	for range 4 {
 		lastErr = run(ctx, action)
 		if lastErr == nil {
 			return nil
 		}
-		msg := lastErr.Error()
-		if !strings.Contains(msg, "context with specified id") && !strings.Contains(msg, "navigated or closed") {
+		if !isNavigationTeardown(lastErr) {
 			return lastErr
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	return lastErr
+}
+
+// isNavigationTeardown reports whether err is the CDP "the execution context
+// this action was running in got torn down by a navigation mid-flight" error
+// — runResilient's one specific retry target. Factored out so a call site
+// that itself CAUSES a navigation (see its use in the "open quiz creator"
+// step) can recognize this same error shape after runResilient's retries are
+// exhausted and treat it as likely evidence the triggering action already
+// succeeded, rather than a genuine failure.
+func isNavigationTeardown(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context with specified id") || strings.Contains(msg, "navigated or closed")
 }
 
 // isTimeoutLike reports whether err is a plain timeout — chromedp's "context
@@ -91,14 +127,29 @@ func isTimeoutLike(err error) bool {
 }
 
 // importTimeout scales Import()'s outer browser-context budget with the
-// package's expected item count. The 150s base was observed tight on a
-// 60-question bank (navigate -> find -> create -> navigate -> click x3 ->
-// upload -> poll(60s) -> poll(30s) -> poll(30s) -> location); packages
-// beyond 20 questions get extra headroom proportional to size so a large
-// import doesn't hit the outer deadline before Canvas's own UI/autosave
-// catches up.
+// package's expected item count. Packages beyond 20 questions get extra
+// headroom proportional to size so a large import doesn't hit the outer
+// deadline before Canvas's own UI/autosave catches up.
+//
+// The 300s base accounts for the worst-case sum of every poll this file runs
+// against the workCancel-bound browser context (not sessionCtx-bound retries
+// like pollBankItemCount, which have their own independent budget — see its
+// doc comment): the "Create Bank" button poll (up to 15s) + the post-create
+// bank-visibility confirm poll (up to 60s — live-confirmed repeatedly
+// insufficient at both 15s and 30s, see that poll's own doc comment) + the
+// always-present import-success poll (60s) + the ExpectedBankName
+// title-match poll (up to 30s) + renameBankUI's own edit-dialog-open poll
+// (up to 15s) and post-rename reopen poll (up to 30s), which also run
+// against this same budget when Canvas renamed the bank after its own
+// package title and a rename-back is needed. That worst case (a brand-new
+// bank, with ExpectedBankName set, that also needs renaming) sums to
+// roughly 210s of pure poll time, plus ensureSession's own up-to-~23s
+// cold-login cost (2 settle Sleeps + a 20s loginSucceededJS poll, all
+// against this same budget) and ~3s of the file's various other settle
+// Sleep()s between steps — call it ~235-255s. 300s leaves real headroom
+// (~45-65s) above that worst case.
 func importTimeout(expectedItemCount int) time.Duration {
-	const base = 150 * time.Second
+	const base = 300 * time.Second
 	if expectedItemCount <= 20 {
 		return base
 	}
@@ -115,7 +166,7 @@ func newBrowserContext(ctx context.Context, browserURL, profileDir string) (cont
 	var allocCtx context.Context
 	var allocCancel context.CancelFunc
 	if browserURL != "" {
-		allocCtx, allocCancel = chromedp.NewRemoteAllocator(ctx, browserURL)
+		allocCtx, allocCancel = remote.NewAllocator(ctx, browserURL)
 	} else {
 		if strings.TrimSpace(profileDir) == "" {
 			return nil, nil, fmt.Errorf("chrome profile directory is required for headless Canvas automation")
@@ -145,7 +196,7 @@ func newBrowserContext(ctx context.Context, browserURL, profileDir string) (cont
 // a no-op once the profile's session is valid, so most invocations pay only
 // the cost of the initial navigate+check.
 func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, base, username, password string) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
-	if err := run(ctx, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(ctx, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("open Canvas: %w", err)
 	}
 	var loginPage bool
@@ -153,7 +204,7 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 	if c.loginPageDetected != nil {
 		loginPage, checkErr = c.loginPageDetected(ctx)
 	} else {
-		checkErr = run(ctx, chromedp.Evaluate(loginPageDetectedJS, &loginPage))
+		checkErr = run(ctx, evaluateInto(loginPageDetectedJS, &loginPage))
 	}
 	if checkErr != nil {
 		return fmt.Errorf("check Canvas login state: %w", checkErr)
@@ -168,21 +219,20 @@ func (c ChromedpImporter) ensureSession(ctx context.Context, run chromedpRun, ba
 		return c.submitLogin(ctx, username, password)
 	}
 	if err := run(ctx,
-		chromedp.WaitVisible(usernameSelector, chromedp.ByQuery),
-		chromedp.SendKeys(usernameSelector, username, chromedp.ByQuery),
-		chromedp.SendKeys(passwordSelector, password, chromedp.ByQuery),
-		chromedp.Click(loginButtonSelector, chromedp.ByQuery),
-		// Submitting triggers a real navigation (often through an SSO
-		// redirect chain); evaluating JS in the same instant the execution
-		// context is torn down for that navigation intermittently fails
-		// with a CDP "target navigated or closed" error. Let the new
-		// document settle and become ready before polling its state.
-		chromedp.Sleep(2*time.Second),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+		chromedp.WaitVisible(chromedp.CSS(usernameSelector)),
+		chromedp.SendKeys(chromedp.CSS(usernameSelector), username),
+		chromedp.SendKeys(chromedp.CSS(passwordSelector), password),
+		chromedp.Click(chromedp.CSS(loginButtonSelector)),
 	); err != nil {
 		return fmt.Errorf("submit Canvas login: %w", err)
 	}
-	if err := runResilient(ctx, run, chromedp.Poll(loginSucceededJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+	// Submitting triggers a real navigation (often through an SSO redirect
+	// chain); evaluating JS in the same instant the execution context is
+	// torn down for that navigation intermittently fails with a CDP "target
+	// navigated or closed" error. runResilient retries exactly that error, and
+	// the poll itself only succeeds once the new document no longer shows the
+	// login form, so no fixed settle delay is needed.
+	if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](loginSucceededJS(canvasOrigin(base)), chromedp.WithPollingTimeout(20*time.Second))); err != nil {
 		return fmt.Errorf("log in to Canvas (check CANVAS_USERNAME / CANVAS_PASSWORD): %w", err)
 	}
 	return nil
@@ -216,7 +266,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
@@ -226,7 +276,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	base.Path = "/courses/" + url.PathEscape(req.CourseID) + "/banks"
 	base.RawQuery = ""
 
-	if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 		return Result{}, fmt.Errorf("open Item Banks: %w", err)
 	}
 	name := jsString(req.BankName)
@@ -235,7 +285,15 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if c.findBank != nil {
 		found, findErr = c.findBank(browser, name)
 	} else {
-		findErr = run(browser, chromedp.Evaluate(bankExistsJS(name), &found))
+		// Live-confirmed (Copilot review, PR #77): this initial existence
+		// check hits the exact same "React bank list hasn't rendered yet"
+		// race as the post-create visibility check below and every other
+		// read of this list in the file. A one-shot Evaluate here could
+		// misreport an EXISTING bank as absent right after a fresh
+		// navigate/login, sending Import() down the create-bank path and
+		// creating a duplicate — the poll-based checks elsewhere in this
+		// function exist precisely to prevent that class of false negative.
+		found, findErr = c.evaluatePollBool(browser, run, bankExistsJS(name), 15*time.Second)
 	}
 	if findErr != nil {
 		return Result{}, fmt.Errorf("find Item Bank: %w", findErr)
@@ -244,46 +302,154 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 		return Result{}, fmt.Errorf("item bank %q already exists (use --on-existing=append)", req.BankName)
 	}
 	if !found {
-		if err := run(browser, clickText("Create Bank")); err != nil {
+		// Live-confirmed (headless E2E against a real course): the Banks
+		// page's React content, including the top-level "Create Bank"
+		// button, can still be hydrating after WaitReady("body") and the 1s
+		// settle above — especially on a cold profile that just logged in
+		// via ensureSession, with no prior render on this page to warm up.
+		// A one-shot click here previously raced that render and missed
+		// with no retry, which is exactly the "dialog never opens" headless
+		// flake docs/item-bank-import-flake.md couldn't explain. Poll for
+		// up to 15s instead of clicking once.
+		opened, err := c.evaluatePollBool(browser, run, clickTextJS(buttonOrLinkTags, "Create Bank", false), 15*time.Second)
+		if err != nil {
 			return Result{}, fmt.Errorf("open create bank dialog: %w", err)
 		}
-		if err := run(browser, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
+		if !opened {
+			return Result{}, fmt.Errorf(`open create bank dialog: "Create Bank" button not found`)
+		}
+		if err := run(browser, chromedp.WaitVisible(chromedp.CSS("[role=dialog] input"))); err != nil {
 			return Result{}, fmt.Errorf("wait for bank-name field: %w", err)
 		}
-		if err := run(browser, chromedp.SendKeys("[role=dialog] input", req.BankName, chromedp.ByQuery)); err != nil {
+		if err := run(browser, chromedp.SendKeys(chromedp.CSS("[role=dialog] input"), req.BankName)); err != nil {
 			return Result{}, fmt.Errorf("fill bank name: %w", err)
 		}
-		if err := run(browser, chromedp.Click("[role=dialog] input[type=checkbox]", chromedp.ByQuery)); err != nil {
+		// The wait above resolves to "[role=dialog] input" (the bank-NAME text
+		// field, first in document order), not this checkbox — wait
+		// specifically for the checkbox itself before clicking it so the click
+		// target always matches an element this step actually confirmed is
+		// visible first.
+		if err := run(browser, chromedp.WaitVisible(chromedp.CSS(shareWithCourseCheckboxSelector))); err != nil {
+			return Result{}, fmt.Errorf("wait for share-with-course checkbox: %w", err)
+		}
+		// Live-confirmed root cause (docs/item-bank-import-flake.md): a
+		// hit-test chromedp.Click here silently fails to flip this InstUI
+		// checkbox's checked state (no chromedp error, box never checks). The
+		// bank is still created (201) but unshared/private to the course, so
+		// it never appears in this course's bank list — every downstream step
+		// (findBank, opening the bank, the import dialog) then searches for a
+		// bank invisible to it and hangs. Dispatch a direct JS .click() instead
+		// (same fix as clickEditBankGroupJS). checkCheckboxJS (unlike
+		// clickJS/clickSelectorJS) only clicks when the box isn't already
+		// checked and returns its final .checked value, not just whether an
+		// element was found — a plain JS .click() toggles state, so reusing
+		// clickSelectorJS here could silently *uncheck* a box Canvas already
+		// defaulted to checked while still reporting a clean "found" success.
+		// Check that returned .checked value via evaluateBool instead of
+		// discarding it — a miss here is exactly the failure class this whole
+		// fix exists to catch, so it must not go silent again at this call
+		// site.
+		checked, err := c.evaluateBool(browser, run, checkCheckboxJS(shareWithCourseCheckboxSelector))
+		if err != nil {
 			return Result{}, fmt.Errorf("share bank with course: %w", err)
 		}
-		if err := run(browser, clickTextInDialog("Create Bank"), chromedp.Sleep(500*time.Millisecond)); err != nil {
+		if !checked {
+			return Result{}, fmt.Errorf(`share bank with course: "Share with course" checkbox not found or not checked`)
+		}
+		// WaitEnabled, not just WaitVisible (Copilot review, PR #77): a JS
+		// .click() on a disabled button is a no-op, same reasoning as the
+		// Import-button and "Add this bank to quiz" button waits elsewhere in
+		// this file — Canvas can render this submit button before enabling it
+		// (e.g. while still validating the name/checkbox), so a click right
+		// after WaitVisible alone could silently fire on a still-disabled
+		// button, reporting success while never actually submitting.
+		if err := run(browser, chromedp.WaitEnabled(chromedp.CSS(createBankSubmitSelector))); err != nil {
+			return Result{}, fmt.Errorf("wait for create bank submit button: %w", err)
+		}
+		submitted, err := c.evaluateBool(browser, run, clickSelectorJS(createBankSubmitSelector))
+		if err != nil {
 			return Result{}, fmt.Errorf("submit create bank: %w", err)
 		}
-		if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+		if !submitted {
+			return Result{}, fmt.Errorf("submit create bank: submit button not found")
+		}
+		// The dialog closing is the signal that the create request was accepted;
+		// navigating away before then could abort it.
+		if err := run(browser, chromedp.Poll[chromedp.Void](dialogClosedJS, chromedp.WithPollingTimeout(15*time.Second))); err != nil {
+			return Result{}, fmt.Errorf("submit create bank: %w", err)
+		}
+		if err := run(browser, chromedp.Navigate(base.String()), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 			return Result{}, fmt.Errorf("return to Item Banks: %w", err)
 		}
-	}
-	if err := run(browser, clickText(req.BankName)); err != nil {
-		return Result{}, fmt.Errorf("open Item Bank %q: %w", req.BankName, err)
-	}
-	if err := run(browser, chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery)); err != nil {
-		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
+		// Verify the bank actually exists in the course's bank list before
+		// proceeding — the class of bug above (a click that plain didn't
+		// happen) would otherwise silently carry on into the 240s+
+		// timeout/retry cascade the rest of Import() uses for a different,
+		// unrelated race (UI/autosave lag). Fail fast here instead with a
+		// clear, specific error. Polled (not a one-shot evaluate): body-ready
+		// doesn't mean the React bank list has actually finished rendering
+		// yet, so a bare one-shot check can report "not found" on a run that
+		// actually succeeded. Live-confirmed repeatedly: 15s, then 30s, both
+		// proved occasionally too tight for this same course-Banks-list read
+		// — reproduced a fourth time at 30s with the machine otherwise
+		// healthy (722MB free, no resource contention), and with
+		// evaluatePollBoolViaRun's ctx.Err() disambiguation (see its own doc
+		// comment) confirming this was a genuine "polled and never found it"
+		// result, not this function's own outer budget expiring — so the
+		// render latency itself, not a resource-contention artifact, is the
+		// real cause. Likely compounded by this sandbox course accumulating
+		// many stray test banks over repeated runs (see
+		// docs/item-bank-import-flake.md's "Stray test banks" note) — a
+		// longer list plausibly renders more slowly. Bumped to 60s; the
+		// underlying render-latency variance itself is not fully understood
+		// and deserves verification against a fresh/different course (see
+		// that same doc's customer-reliability follow-up).
+		confirmed, confirmErr := c.evaluatePollBool(browser, run, bankExistsJS(name), 60*time.Second)
+		if confirmErr != nil {
+			return Result{}, fmt.Errorf("verify created Item Bank is visible: %w", confirmErr)
+		}
+		if !confirmed {
+			// Deliberately not pinned to a single cause: any of the create-bank
+			// clicks above (dialog open, checkbox, submit) could have silently
+			// missed, or Canvas's own render could still be lagging despite the
+			// poll. The "Create Bank" step already committed server-side by
+			// this point, so a stray, unshared Item Bank may now exist in
+			// Canvas and need manual cleanup (same concern noted near
+			// recoverStuckImport's doc comment for the timeout-recovery path).
+			return Result{}, fmt.Errorf("created Item Bank %q was not found in the course bank list afterward (the bank may not have been created, or a click earlier in the create-bank sequence may have silently missed; a stray, unshared Item Bank may now exist in Canvas and need manual cleanup)", req.BankName)
+		}
 	}
 	// Recorded before the import dialog opens so a later timeout-recovery
 	// check (recoverStuckImport) can require the bank's item count to have
-	// actually grown, not just be non-zero — an ExistingAppend import onto a
+	// actually grown, not just be non-zero - an ExistingAppend import onto a
 	// bank that already had content would otherwise satisfy a bare "count >
 	// 0" check even when this run's own upload never completed. A bank this
 	// call just created (found == false) is definitionally empty, no read
 	// needed. For an existing bank the read is best-effort: -1 means unknown,
 	// and callers below must treat that as "can't confirm", not silently
-	// fall back to 0 — a false 0 baseline reintroduces exactly the bug this
+	// fall back to 0 - a false 0 baseline reintroduces exactly the bug this
 	// baseline exists to prevent.
+	//
+	// Read from the Item Banks LIST row, before opening the bank: the bank
+	// detail page paginates its question cards at 50 per page, so counting
+	// rendered cards there undercounts any bank with more than 50 questions
+	// (see bankListQuestionCountJS). The list page is still the loaded
+	// document at this point.
 	baselineItemCount := 0
 	if found {
 		baselineItemCount = -1
-		if n, ok := c.stableBankItemCount(browser, run); ok {
-			baselineItemCount = n
+		// A few bounded attempts: the count cell can still be hydrating on
+		// the first read, and a false "unknown" aborts the whole import below.
+		for attempt := range 3 {
+			if attempt > 0 {
+				if err := runResilient(browser, run, waitBankRowReady(req.BankName, "", recoverReadInterval)); err != nil && !isTimeoutLike(err) {
+					break
+				}
+			}
+			if n, ok := c.stableBankItemCount(browser, run, req.BankName, ""); ok {
+				baselineItemCount = n
+				break
+			}
 		}
 	}
 	// An unknown baseline on an existing bank can't be told apart from 0
@@ -294,28 +460,73 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if found && baselineItemCount < 0 && req.ExpectedItemCount > 0 {
 		return Result{}, fmt.Errorf("could not read existing Item Bank %q's baseline question count; refusing to import without a way to verify the result", req.BankName)
 	}
-
-	if err := run(browser, chromedp.Click(`button[data-popover-trigger="true"]`, chromedp.ByQuery)); err != nil {
+	// Exact match, not substring: bankExistsJS (the existence check and
+	// post-create verify just above) already matches req.BankName exactly, so
+	// this open-bank click must too. A substring match here previously let a
+	// course containing both "Chapter 1" and "Chapter 11" silently open
+	// whichever one happened to render first in the DOM when targeting
+	// "Chapter 1" - the exact checks above correctly confirm "Chapter 1"
+	// exists, but a substring click could then import into "Chapter 11"
+	// instead, reporting success while silently writing to the wrong bank.
+	opened, err := c.evaluateBool(browser, run, clickBankRowJS(req.BankName, ""))
+	if err != nil {
+		return Result{}, fmt.Errorf("open Item Bank %q: %w", req.BankName, err)
+	}
+	if !opened {
+		return Result{}, fmt.Errorf("open Item Bank %q: bank not found in list", req.BankName)
+	}
+	if err := run(browser, chromedp.WaitVisible(chromedp.CSS(`button[data-popover-trigger="true"]`))); err != nil {
+		return Result{}, fmt.Errorf("wait for Item Bank actions: %w", err)
+	}
+	triggerClicked, err := c.evaluateBool(browser, run, clickSelectorJS(`button[data-popover-trigger="true"]`))
+	if err != nil {
 		return Result{}, fmt.Errorf("open import actions: %w", err)
 	}
-	if err := run(browser, chromedp.Click(`[role="menuitem"]`, chromedp.ByQuery)); err != nil {
+	if !triggerClicked {
+		return Result{}, fmt.Errorf("open import actions: popover trigger button not found")
+	}
+	// Nothing settled between opening the popover and clicking its menu item
+	// before — the menu is InstUI-animated in, so wait for it to actually
+	// render before trying to click inside it.
+	if err := run(browser, chromedp.WaitVisible(chromedp.CSS(`[role="menuitem"]`))); err != nil {
+		return Result{}, fmt.Errorf("wait for import menu: %w", err)
+	}
+	menuItemClicked, err := c.evaluateBool(browser, run, clickSelectorJS(`[role="menuitem"]`))
+	if err != nil {
 		return Result{}, fmt.Errorf("open import dialog: %w", err)
+	}
+	if !menuItemClicked {
+		return Result{}, fmt.Errorf("open import dialog: menu item not found")
 	}
 	var stage string
 	var stageErr error
-	if err := run(browser, chromedp.SetUploadFiles("input[type=file]", []string{req.Package}, chromedp.ByQuery)); err != nil {
+	if err := run(browser, chromedp.SetUploadFiles(chromedp.CSS("input[type=file]"), []string{req.Package})); err != nil {
 		stage, stageErr = attachPackageStep, err
 	}
 	if stageErr == nil {
-		if err := run(browser,
-			chromedp.WaitEnabled(`//*[@role='dialog']//button[contains(normalize-space(), 'Import')]`, chromedp.BySearch),
-			chromedp.Click(`//*[@role='dialog']//button[contains(normalize-space(), 'Import')]`, chromedp.BySearch),
-		); err != nil {
+		// WaitEnabled still uses a real hit-test-free chromedp check (it only
+		// polls a DOM property, never clicks); only the click itself switches
+		// to JS dispatch, for the same InstUI hit-test-miss reason as the
+		// create-bank checkbox above. The click targets the exact same node
+		// the WaitEnabled XPath waited on (via clickXPathJS), rather than a
+		// separately-derived CSS+text match — a dialog with more than one
+		// Import-containing button (e.g. one that later reads "Importing…")
+		// could otherwise let the wait and the click resolve to different
+		// elements.
+		if err := run(browser, chromedp.WaitEnabled(chromedp.Search(importButtonXPath))); err != nil {
 			stage, stageErr = submitImportStep, err
+		}
+		if stageErr == nil {
+			clicked, err := c.evaluateBool(browser, run, clickXPathJS(importButtonXPath))
+			if err != nil {
+				stage, stageErr = submitImportStep, err
+			} else if !clicked {
+				stage, stageErr = submitImportStep, fmt.Errorf("import button not found")
+			}
 		}
 	}
 	if stageErr == nil {
-		if err := run(browser, chromedp.Poll(`document.body.innerText.includes('has imported successfully!')`, nil, chromedp.WithPollingTimeout(60*time.Second))); err != nil {
+		if err := run(browser, chromedp.Poll[chromedp.Void](`document.body.innerText.includes('has imported successfully!')`, chromedp.WithPollingTimeout(60*time.Second))); err != nil {
 			stage, stageErr = waitImportCompleteStep, err
 		}
 	}
@@ -345,8 +556,8 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			bankTitle, titleErr = c.bankTitle(browser)
 		} else {
 			titleErr = run(browser,
-				chromedp.Poll(bankTitleMatchesJS(req.ExpectedBankName), nil, chromedp.WithPollingTimeout(30*time.Second)),
-				chromedp.Evaluate(bankTitleJS, &bankTitle),
+				chromedp.Poll[chromedp.Void](bankTitleMatchesJS(req.ExpectedBankName), chromedp.WithPollingTimeout(30*time.Second)),
+				evaluateInto(bankTitleJS, &bankTitle),
 			)
 		}
 		if titleErr != nil {
@@ -368,7 +579,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			if c.renameBank != nil {
 				renameErr = c.renameBank(browser, bankTitle, req.BankName)
 			} else {
-				renameErr = renameBankUI(browser, run, base.String(), bankTitle, req.BankName)
+				renameErr = renameBankUI(browser, run, c.evalBool, base.String(), bankTitle, req.BankName)
 			}
 			if renameErr != nil {
 				return Result{}, fmt.Errorf("rename Item Bank %q to %q: %w", bankTitle, req.BankName, renameErr)
@@ -395,6 +606,29 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 			itemCount, countErr = c.bankItemCount(browser)
 		} else {
 			itemCount, countErr = c.pollBankItemCount(sessionCtx, run, base.String(), req.BankName, req.ExpectedBankName, expectedTotal)
+			// Copilot review (PR #77): pollBankItemCount runs against
+			// sessionCtx (no deadline of its own) precisely so its own up-to-3
+			// retries — up to 180s worst case — aren't bound by browser's
+			// outer deadline. But every step AFTER this one (the location
+			// read below) still uses that same original browser value, which
+			// can have expired while pollBankItemCount was busy on its own
+			// budget. Rebind to a fresh child of sessionCtx so the location
+			// read isn't silently run against an already-dead context.
+			//
+			// Live-confirmed: explicitly calling the OLD workCancel() here
+			// first (mirroring the stuck-import recovery path above, which
+			// only ever reaches its own rebind after browser's deadline has
+			// already fired or is being abandoned) tore down the live
+			// chromedp session outright — not just a Go-level context
+			// cancellation, but something that made the browser tab itself
+			// stop responding to the very next action, surfacing as "context
+			// canceled" on the location read moments later. Unlike the
+			// recovery path, browser is still very much alive and in active
+			// use here, so don't cancel it early — just let it expire on its
+			// own schedule via its already-deferred cancel once the function
+			// returns; briefly holding two live timeout contexts is harmless.
+			browser, workCancel = context.WithTimeout(sessionCtx, importTimeout(req.ExpectedItemCount))
+			defer workCancel()
 		}
 		if countErr != nil {
 			return Result{}, fmt.Errorf("read imported Item Bank question count: %w", countErr)
@@ -408,7 +642,7 @@ func (c ChromedpImporter) Import(ctx context.Context, req *Request) (Result, err
 	if c.location != nil {
 		location, locationErr = c.location(browser)
 	} else {
-		locationErr = run(browser, chromedp.Location(&location))
+		locationErr = run(browser, capture(chromedp.Location(), &location))
 	}
 	if locationErr != nil {
 		return Result{}, fmt.Errorf("read Item Bank URL: %w", locationErr)
@@ -435,14 +669,14 @@ func (c ChromedpImporter) PreflightRandomQuiz(ctx context.Context, req *QuizRequ
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
 			return err
 		}
 	}
-	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return fmt.Errorf("open Quizzes: %w", err)
 	}
 	return c.checkQuizCollision(browser, run, QuizTitle(req.BankName))
@@ -466,11 +700,25 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	defer cancel()
 	// 180s was too tight once persistence confirmation (re-navigate + two
 	// polls, up to 3 attempts) was added after the in-page checks below.
-	browser, workCancel := context.WithTimeout(browser, 240*time.Second)
+	//
+	// Re-checked against this diff's inner poll budgets (all run against this
+	// same budget-bound browser context, ensureSession included — it costs up
+	// to ~23s on a cold login: 2 settle Sleeps + a 20s loginSucceededJS poll):
+	// ensureSession (~23s) + "wait for quiz setup" (10s) + "wait for Item Bank
+	// action" (30s) + "select Item Bank"'s poll (15s) + "wait for bank group
+	// to appear" (30s) + "verify random group" (10s) = ~118s of steady-state
+	// poll time, plus confirmQuizPersisted's worst case of 3 retry attempts at
+	// two ~2s settles + a 20s bankGroupPresent poll + a 10s randomGroup poll
+	// each (~34s/attempt, ~102s for 3), plus this function's own handful of
+	// 1-2s settle Sleep()s between steps (~7s) — roughly 118+102+7 ~= 227s
+	// worst case. 300s leaves real headroom (~70s) above that; the previous
+	// 240s left only ~13s once ensureSession and the corrected
+	// confirmQuizPersisted math are actually counted.
+	browser, workCancel := context.WithTimeout(browser, 300*time.Second)
 	defer workCancel()
 	run := c.run
 	if run == nil {
-		run = chromedp.Run
+		run = chromedp.Do
 	}
 	if req.BrowserURL == "" {
 		if err := c.ensureSession(browser, run, req.BaseURL, req.Username, req.Password); err != nil {
@@ -479,7 +727,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	}
 
 	quizTitle := QuizTitle(req.BankName)
-	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Sleep(time.Second)); err != nil {
+	if err := run(browser, chromedp.Navigate(base), chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(time.Second)); err != nil {
 		return QuizResult{}, fmt.Errorf("open Quizzes: %w", err)
 	}
 	if err := c.checkQuizCollision(browser, run, quizTitle); err != nil {
@@ -490,67 +738,130 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 		do    func(context.Context) error
 	}{
 		// The visible "+" is a separate icon, not part of the button's
-		// textContent (recorded live: the actual text is "Quiz/Survey").
+		// textContent (recorded live: the actual text is "Quiz/Survey"). Routes
+		// through evaluateBool (rather than a bare chromedp.Evaluate(..., nil))
+		// so a click that silently misses errors out here instead of running
+		// on into steps that assume the quiz builder actually opened.
 		{"open quiz creator", func(ctx context.Context) error {
-			return runResilient(ctx, run, clickTextInsensitive("Quiz/Survey"))
+			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Quiz/Survey"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`"Quiz/Survey" control not found`)
+			}
+			return nil
 		}},
 		// Clicking navigates to the quiz builder; evaluating JS in the same
 		// instant the execution context is torn down for that navigation
-		// intermittently fails with a CDP "context not found" error. Let the
-		// new document settle before polling its state (same race as the
-		// Canvas login submit in ensureSession).
-		{"let quiz builder navigation settle", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
-		}},
+		// intermittently fails with a CDP "context not found" error.
+		// runResilient retries exactly that error and the poll below only
+		// succeeds on the new document (same race as the Canvas login submit
+		// in ensureSession), so no fixed settle delay is needed.
 		{"wait for quiz setup", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(quizSetupReadyJS, nil, chromedp.WithPollingTimeout(10*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](quizSetupReadyJS, chromedp.WithPollingTimeout(10*time.Second)))
 		}},
-		// Not checked via evaluateBool: Canvas doesn't always prompt for an
-		// engine choice (only some courses/quizzes hit this dialog), so a
-		// false/no-op result here is expected and not an error.
+		// selectNewQuizEngineJS reports one of three outcomes rather than a
+		// plain boolean: Canvas doesn't always prompt for an engine choice
+		// (only some courses/quizzes hit this dialog), so "no_dialog" is
+		// expected and not an error — but "radio clicked, no submit button
+		// found" (clicked_no_submit) leaves the dialog in a half-interacted
+		// state and must be a clear error here, not silently tolerated the
+		// same way "no dialog" is (see interpretEngineChoiceResult's doc
+		// comment for why: the failure mode this whole diff exists to
+		// eliminate elsewhere — a silently missed click letting execution
+		// fall into an unbounded downstream wait — was still possible here
+		// otherwise).
 		{"select New Quizzes if prompted", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Evaluate(selectNewQuizEngineJS, nil))
+			var outcome string
+			if err := runResilient(ctx, run, evaluateInto(selectNewQuizEngineJS, &outcome)); err != nil {
+				return err
+			}
+			return interpretEngineChoiceResult(outcome)
 		}},
 		{"wait for quiz title", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.WaitVisible(quizTitleSelector, chromedp.ByQuery))
+			return runResilient(ctx, run, chromedp.WaitVisible(chromedp.CSS(quizTitleSelector)))
 		}},
 		{"set quiz title", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.SetValue(quizTitleSelector, quizTitle, chromedp.ByQuery))
+			return runResilient(ctx, run, chromedp.SetValue(chromedp.CSS(quizTitleSelector), quizTitle))
 		}},
 		{buildQuizStep, func(ctx context.Context) error {
-			return runResilient(ctx, run, clickTextInsensitive("Build"))
+			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Build"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`"Build" control not found`)
+			}
+			return nil
 		}},
 		// Same navigation race as above: "Build" navigates to the quiz's
-		// build page.
-		{"let quiz build navigation settle", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
-		}},
+		// build page, and the next step's poll is the settle condition.
 		{"wait for Item Bank action", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(addFromBankReadyJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](addFromBankReadyJS, chromedp.WithPollingTimeout(30*time.Second)))
 		}},
 		{"open Item Bank picker", func(ctx context.Context) error {
-			return runResilient(ctx, run, clickTextInsensitive("Add from item bank"))
+			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Add from item bank"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`"Add from item bank" control not found`)
+			}
+			return nil
 		}},
 		{"select Item Bank", func(ctx context.Context) error {
-			return runResilient(ctx, run, clickBank(req.BankName))
+			// Wait for the picker dialog itself to render before searching it
+			// for the bank entry — nothing previously waited between opening
+			// the picker and clicking inside it.
+			if err := runResilient(ctx, run, chromedp.WaitVisible(chromedp.CSS(`[role="dialog"]`))); err != nil {
+				return err
+			}
+			// Live-confirmed: the dialog shell can render before its bank
+			// list has finished loading — especially for a bank created
+			// moments earlier in this same run, which the picker's own list
+			// fetch may not have caught up to yet. A one-shot click here
+			// previously raced that load; poll for up to 15s instead (same
+			// class of render race as Import()'s "Create Bank" button).
+			ok, err := c.evaluatePollBool(ctx, run, clickTextJS(append(append([]string{}, buttonOrLinkTags...), `[role="button"]`), strings.TrimSpace(req.BankName), true), 15*time.Second)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("item bank %q not found in picker", req.BankName)
+			}
+			return nil
 		}},
 		// Mirrors the Import-button pattern above: wait for the button to
-		// actually become enabled before clicking it. A CDP click on a
+		// actually become enabled before clicking it, and click the exact same
+		// node the wait matched (via clickXPathJS on textXPathInsensitive's
+		// XPath) rather than a separately-derived JS matcher, for the same
+		// reason as the Import-button fix in Import(). A CDP click on a
 		// disabled button reports success but adds nothing — this is one of
 		// the root causes of quizzes being created with zero content.
 		{"add Item Bank to quiz", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Tasks{
-				chromedp.WaitEnabled(textXPathInsensitive("Add this bank to quiz"), chromedp.BySearch),
-				chromedp.Click(textXPathInsensitive("Add this bank to quiz"), chromedp.BySearch),
-			})
+			// WaitEnabled still uses a real hit-test-free chromedp check (it
+			// only polls a DOM property, never clicks); only the click itself
+			// switches to JS dispatch, for the same InstUI hit-test-miss
+			// reason as the create-bank checkbox in Import().
+			addBankXPath := textXPathInsensitive("Add this bank to quiz")
+			if err := runResilient(ctx, run, chromedp.WaitEnabled(chromedp.Search(addBankXPath))); err != nil {
+				return err
+			}
+			ok, err := c.evaluateBool(ctx, run, clickXPathJS(addBankXPath))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`"Add this bank to quiz" button not found`)
+			}
+			return nil
 		}},
 		// The bank group's edit control doesn't render until the panel
-		// finishes settling after the bank is added.
-		{"let bank group render", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Sleep(1*time.Second))
-		}},
+		// finishes settling after the bank is added; the next step polls for
+		// exactly that control.
 		{"wait for bank group to appear", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(30*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankGroupPresentJS, chromedp.WithPollingTimeout(30*time.Second)))
 		}},
 		{"edit Item Bank group", func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickEditBankGroupJS)
@@ -562,8 +873,8 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			}
 			return nil
 		}},
-		{"let edit panel open", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Sleep(2*time.Second))
+		{"wait for edit panel", func(ctx context.Context) error {
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](radioLabelPresentJS("Randomly select questions"), chromedp.WithPollingTimeout(10*time.Second)))
 		}},
 		{"enable random questions", func(ctx context.Context) error {
 			ok, err := c.evaluateBool(ctx, run, clickRadioLabelJS("Randomly select questions"))
@@ -576,12 +887,9 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return nil
 		}},
 		// The "Number of questions" field only exists after the radio above
-		// switches the panel into random-selection mode.
-		{"let panel update after enabling random", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Sleep(500*time.Millisecond))
-		}},
+		// switches the panel into random-selection mode, so poll for it.
 		{"locate question count field", func(ctx context.Context) error {
-			ok, err := c.evaluateBool(ctx, run, markQuestionCountInputJS())
+			ok, err := c.evaluatePollBool(ctx, run, markQuestionCountInputJS(), 10*time.Second)
 			if err != nil {
 				return err
 			}
@@ -591,16 +899,28 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 			return nil
 		}},
 		{"set question count", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Tasks{
-				chromedp.Click(questionCountSelector, chromedp.ByQuery),
-				chromedp.SendKeys(questionCountSelector, fmt.Sprintf("%d", req.QuestionCount), chromedp.ByQuery),
-			})
+			return runResilient(ctx, run, chromedp.Steps(
+				// Deliberately left as chromedp.Click, not JS dispatch: the
+				// following SendKeys needs real keyboard focus on this InstUI
+				// NumberInput, which a JS .click() doesn't reliably give it.
+				// Do not "fix" this into clickJS/evaluateBool without checking
+				// that focus still works for the SendKeys below.
+				chromedp.Click(chromedp.CSS(questionCountSelector)),
+				chromedp.SendKeys(chromedp.CSS(questionCountSelector), fmt.Sprintf("%d", req.QuestionCount)),
+			))
 		}},
 		{"save Item Bank group", func(ctx context.Context) error {
-			return runResilient(ctx, run, clickTextInsensitive("Done"))
+			ok, err := c.evaluateBool(ctx, run, clickTextInsensitiveJS("Done"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf(`"Done" control not found`)
+			}
+			return nil
 		}},
 		{"verify random group", func(ctx context.Context) error {
-			return runResilient(ctx, run, chromedp.Poll(randomGroupJS(req.BankName, req.QuestionCount), nil, chromedp.WithPollingTimeout(10*time.Second)))
+			return runResilient(ctx, run, chromedp.Poll[chromedp.Void](randomGroupJS(req.BankName, req.QuestionCount), chromedp.WithPollingTimeout(10*time.Second)))
 		}},
 	}
 	for _, step := range steps {
@@ -613,7 +933,7 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 	if c.quizLocation != nil {
 		quizURL, locationErr = c.quizLocation(browser)
 	} else {
-		locationErr = run(browser, chromedp.Location(&quizURL))
+		locationErr = run(browser, capture(chromedp.Location(), &quizURL))
 	}
 	if locationErr != nil {
 		return QuizResult{}, fmt.Errorf("read quiz URL: %w", locationErr)
@@ -642,20 +962,19 @@ func (c ChromedpImporter) CreateRandomQuiz(ctx context.Context, req *QuizRequest
 func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedpRun, quizURL, bankName string, count int) error { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
 	for range 3 {
-		if err := runResilient(ctx, run, chromedp.Tasks{
-			chromedp.Sleep(2 * time.Second),
+		if err := runResilient(ctx, run, chromedp.Steps(
+			chromedp.Sleep(preNavigateDelay),
 			chromedp.Navigate(quizURL),
-			chromedp.WaitReady("body", chromedp.ByQuery),
-			chromedp.Sleep(2 * time.Second),
-		}); err != nil {
+			chromedp.WaitReady(chromedp.CSS("body")),
+		)); err != nil {
 			lastErr = err
 			continue
 		}
-		if err := runResilient(ctx, run, chromedp.Poll(bankGroupPresentJS, nil, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankGroupPresentJS, chromedp.WithPollingTimeout(20*time.Second))); err != nil {
 			lastErr = err
 			continue
 		}
-		if err := runResilient(ctx, run, chromedp.Poll(randomGroupJS(bankName, count), nil, chromedp.WithPollingTimeout(10*time.Second))); err != nil {
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](randomGroupJS(bankName, count), chromedp.WithPollingTimeout(10*time.Second))); err != nil {
 			lastErr = err
 			continue
 		}
@@ -669,135 +988,232 @@ func (c ChromedpImporter) confirmQuizPersisted(ctx context.Context, run chromedp
 // Item Bank after the QTI package's own assessment title until the caller's
 // rename-back step (later in Import()) runs, so a fresh re-navigate during
 // that window can find the bank listed under that title instead of
-// req.BankName. Uses a direct JS .click() (like clickEditBankGroupJS above)
+// req.BankName. Only body-row name buttons match (see bankRowButtonFinderJS),
+// so a bank named "Questions" never clicks the table's header button. Uses a direct JS .click() (like clickEditBankGroupJS above)
 // rather than chromedp.Click's real mouse-event dispatch, so a miss on both
 // names returns false immediately instead of blocking on a selector that
 // will never appear.
 func clickBankRowJS(primary, fallback string) string {
-	find := func(name string) string {
-		return `Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === ` + jsString(name) + `)`
-	}
 	return `(() => {
-		let target = ` + find(primary) + `;
-		if (!target && ` + jsString(fallback) + `) { target = ` + find(fallback) + `; }
+		let target = ` + bankRowButtonFinderJS(jsString(primary)) + `;
+		if (!target && ` + jsString(fallback) + `) { target = ` + bankRowButtonFinderJS(jsString(fallback)) + `; }
 		if (target) { target.click(); return true; }
 		return false;
 	})()`
 }
 
-// reopenBankTasks re-navigates fresh (not Reload — a reload can be served
-// from bfcache/client-side router state and so wouldn't disprove the
-// optimistic-UI theory) to banksURL and opens the bank listed as either
-// bankName or expectedBankName, waiting for its actions button to confirm
-// the detail page — not just the list page — actually finished rendering
-// before a caller polls anything on it.
-func reopenBankTasks(banksURL, bankName, expectedBankName string) chromedp.Tasks {
-	return chromedp.Tasks{
-		chromedp.Sleep(2 * time.Second),
-		chromedp.Navigate(banksURL),
-		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(time.Second),
-		chromedp.Evaluate(clickBankRowJS(bankName, expectedBankName), nil),
-		chromedp.Sleep(2 * time.Second),
-		chromedp.WaitVisible(`button[aria-haspopup="true"]`, chromedp.ByQuery),
-	}
+// bankHeaderRowFnJS is the JS arrow function that returns a table's header
+// row: its first thead row, or its first row when there is no thead.
+const bankHeaderRowFnJS = `t => t && (t.querySelector('thead tr') || t.querySelector('tr'))`
+
+// bankRowButtonFinderJS returns a JS expression that evaluates to the name
+// <button> of the Item Banks list body row whose innerText.trim() equals the
+// name, or undefined when there is none. nameLiteral must already be a
+// quoted JS string literal (jsString output). It is the single definition of
+// "body-row name button" shared by every bank-row lookup (bankListQuestionCountJS,
+// clickBankRowJS, bankExistsJS), so counting a bank and opening it can never
+// resolve different elements: the button must sit in a <tr>, outside <thead>,
+// and in a row that is not the table's header row. Without that scoping a
+// bank literally named "Questions" would match the sortable "Questions"
+// header button. The button must also be the row's first button (its name
+// control, which may follow a selection checkbox cell): later action buttons
+// such as "Edit bank {title}" are never name buttons, so a bank literally
+// named "Edit bank Other" can't resolve to bank "Other"'s edit action.
+// Matching is exact, never substring.
+func bankRowButtonFinderJS(nameLiteral string) string {
+	return `(() => {
+		const headerOf = ` + bankHeaderRowFnJS + `;
+		return Array.from(document.querySelectorAll('button')).find(b => {
+			const tr = b.closest('tr');
+			return tr && b.innerText.trim() === ` + nameLiteral + ` && !b.closest('thead') && tr !== headerOf(tr.closest('table')) && b === tr.querySelector('button');
+		});
+	})()`
 }
 
-// recoverStuckImport re-navigates fresh to the Item Banks list and reopens
-// the bank, then checks whether its item count actually grew past
-// baselineItemCount (the count read just before the import dialog was
-// opened) — used after a timeout on the attach/submit/wait-completion
-// sequence above to tell "Canvas actually finished the import, the UI/CDP
-// hiccup was spurious" apart from "the import genuinely didn't happen".
+// navigateBanksListTasks re-navigates fresh (not Reload - a reload can be
+// served from bfcache/client-side router state and so wouldn't disprove the
+// optimistic-UI theory) to the Item Banks list at banksURL and settles, so a
+// caller can read the list's rows from a freshly loaded document.
+func navigateBanksListTasks(banksURL string) chromedp.Action[chromedp.Void] {
+	steps := chromedp.Steps(
+		chromedp.Sleep(preNavigateDelay),
+		chromedp.Navigate(banksURL),
+		chromedp.WaitReady(chromedp.CSS("body")),
+	)
+	// A distinct func literal (rather than returning steps directly) gives this
+	// batch its own code pointer, so tests can tell it apart from other
+	// Steps batches passed to a mocked run.
+	return func(ctx context.Context, t *chromedp.Target) (chromedp.Void, error) { return steps(ctx, t) }
+}
+
+// errBankRowNotFound reports that the bank's row was absent from the list when
+// it was clicked, typically a transient re-render; callers may retry.
+var errBankRowNotFound = errors.New("item bank row not found in list")
+
+// openBankFromListTasks opens, from the Item Banks list page, the bank listed
+// as either bankName or expectedBankName, waiting for its actions button to
+// confirm the detail page - not just the list page - actually finished
+// rendering before a caller reads anything on it.
+func openBankFromListTasks(bankName, expectedBankName string) chromedp.Action[chromedp.Void] {
+	steps := chromedp.Steps(
+		clickBankRowAction(bankName, expectedBankName),
+		// The click navigates client-side from the list to the bank's detail
+		// route (/banks/<id>); wait for that route change itself, since the
+		// list page could otherwise satisfy the actions-button wait below
+		// before navigation happens.
+		chromedp.Poll[chromedp.Void](bankDetailRouteJS, chromedp.WithPollingTimeout(15*time.Second)),
+		chromedp.WaitVisible(chromedp.CSS(`button[aria-haspopup="true"]`)),
+	)
+	// Distinct func literal, same test-identification reason as navigateBanksListTasks.
+	return func(ctx context.Context, t *chromedp.Target) (chromedp.Void, error) { return steps(ctx, t) }
+}
+
+// recoverStuckImport re-navigates fresh to the Item Banks list and checks
+// whether the bank's question count actually grew past baselineItemCount
+// (the count read just before the import dialog was opened) - used after a
+// timeout on the attach/submit/wait-completion sequence above to tell
+// "Canvas actually finished the import, the UI/CDP hiccup was spurious"
+// apart from "the import genuinely didn't happen". The count is read from the
+// bank's row in the list, not from the detail page's rendered cards, because
+// the detail page paginates at 50 questions (see bankListQuestionCountJS).
 // Requiring growth past the baseline (not just count > 0) matters for
 // ExistingAppend: a bank that already had content before this run's own
 // upload would otherwise satisfy a bare non-zero check even when the
 // upload never completed. baselineItemCount == -1 means the pre-upload read
-// failed — treated as non-recoverable rather than falling back to 0, since
+// failed - treated as non-recoverable rather than falling back to 0, since
 // a false 0 baseline reintroduces exactly the false-positive this baseline
-// exists to prevent. A positive result leaves the browser positioned on the
-// bank's page, exactly where the rest of Import() expects to be after a
-// normal completion.
+// exists to prevent. A positive result reopens the bank, leaving the browser
+// positioned on the bank's page, exactly where the rest of Import() expects
+// to be after a normal completion.
 func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, baselineItemCount int) bool { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	if baselineItemCount < 0 {
 		return false
 	}
 	// sessionCtx is the browser tab's own context, not the deadline-bounded
-	// one the failed step above used — that deadline expiring is exactly one
+	// one the failed step above used - that deadline expiring is exactly one
 	// of the timeout-shaped errors this recovery runs for, so reusing it
 	// would try to navigate/evaluate on an already-dead context.
 	ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
 	defer cancel()
-	if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
+	if err := runResilient(ctx, run, navigateBanksListTasks(banksURL)); err != nil {
 		return false
 	}
-	count, ok := c.stableBankItemCount(ctx, run)
-	return ok && count > baselineItemCount
+	// The list can take a while to hydrate after navigation (see
+	// docs/item-bank-import-flake.md), so a missing row or unstable pair of
+	// reads is retried within the recovery deadline. A stable count at or
+	// below baseline is retried too, since the list may lag a finished import;
+	// only growth past baseline (or running out of attempts) ends the loop.
+	backToList := false
+	for attempt := 0; attempt < recoverReadAttempts; attempt++ {
+		if attempt > 0 {
+			// A failed open can leave the browser on the detail page (the
+			// click navigated, then the task was retried there), so return
+			// to the list before reading again.
+			tasks := waitBankRowReady(bankName, expectedBankName, recoverReadInterval)
+			if backToList {
+				tasks = navigateBanksListTasks(banksURL)
+				backToList = false
+			}
+			if err := runResilient(ctx, run, tasks); err != nil && !isTimeoutLike(err) {
+				return false
+			}
+		}
+		count, ok := c.stableBankItemCount(ctx, run, bankName, expectedBankName)
+		if !ok {
+			continue
+		}
+		if count <= baselineItemCount {
+			// A stable pre-import total can be the list lagging a backend
+			// import that already finished, so keep polling for growth.
+			continue
+		}
+		// Growth is confirmed; a row that vanished again is a transient
+		// re-render, so retry the read-and-open rather than give up.
+		err := runResilient(ctx, run, openBankFromListTasks(bankName, expectedBankName))
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, errBankRowNotFound) {
+			backToList = true
+			continue
+		}
+		return false
+	}
+	return false
 }
 
-// stableBankItemCount reads the bank's rendered item count twice, a short
-// settle apart, and only reports it when both reads agree. The count comes
-// from document.body.innerText over a virtualized card list that can still
-// be mid-render right after a page load — a single transient read (0, or
-// partial) would otherwise corrupt a baseline used to compute an
-// ExistingAppend import's expected final total, or let recoverStuckImport
-// compare against a stale pre-render snapshot.
-func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpRun) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
-	read := func() (int, bool) {
-		if c.bankItemCount != nil {
-			n, err := c.bankItemCount(ctx)
-			return n, err == nil
-		}
-		var n int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &n))
-		return n, err == nil
+const (
+	// recoverReadAttempts is sized to fit recoverStuckImport's 60-second
+	// context: each attempt costs up to recoverReadInterval plus the one-second
+	// settle inside stableBankItemCount, and the initial list navigation takes
+	// about three seconds, so 10 attempts use roughly 43 seconds and leave room
+	// for the final reopen.
+	recoverReadAttempts = 10
+	recoverReadInterval = 3 * time.Second
+)
+
+// bankListItemCount reads the bank's total question count once, from its row
+// in the Item Banks list currently loaded in the browser. ok is false when
+// no row matches (not rendered yet, or not listed under either name) or the
+// read itself failed. Tests substitute bankItemCount for the same reason
+// they substitute evalBool: the mocked run field never populates
+// chromedp.Evaluate's out-parameter.
+func (c ChromedpImporter) bankListItemCount(ctx context.Context, run chromedpRun, bankName, expectedBankName string) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if c.bankItemCount != nil {
+		n, err := c.bankItemCount(ctx)
+		return n, err == nil && n >= 0
 	}
-	first, ok := read()
+	var n int
+	err := run(ctx, evaluateInto(bankListQuestionCountJS(bankName, expectedBankName), &n))
+	return n, err == nil && n >= 0
+}
+
+// stableBankItemCount reads the bank's list-row question count twice, a
+// short settle apart, and only reports it when both reads agree. The list
+// can still be mid-render right after a page load - a single transient read
+// (a missing row, or a partial count) would otherwise corrupt a baseline
+// used to compute an ExistingAppend import's expected final total, or let
+// recoverStuckImport compare against a stale pre-render snapshot.
+func (c ChromedpImporter) stableBankItemCount(ctx context.Context, run chromedpRun, bankName, expectedBankName string) (int, bool) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	first, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
 	if !ok {
 		return 0, false
 	}
 	if err := run(ctx, chromedp.Sleep(time.Second)); err != nil {
 		return 0, false
 	}
-	second, ok := read()
+	second, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
 	if !ok || second != first {
 		return 0, false
 	}
 	return first, true
 }
 
-// pollBankItemCount waits for the imported bank's rendered question count to
-// match expected, retrying by re-navigating fresh to the bank's own page
-// when the in-page poll times out. bankItemCountMatchesJS's 30s window
-// observed too tight for larger banks (60+ questions); this mirrors
+// pollBankItemCount waits for the imported bank's total question count to
+// match expected, then leaves the browser on the bank's detail page. The
+// count is read from the bank's row in the Item Banks list, never from the
+// detail page's rendered cards: Canvas paginates the detail page at 50
+// questions, so a card count can never reach the total for a larger bank
+// (see bankListQuestionCountJS). Every attempt navigates fresh to banksURL
+// (not Reload), polls the list row until the count matches, and on a match
+// opens the bank (the rest of Import() reads the detail page's URL). A
+// timeout on an attempt retries from a fresh document, mirroring
 // confirmQuizPersisted's re-navigate-and-recheck pattern for the same class
-// of "backend already succeeded, UI/count hasn't caught up yet" race, just
-// further upstream on the plain bank-import path (no --create-random-quiz).
-// It only confirms the count matches — callers still read the actual value
-// via bankItemCountJS afterward. Only a timeout-shaped error triggers a
-// retry; a selector/logic error, closed-target error, or cancellation
-// returns immediately instead of burning the retry budget on an error a
-// re-navigate can't fix.
-// pollBankItemCount takes sessionCtx — the browser tab's own context, not the
-// deadline-bounded one Import()'s other steps use — because a timeout-shaped
+// of "backend already succeeded, UI/count hasn't caught up yet" race. Only a
+// timeout-shaped error triggers a retry; a selector/logic error,
+// closed-target error, or cancellation returns immediately instead of
+// burning the retry budget on an error a re-navigate can't fix.
+//
+// pollBankItemCount takes sessionCtx - the browser tab's own context, not the
+// deadline-bounded one Import()'s other steps use - because a timeout-shaped
 // error triggering a retry here can be that outer deadline itself expiring,
 // in which case reusing it would try to navigate/evaluate on an already-dead
 // context. Each attempt gets its own fresh bounded child instead.
 func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chromedpRun, banksURL, bankName, expectedBankName string, expected int) (int, error) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
 	var lastErr error
-	for attempt := range 3 {
+	for range 3 {
 		ctx, cancel := context.WithTimeout(sessionCtx, 60*time.Second)
-		if attempt > 0 {
-			if err := runResilient(ctx, run, reopenBankTasks(banksURL, bankName, expectedBankName)); err != nil {
-				cancel()
-				if !isTimeoutLike(err) {
-					return 0, err
-				}
-				lastErr = err
-				continue
-			}
-		}
-		if err := runResilient(ctx, run, chromedp.Poll(bankItemCountMatchesJS(expected), nil, chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+		if err := runResilient(ctx, run, navigateBanksListTasks(banksURL)); err != nil {
 			cancel()
 			if !isTimeoutLike(err) {
 				return 0, err
@@ -805,11 +1221,28 @@ func (c ChromedpImporter) pollBankItemCount(sessionCtx context.Context, run chro
 			lastErr = err
 			continue
 		}
-		var itemCount int
-		err := run(ctx, chromedp.Evaluate(bankItemCountJS, &itemCount))
+		if err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](bankListCountMatchesJS(bankName, expectedBankName, expected), chromedp.WithPollingTimeout(30*time.Second))); err != nil {
+			cancel()
+			if !isTimeoutLike(err) {
+				return 0, err
+			}
+			lastErr = err
+			continue
+		}
+		itemCount, ok := c.bankListItemCount(ctx, run, bankName, expectedBankName)
+		if !ok {
+			cancel()
+			lastErr = fmt.Errorf("read Item Bank %q question count from list: row not found", bankName)
+			continue
+		}
+		err := runResilient(ctx, run, openBankFromListTasks(bankName, expectedBankName))
 		cancel()
 		if err != nil {
-			return 0, err
+			if !isTimeoutLike(err) && !errors.Is(err, errBankRowNotFound) {
+				return 0, err
+			}
+			lastErr = err
+			continue
 		}
 		return itemCount, nil
 	}
@@ -834,18 +1267,47 @@ func validateQuizRequest(req *QuizRequest, requireBankID bool) error {
 
 // renameBankUI renames an Item Bank through the Banks list's "Edit bank"
 // dialog, then reopens the bank under its new title so callers land back on
-// the bank detail page they were on before the rename.
-func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newTitle string) error {
-	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+// the bank detail page they were on before the rename. evalBool, when
+// non-nil, overrides both the click-checking and poll-checking behavior the
+// same way ChromedpImporter.evalBool/evaluatePollBool do for
+// evaluateBool/evaluatePollBool — renameBankUI is a free function (not a
+// ChromedpImporter method) so it takes the hook as a parameter instead: the
+// mocked run field tests use never populates chromedp.Evaluate's
+// out-parameter, so a test needs some way to report a click's found/clicked
+// (or a poll's found) signal as true.
+func renameBankUI(ctx context.Context, run chromedpRun, evalBool func(context.Context, string) (bool, error), banksURL, oldTitle, newTitle string) error {
+	clickCheck := func(ctx context.Context, js string) (bool, error) { return evaluateBoolViaRun(ctx, run, js) }
+	pollCheck := func(ctx context.Context, js string, timeout time.Duration) (bool, error) {
+		return evaluatePollBoolViaRun(ctx, run, js, timeout)
+	}
+	if evalBool != nil {
+		clickCheck = evalBool
+		pollCheck = func(ctx context.Context, js string, _ time.Duration) (bool, error) { return evalBool(ctx, js) }
+	}
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 		return fmt.Errorf("open Item Banks: %w", err)
 	}
 	// The accessible name ("Edit bank {title}") comes from a visually-hidden
 	// text node inside the button, not a literal aria-label attribute, so
 	// this matches on text content like the rest of this file's helpers do.
-	if err := run(ctx, clickText("Edit bank "+oldTitle)); err != nil {
+	// Live-confirmed (headless E2E): there is no settle between the navigate
+	// above and this click, and the Banks list's React content can still be
+	// hydrating at this point (same render race as Import()'s "Create Bank"
+	// button click) — poll instead of a one-shot click.
+	//
+	// Exact match, not substring: a substring match on "Edit bank "+oldTitle
+	// would let a course containing both "Edit bank Chapter 1" and "Edit bank
+	// Chapter 11" controls silently click the wrong one when renaming
+	// "Chapter 1" — the same bank-name mismatch bug fixed at Import()'s
+	// open-bank click site (see its doc comment).
+	opened, err := pollCheck(ctx, editBankActionJS(oldTitle), 15*time.Second)
+	if err != nil {
 		return fmt.Errorf("open edit bank dialog: %w", err)
 	}
-	if err := run(ctx, chromedp.WaitVisible("[role=dialog] input", chromedp.ByQuery)); err != nil {
+	if !opened {
+		return fmt.Errorf("open edit bank dialog: %q not found", "Edit bank "+oldTitle)
+	}
+	if err := run(ctx, chromedp.WaitVisible(chromedp.CSS("[role=dialog] input"))); err != nil {
 		return fmt.Errorf("wait for bank-name field: %w", err)
 	}
 	// chromedp.Clear sets the DOM value directly, which this React-controlled
@@ -858,16 +1320,62 @@ func renameBankUI(ctx context.Context, run chromedpRun, banksURL, oldTitle, newT
 	// non-ASCII title and leave stale characters behind.
 	clearOldTitle := strings.Repeat(kb.Backspace, utf8.RuneCountInString(oldTitle))
 	if err := run(ctx,
-		chromedp.Click("[role=dialog] input", chromedp.ByQuery),
-		chromedp.SendKeys("[role=dialog] input", kb.End+clearOldTitle+newTitle, chromedp.ByQuery),
+		// Deliberately left as chromedp.Click, not JS dispatch: the following
+		// SendKeys needs real keyboard focus on this React-controlled input,
+		// which a JS .click() doesn't reliably give it. Do not "fix" this into
+		// clickJS/evaluateBool without checking that focus still works.
+		chromedp.Click(chromedp.CSS("[role=dialog] input")),
+		chromedp.SendKeys(chromedp.CSS("[role=dialog] input"), kb.End+clearOldTitle+newTitle),
 	); err != nil {
 		return fmt.Errorf("set bank name: %w", err)
 	}
-	if err := run(ctx, clickTextInDialog("Save Changes"), chromedp.Sleep(500*time.Millisecond)); err != nil {
+	saved, err := clickCheck(ctx, clickTextJS([]string{`[role="dialog"] button`, `[role="dialog"] a`}, "Save Changes", true))
+	if err != nil {
 		return fmt.Errorf("save bank name: %w", err)
 	}
-	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady("body", chromedp.ByQuery), clickText(newTitle)); err != nil {
+	if !saved {
+		return fmt.Errorf(`save bank name: "Save Changes" button not found`)
+	}
+	// The dialog closing is the signal that the rename was accepted.
+	if err := run(ctx, chromedp.Poll[chromedp.Void](dialogClosedJS, chromedp.WithPollingTimeout(15*time.Second))); err != nil {
+		return fmt.Errorf("save bank name: %w", err)
+	}
+	// WaitReady("body") alone confirms the document is ready, not that the
+	// React bank list has finished rendering; the poll below waits for that.
+	if err := run(ctx, chromedp.Navigate(banksURL), chromedp.WaitReady(chromedp.CSS("body"))); err != nil {
 		return fmt.Errorf("reopen renamed Item Bank: %w", err)
+	}
+	// Same "body-ready isn't React-ready" race Import()'s post-create-bank
+	// check guards against (see evaluatePollBool's use site there): this
+	// reopens the SAME bank list right after a rename, so a one-shot check
+	// immediately after the Sleep above can just as easily land on a render
+	// that hasn't caught up yet and report a false "not found". Poll for the
+	// bank's new title to actually be present before attempting the click,
+	// rather than a single blind attempt.
+	// Live-confirmed: both 5s and 15s were occasionally too tight for
+	// Canvas's own render/autosave latency here (intermittent live failure,
+	// not reproducible every run — this reopens the same course Banks list
+	// Import()'s post-create-bank check reads, and a course accumulating
+	// many banks over repeated runs may render that list more slowly).
+	// Bumped to 30s to match this file's other bank-list-reading polls
+	// (addFromBankReadyJS, bankListCountMatchesJS) that already use that
+	// budget for the same kind of Canvas-side latency.
+	visible, err := pollCheck(ctx, bankExistsJS(jsString(newTitle)), 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("reopen renamed Item Bank: %w", err)
+	}
+	if !visible {
+		return fmt.Errorf("reopen renamed Item Bank: %q not found in bank list", newTitle)
+	}
+	// Exact match, not substring — same bank-name mismatch bug fixed at
+	// Import()'s open-bank click site: a substring match could reopen a
+	// different bank whose name merely contains newTitle as a prefix.
+	reopened, err := clickCheck(ctx, clickBankRowJS(newTitle, ""))
+	if err != nil {
+		return fmt.Errorf("reopen renamed Item Bank: %w", err)
+	}
+	if !reopened {
+		return fmt.Errorf("reopen renamed Item Bank: %q not found in bank list", newTitle)
 	}
 	return nil
 }
@@ -878,7 +1386,7 @@ func (c ChromedpImporter) checkQuizCollision(ctx context.Context, run chromedpRu
 	if c.quizExists != nil {
 		collision, err = c.quizExists(ctx, title)
 	} else {
-		err = run(ctx, chromedp.Evaluate(quizExistsJS(title), &collision))
+		err = run(ctx, evaluateInto(quizExistsJS(title), &collision))
 	}
 	if err != nil {
 		return fmt.Errorf("check quiz title collision: %w", err)
@@ -898,9 +1406,71 @@ func (c ChromedpImporter) evaluateBool(ctx context.Context, run chromedpRun, js 
 	if c.evalBool != nil {
 		return c.evalBool(ctx, js)
 	}
+	return evaluateBoolViaRun(ctx, run, js)
+}
+
+// evaluateBoolViaRun is evaluateBool's production (non-hook) path, factored
+// out as a free function so call sites with no ChromedpImporter receiver at
+// hand (e.g. renameBankUI) can still check a click's found/clicked signal
+// instead of discarding it.
+func evaluateBoolViaRun(ctx context.Context, run chromedpRun, js string) (bool, error) {
 	var ok bool
-	err := runResilient(ctx, run, chromedp.Evaluate(js, &ok))
+	err := runResilient(ctx, run, evaluateInto(js, &ok))
 	return ok, err
+}
+
+// evaluatePollBool is evaluateBool's polling counterpart: it waits (via
+// chromedp.Poll) up to timeout for js to become true, rather than reading it
+// once. Used where body-ready doesn't guarantee the page's React content has
+// actually finished rendering yet (see its use site in Import()). Tests
+// substitute the same evalBool hook evaluateBool uses, one-shot, since
+// chromedp.Poll can't be observed through a mocked run field either. See
+// evaluatePollBoolViaRun's doc comment for the full (false, nil)-vs-error
+// contract this delegates to in production.
+func (c ChromedpImporter) evaluatePollBool(ctx context.Context, run chromedpRun, js string, timeout time.Duration) (bool, error) { //nolint:gocritic // ChromedpImporter is passed by value throughout this file
+	if c.evalBool != nil {
+		return c.evalBool(ctx, js)
+	}
+	return evaluatePollBoolViaRun(ctx, run, js, timeout)
+}
+
+// evaluatePollBoolViaRun is evaluatePollBool's production (non-hook) path,
+// factored out as a free function so call sites with no ChromedpImporter
+// receiver at hand (e.g. renameBankUI's post-rename reopen) can poll for a
+// condition instead of only being able to one-shot evaluateBoolViaRun — the
+// same reasoning evaluateBoolViaRun's doc comment gives for its own split
+// from evaluateBool.
+//
+// isTimeoutLike matches both "this specific chromedp.Poll's own
+// WithPollingTimeout expired" and "ctx's own outer deadline (e.g. Import()'s
+// workCancel budget) expired while this poll was in flight" — chromedp
+// surfaces both as the same "context deadline exceeded"-shaped error, with no
+// way to tell them apart from the error alone. Collapsing both to a clean
+// (false, nil) "not found" (as this used to do unconditionally) is correct
+// for the first case — callers build clear "not found" error messages around
+// it — but wrong for the second: a caller's own time budget running out
+// mid-poll says nothing about whether the element exists, and reporting it as
+// a confirmed "not found" produced a live, misleading "Item Bank was not
+// found" error that was actually just Import()'s 150s budget expiring.
+// Disambiguate by checking ctx.Err() once the poll gives up: if ctx is
+// already done — its own deadline expired, or it was explicitly canceled
+// (ctx.Err() is context.Canceled rather than DeadlineExceeded, e.g. a Ctrl-C
+// or a parent cancellation) — that outer event is what actually happened, so
+// surface it as a real, distinguishable error instead of a false-negative
+// "not found"; only report the clean (false, nil) when ctx is still live and
+// it was genuinely this poll's own timeout that elapsed.
+func evaluatePollBoolViaRun(ctx context.Context, run chromedpRun, js string, timeout time.Duration) (bool, error) {
+	err := runResilient(ctx, run, chromedp.Poll[chromedp.Void](js, chromedp.WithPollingTimeout(timeout)))
+	if err != nil {
+		if isTimeoutLike(err) {
+			if ctx.Err() != nil {
+				return false, fmt.Errorf("operation's own context ended while polling, not a confirmed not-found (%w)", ctx.Err())
+			}
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func canvasURL(rawBase, courseID, path string) (string, error) {
@@ -978,14 +1548,32 @@ func markQuestionCountInputJS() string {
 const (
 	quizTitleSelector = `input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]`
 	bankTitleJS       = `(() => { const h = document.querySelector('h1'); return h ? h.innerText.trim() : ''; })()`
-	// Each question card's type label reads e.g. "Multiple Choice | Question
-	// Question 18" (recorded live on the bank detail page; Canvas has no
-	// data-testid or stable class on these cards). Counting matches of that
-	// repeated "Question Question N" fragment in the page's rendered text is
-	// more reliable than any single selector, since the question list is
-	// virtualized and not every card selector matches every render.
-	bankItemCountJS       = `(document.body.innerText.match(/Question Question \d+/g) || []).length`
-	selectNewQuizEngineJS = `(() => { const nodes = Array.from(document.querySelectorAll('label,button,[role="radio"]')); const engine = nodes.find(el => el.innerText.trim().toLowerCase() === 'new quizzes'); if (!engine) return false; engine.click(); const submit = Array.from(document.querySelectorAll('button')).find(el => /^(submit|continue)$/i.test(el.innerText.trim())); if (submit) submit.click(); return true; })()`
+	// Live-confirmed: the engine-choice dialog's radio label reads "New
+	// Quizzes/Surveys", not a bare "New Quizzes" — the exact-equality match
+	// this used to use never matched it, so the radio was never selected,
+	// the dialog never got submitted, and every downstream step (starting
+	// with "wait for quiz title") hung until the outer timeout. Matched via
+	// startsWith rather than includes so an unrelated label that merely
+	// mentions "new quizzes" elsewhere in its text can't false-match.
+	//
+	// Returns one of three strings, not a plain boolean, so the call site
+	// (CreateRandomQuiz's "select New Quizzes if prompted" step) can tell
+	// "no dialog present" (expected, not an error) apart from "radio
+	// clicked but never actually submitted" (a real error — see
+	// interpretEngineChoiceResult): "no_dialog" when the radio itself isn't
+	// found at all; "clicked_no_submit" when the radio was found and
+	// clicked but no submit/continue button was found afterward;
+	// "submitted" when the radio was clicked and the submit/continue button
+	// was also found and clicked. This "submit" search has never been
+	// live-validated (the exact-match bug this replaced meant the radio was
+	// never actually clicked in any prior live run) — if Canvas's
+	// engine-choice dialog turns out to auto-advance on radio selection
+	// alone, or labels its control something other than a bare
+	// "Submit"/"Continue", a genuinely successful click could otherwise be
+	// misreported as "clicked_no_submit". Guard against that: if the radio
+	// itself is no longer in the document after being clicked (the dialog
+	// closed/advanced on its own), treat that as success too, not a miss.
+	selectNewQuizEngineJS = `(() => { const nodes = Array.from(document.querySelectorAll('label,button,[role="radio"]')); const engine = nodes.find(el => el.innerText.trim().toLowerCase().startsWith('new quizzes')); if (!engine) return 'no_dialog'; engine.click(); const submit = Array.from(document.querySelectorAll('button')).find(el => /^(submit|continue)$/i.test(el.innerText.trim())); if (!submit) return engine.isConnected ? 'clicked_no_submit' : 'submitted'; submit.click(); return 'submitted'; })()`
 	quizSetupReadyJS      = `Boolean(document.querySelector('input[name="name"], input[aria-label*="Assignment Name" i], input[placeholder*="Assignment Name" i]')) || document.body.innerText.toLowerCase().includes('new quizzes')`
 	addFromBankReadyJS    = `document.body.innerText.toLowerCase().includes('add from item bank')`
 	// bankGroupPresentJS checks for the same structural marker
@@ -1009,35 +1597,221 @@ const (
 	loginButtonSelector = `form button[type="submit"]`
 
 	loginPageDetectedJS = `Boolean(document.querySelector('#username'))`
-	loginSucceededJS    = `!document.querySelector('#username')`
 )
+
+// loginSucceededJS is true once the page shows no login form AND is back on
+// origin (the Canvas origin ensureSession logged in to). The origin check
+// keeps the poll from passing on an SSO interstitial or IdP page that merely
+// lacks a #username field while the redirect chain back into Canvas is still
+// in flight. An empty origin (unparseable base URL) falls back to the
+// form-absence check alone.
+func loginSucceededJS(origin string) string {
+	if origin == "" {
+		return `!document.querySelector('#username')`
+	}
+	return `!document.querySelector('#username') && location.origin === ` + jsString(origin)
+}
+
+// canvasOrigin returns base's scheme://host, or "" when it can't be parsed.
+func canvasOrigin(base string) string {
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// interpretEngineChoiceResult turns selectNewQuizEngineJS's three-way string
+// result into an error/no-error decision for CreateRandomQuiz's "select New
+// Quizzes if prompted" step. Canvas doesn't always show the engine-choice
+// dialog, so "no_dialog" is expected and not an error; "submitted" (radio
+// clicked and the submit/continue control also found and clicked) is
+// likewise success. Only "clicked_no_submit" — the radio was found and
+// clicked, but no submit/continue button was found afterward — is a genuine
+// error: silently tolerating it here (as an undifferentiated boolean used to)
+// let execution fall straight into the unbounded WaitVisible(quizTitleSelector)
+// that follows this step, hanging until CreateRandomQuiz's outer 240s budget
+// expired with no clue this half-interacted dialog was the real cause — the
+// exact failure shape (silently missed click -> unbounded downstream wait ->
+// confusing timeout far from the real cause) the rest of this file's InstUI
+// click fixes exist to eliminate. Any other/unrecognized value (including
+// empty — e.g. under a test run mock that never populates chromedp.Evaluate's
+// out-parameter) is treated permissively as a no-op success, matching this
+// step's pre-existing tolerant behavior for "dialog absent".
+func interpretEngineChoiceResult(outcome string) error {
+	if outcome == "clicked_no_submit" {
+		return fmt.Errorf("engine-choice dialog: radio selected but no submit/continue button found")
+	}
+	return nil
+}
 
 func bankTitleMatchesJS(title string) string {
 	return `(() => { const h = document.querySelector('h1'); return Boolean(h && h.innerText.trim() === ` + jsString(title) + `); })()`
 }
 
-func bankItemCountMatchesJS(count int) string {
-	return fmt.Sprintf("(%s) === %d", bankItemCountJS, count)
+// bankListQuestionCountJS builds a JS expression for the total question
+// count of the bank listed as primary - or, if not found, as fallback (same
+// fallback semantics as clickBankRowJS) - read from the Item Banks list page.
+// It evaluates to the integer count, or -1 when no row matches or the count
+// cell isn't a number yet.
+//
+// The count comes from the list, not the bank detail page, because Canvas New
+// Quizzes paginates the detail page at 50 questions per page (live check on
+// a 76-question bank: 50 cards rendered, numbered 27..76, with page controls
+// "1" and "2"), so counting rendered cards there can never reach a larger
+// bank's true total. Each list row is a <tr> whose first cell holds a
+// <button> with the bank name; the total sits in the column whose header
+// text starts with "Questions", case-insensitively, so trailing screen-reader
+// text like a sort label is tolerated (index 2 when the header can't be
+// found). Row lookup uses the shared bankRowButtonFinderJS (body rows only), so a
+// bank literally named "Questions" can't match the header button, and the cell must be digits and commas only
+// (never a prefix parse). Matching is exact (innerText.trim() ===), never
+// substring, like clickBankRowJS and bankExistsJS: "Chapter 1" must not match
+// "Chapter 11".
+func bankListQuestionCountJS(primary, fallback string) string {
+	return `(() => {
+		const headerOf = ` + bankHeaderRowFnJS + `;
+		let btn = ` + bankRowButtonFinderJS(jsString(primary)) + `;
+		if (!btn && ` + jsString(fallback) + `) { btn = ` + bankRowButtonFinderJS(jsString(fallback)) + `; }
+		if (!btn) { return -1; }
+		const row = btn.closest('tr');
+		let col = 2;
+		const headRow = headerOf(row.closest('table'));
+		if (headRow) {
+			const idx = Array.from(headRow.children).findIndex(h => h.innerText.trim().toLowerCase().startsWith('questions'));
+			if (idx >= 0) { col = idx; }
+		}
+		const cell = row.children[col];
+		if (!cell) { return -1; }
+		const text = cell.innerText.trim();
+		if (!/^[\d,]+$/.test(text)) { return -1; }
+		const n = parseInt(text.replace(/,/g, ''), 10);
+		return Number.isNaN(n) ? -1 : n;
+	})()`
 }
 
-// textXPathInsensitive builds the case-insensitive text-match XPath expression
-// shared by clickTextInsensitive and the "add Item Bank to quiz" step, which
-// also needs to WaitEnabled on the identical node before clicking it.
+// bankListCountMatchesJS builds the in-page poll predicate for
+// pollBankItemCount: true once the bank's list-row question count equals
+// count (see bankListQuestionCountJS).
+func bankListCountMatchesJS(primary, fallback string, count int) string {
+	return fmt.Sprintf("(%s) === %d", bankListQuestionCountJS(primary, fallback), count)
+}
+
+// textXPathInsensitive builds the case-insensitive text-match XPath
+// expression used by the "add Item Bank to quiz" step in CreateRandomQuiz,
+// which needs to WaitEnabled on the identical node before clicking it — see
+// that step's doc comment for why the wait and click must resolve to exactly
+// the same node.
 func textXPathInsensitive(text string) string {
 	lower := strings.ToLower(text)
 	translate := "translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
 	return "//*[self::button or self::a or @role='button'][contains(" + translate + ", " + xpathString(lower) + ")]"
 }
 
-func clickTextInsensitive(text string) chromedp.Action {
-	return chromedp.Click(textXPathInsensitive(text), chromedp.BySearch)
+// clickJS returns a JS snippet that evaluates matchExpr (a JS expression
+// yielding a single Element, or null/undefined on no match) and, if found,
+// dispatches a real DOM .click() directly on it, instead of going through
+// chromedp.Click's synthetic mouse-event hit-testing. Recorded live against
+// Canvas's Instructure UI (InstUI) React components: a hit-test click at an
+// InstUI control's computed center can silently miss (icon/facade wrappers,
+// a checkbox visually covered by its own label) with no chromedp error and
+// no visible effect — first diagnosed and fixed for the per-group "Edit Bank
+// containing questions..." control (see clickEditBankGroupJS's doc comment
+// below), generalized here so every other InstUI button/checkbox click in
+// this file goes through the same, proven-reliable dispatch instead of each
+// call site hand-rolling its own find-and-click snippet. Every clickJS-
+// derived click site in this file routes its result through evaluateBool (or
+// a clickCheck-style wrapper around it, e.g. renameBankUI's) and errors out
+// on a miss — none pass a bare nil out-param and silently ignore it, since a
+// silently-missed click is exactly the failure class this helper exists to
+// catch (see docs/item-bank-import-flake.md).
+func clickJS(matchExpr string) string {
+	return `(() => {
+		const target = ` + matchExpr + `;
+		if (target) { target.click(); return true; }
+		return false;
+	})()`
 }
 
-// clickBank matches an Item Bank entry in the "Add from item bank" picker by
-// its exact name text. Recorded live: entries there carry no data-bank-id or
-// /banks/{id}-patterned href to match on, just plain link text.
-func clickBank(bankName string) chromedp.Action {
-	return chromedp.Click("//*[self::button or self::a or @role='button'][normalize-space()="+xpathString(strings.TrimSpace(bankName))+"]", chromedp.BySearch)
+// clickSelectorJS returns clickJS matching the first element found by a
+// plain CSS selector — used both for a stable data-automation attribute
+// (preferred wherever Canvas exposes one on an InstUI control; confirmed live
+// for the create-bank submit button, since it is more robust than
+// text-content matching to Canvas UI copy/wording changes) and other plain
+// selectors with no such attribute, like the Item Bank actions popover
+// trigger and its menu item.
+func clickSelectorJS(selector string) string {
+	return clickJS(`document.querySelector(` + jsString(selector) + `)`)
+}
+
+// checkCheckboxJS returns a JS snippet that ensures the checkbox matched by
+// selector ends up checked, clicking it only if it isn't already, and
+// returns its final .checked value — not just whether an element was found.
+// A plain clickJS/clickSelectorJS .click() toggles a checkbox's state, so
+// reusing either against a checkbox Canvas may already default to checked
+// (the create-bank "Share with course" checkbox) could silently *uncheck* it
+// while still reporting a clean "found" success; this checks state first so
+// the same call is idempotent regardless of the checkbox's starting state.
+// Kept as its own small helper rather than folded into clickSelectorJS/
+// clickJS, since every other click site in this file genuinely wants an
+// unconditional toggle-by-click and this one specifically must not.
+func checkCheckboxJS(selector string) string {
+	return `(() => {
+		const target = document.querySelector(` + jsString(selector) + `);
+		if (!target) return false;
+		if (!target.checked) target.click();
+		return target.checked;
+	})()`
+}
+
+// clickTextJS returns clickJS matching the first element among tags (a list
+// of tag names or compound CSS selectors, ORed together) whose trimmed
+// innerText matches text — exact equality when exact is true, substring
+// otherwise. Uses innerText (like every other JS helper in this file — see
+// bankExistsJS, clickBankRowJS), not textContent: innerText excludes hidden
+// and duplicate text, which is exactly what avoids a nested icon label
+// duplicating text into an element's own textContent (recorded live:
+// Canvas's top-level "Create Bank" button's textContent actually renders as
+// "Create BankBank", which innerText.trim() does not reproduce). Substring
+// matching is deliberately forgiving of that kind of artifact regardless.
+func clickTextJS(tags []string, text string, exact bool) string {
+	selector := strings.Join(tags, ",")
+	cmp := "el.innerText.trim().includes(" + jsString(text) + ")"
+	if exact {
+		cmp = "el.innerText.trim() === " + jsString(text)
+	}
+	return clickJS(`Array.from(document.querySelectorAll(` + jsString(selector) + `)).find(el => ` + cmp + `)`)
+}
+
+// editBankActionJS clicks the Banks list row's "Edit bank {title}" action.
+// It skips a row's first button (the bank-name control, see
+// bankRowButtonFinderJS), so renaming "X" can't click the name button of a
+// bank literally titled "Edit bank X".
+func editBankActionJS(title string) string {
+	return clickJS(`Array.from(document.querySelectorAll(` + jsString(strings.Join(buttonOrLinkTags, ",")) + `)).find(el => {
+			const tr = el.closest('tr');
+			return el.innerText.trim() === ` + jsString("Edit bank "+title) + ` && !(tr && el === tr.querySelector('button'));
+		})`)
+}
+
+// clickTextInsensitiveJS is clickTextJS's case-insensitive-substring
+// counterpart, matching among button/a/[role="button"] elements — the same
+// element set textXPathInsensitive's XPath matched, kept for the InstUI
+// controls (e.g. "Quiz/Survey", "Build", "Done") that render their
+// clickable text with a case Canvas doesn't guarantee.
+func clickTextInsensitiveJS(text string) string {
+	lower := strings.ToLower(text)
+	return clickJS(`Array.from(document.querySelectorAll('button,a,[role="button"]')).find(el => el.innerText.trim().toLowerCase().includes(` + jsString(lower) + `))`)
+}
+
+// clickXPathJS returns clickJS matching the first element found by
+// document.evaluate(xpath, ...) — used where a click must land on exactly the
+// same node a chromedp WaitEnabled/WaitVisible XPath expression already
+// waited on (see importButtonXPath's use in Import() and the "add Item Bank
+// to quiz" step in CreateRandomQuiz), so the two can't resolve to different
+// elements in a dialog with more than one matching button.
+func clickXPathJS(xpath string) string {
+	return clickJS(`document.evaluate(` + jsString(xpath) + `, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`)
 }
 
 // clickEditBankGroupJS matches the per-group "Edit Bank containing questions
@@ -1059,9 +1833,9 @@ const clickEditBankGroupJS = `(() => {
 })()`
 
 // clickRadioLabelJS clicks the <label> whose text matches (case-insensitive),
-// via JS .click() rather than clickTextInsensitive's XPath. Instructure's
+// via JS .click() rather than textXPathInsensitive's XPath. Instructure's
 // radio buttons render their clickable text inside a <label>, not a
-// button/a/[role=button] — the tag set clickTextInsensitive's XPath matches
+// button/a/[role=button] — the tag set textXPathInsensitive's XPath matches
 // — so it never finds these controls at all. Returns its own boolean success
 // signal so callers can go through evaluateBool and error out instead of
 // silently no-oping on a selector miss.
@@ -1082,16 +1856,29 @@ func randomGroupJS(bankName string, count int) string {
 	return fmt.Sprintf(`(() => { const text = document.body.innerText.toLowerCase(); return text.includes(%q) && text.includes('random') && text.includes(%q); })()`, strings.ToLower(strings.TrimSpace(bankName)), fmt.Sprintf("%d", count))
 }
 
-func clickText(text string) chromedp.Action {
-	return chromedp.Click("//*[self::button or self::a][contains(normalize-space(), "+xpathString(text)+")]", chromedp.BySearch)
-}
+// createBankSubmitSelector selects the create-bank dialog's submit button by
+// its stable data-automation attribute (confirmed live), rather than by text
+// content, so it isn't fragile to a future Canvas UI copy change. This is a
+// different button from the top-level "Create Bank" list button that opens
+// this dialog (clicked via clickTextJS, substring-matched) — see
+// clickTextJS's doc comment for the textContent-duplication artifact
+// confirmed live on that button, not this one.
+const createBankSubmitSelector = `[data-automation="sdk-create-bank-button"]`
 
-func clickTextInDialog(text string) chromedp.Action {
-	return chromedp.Click("//*[@role='dialog']//*[self::button or self::a][normalize-space()="+xpathString(text)+"]", chromedp.BySearch)
-}
+// shareWithCourseCheckboxSelector selects the create-bank dialog's "Share
+// with course" checkbox — a distinct element from the "[role=dialog] input"
+// selector the bank-NAME text field's own wait uses (that plain selector
+// matches the name field first, since it comes first in document order), so
+// this exists to give the checkbox's own wait/click sites a selector that
+// unambiguously targets it.
+const shareWithCourseCheckboxSelector = `[role=dialog] input[type=checkbox]`
 
+// bankExistsJS builds a JS boolean expression: true when a body row of the
+// Item Banks list has a name button equal to name (an already-quoted JS
+// string literal). Uses bankRowButtonFinderJS, so a header button with the
+// same text never counts.
 func bankExistsJS(name string) string {
-	return `Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim() === ` + name + `)`
+	return `Boolean(` + bankRowButtonFinderJS(name) + `)`
 }
 
 func jsString(s string) string { return fmt.Sprintf("%q", s) }
@@ -1115,3 +1902,65 @@ func xpathString(s string) string {
 	}
 	return "concat(" + strings.Join(quoted, ",") + ")"
 }
+
+// capture adapts a value-returning chromedp action to the void-only
+// chromedpRun seam: it runs a and stores its result in *out, preserving the
+// out-parameter style the pre-generic chromedp API used. Under a mocked run
+// the action never executes, so *out stays at its zero value — the same
+// reason the evalBool-style test hooks exist.
+func capture[T any](a chromedp.Action[T], out *T) chromedp.Action[chromedp.Void] {
+	return func(ctx context.Context, t *chromedp.Target) (chromedp.Void, error) {
+		v, err := a(ctx, t)
+		if err != nil {
+			return chromedp.Void{}, err
+		}
+		*out = v
+		return chromedp.Void{}, nil
+	}
+}
+
+// evaluateInto evaluates js and stores the decoded result in *out. Like the
+// old Evaluate(js, &out), a JS null/undefined result for a non-nilable T is
+// returned as chromedp.ErrJSNull / chromedp.ErrJSUndefined.
+func evaluateInto[T any](js string, out *T) chromedp.Action[chromedp.Void] {
+	return capture(chromedp.Evaluate[T](js), out)
+}
+
+// clickBankRowAction clicks the bank row, failing with errBankRowNotFound when
+// the row is absent.
+func clickBankRowAction(bankName, expectedBankName string) chromedp.Action[chromedp.Void] {
+	return func(ctx context.Context, t *chromedp.Target) (chromedp.Void, error) {
+		clicked, err := chromedp.Evaluate[bool](clickBankRowJS(bankName, expectedBankName))(ctx, t)
+		if err != nil {
+			return chromedp.Void{}, err
+		}
+		if !clicked {
+			return chromedp.Void{}, fmt.Errorf("%w: %q", errBankRowNotFound, bankName)
+		}
+		return chromedp.Void{}, nil
+	}
+}
+
+// bankDetailRouteJS is true once the page is on a bank's detail route
+// (/banks/<id>), as opposed to the bare Item Banks list (/banks).
+const bankDetailRouteJS = `/\/banks\/[^\/?#]+/.test(location.pathname)`
+
+// waitBankRowReady polls (up to timeout) for the Item Banks list row of
+// bankName, or expectedBankName as a fallback, to be rendered with a readable
+// question count. Callers treat a timeout as "proceed to the read anyway",
+// which then reports the row as missing the same way it always did.
+func waitBankRowReady(bankName, expectedBankName string, timeout time.Duration) chromedp.Action[chromedp.Void] {
+	return chromedp.Poll[chromedp.Void]("("+bankListQuestionCountJS(bankName, expectedBankName)+") >= 0", chromedp.WithPollingTimeout(timeout))
+}
+
+// radioLabelPresentJS is true when a <label> containing text (case-insensitive)
+// exists - the presence condition clickRadioLabelJS needs before it can click.
+func radioLabelPresentJS(text string) string {
+	return `Array.from(document.querySelectorAll('label')).some(l => l.textContent.trim().toLowerCase().includes(` + jsString(strings.ToLower(text)) + `))`
+}
+
+// dialogClosedJS is true once no dialog is open - the signal that a dialog's
+// submit (create bank, rename bank) was accepted. Polled with a bounded timeout
+// rather than WaitNotPresent so a dialog that stays open (e.g. a validation
+// error) fails within 15s instead of the whole outer budget.
+const dialogClosedJS = `!document.querySelector("[role=dialog]")`

@@ -1,12 +1,15 @@
 package commands_test
 
 import (
-	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	commands "github.com/jh125486/pdf2qti/cmd/pdf2qti/commands"
+	"github.com/jh125486/pdf2qti/internal/config"
+	"github.com/jh125486/pdf2qti/internal/distill"
 )
 
 type distillTestCase struct {
@@ -169,7 +172,7 @@ func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			cmd, cli := tt.prepare(t, dir)
-			err := cmd.Run(context.Background(), cli)
+			err := cmd.Run(t.Context(), cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -177,6 +180,57 @@ func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
 				if _, statErr := os.Stat(filepath.Join(dir, "src01_context.json")); statErr != nil {
 					t.Fatalf("expected context output: %v", statErr)
 				}
+			}
+		})
+	}
+}
+
+// Markdown scenarios use structured config and inspect the resulting context,
+// unlike the existing PDF fixture table, so their setup/assertions stay separate.
+func TestDistillCmdRun_Markdown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		section string
+		errLike string
+	}{
+		{name: "selected Markdown source", section: "1.1"},
+		{name: "unknown Markdown section", section: "9.9", errLike: "unknown section"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			mdPath := filepath.Join(dir, "notes.md")
+			if err := os.WriteFile(mdPath, []byte("# Notes\nPreamble\n## Section 1.1 - Basics\nContent\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Config{Version: 1, Defaults: config.Defaults{Workflow: config.Workflow{OutDir: dir}}, Sources: []config.Source{{ID: "md01", Name: "Notes", Chapter: 1, Context: &config.Context{Files: []config.ContextFile{{Path: mdPath, Sections: []string{tt.section}}}}}}}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfgPath := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := commands.DistillCmd{All: true}
+			err = cmd.Run(t.Context(), &commands.CLI{Config: cfgPath})
+			if tt.errLike != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errLike) {
+					t.Fatalf("error = %v; want %q", err, tt.errLike)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			dc, err := distill.Load(filepath.Join(dir, "md01_context.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dc.SourceID != "md01" || dc.Book != "Notes" || dc.Chapter != 1 {
+				t.Fatalf("unexpected context metadata: %+v", dc)
 			}
 		})
 	}

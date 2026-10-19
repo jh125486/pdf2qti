@@ -10,14 +10,14 @@
 [![Mutation score](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jh125486/pdf2qti/gh-pages/mutation-score.json)](https://github.com/jh125486/pdf2qti/actions/workflows/mutation-badge.yml)
 [![Mutants](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jh125486/pdf2qti/gh-pages/mutants-count.json)](https://github.com/jh125486/pdf2qti/actions/workflows/mutation-badge.yml)
 
-A CLI tool that converts PDF sources into Canvas-compatible QTI quizzes using LLM-assisted question generation.
+A CLI tool that converts PDF or Markdown sources into Canvas-compatible QTI quizzes using LLM-assisted question generation.
 
 ## Overview
 
-`pdf2qti` automates the creation of course content for Canvas LMS from existing PDF materials. It:
+`pdf2qti` automates the creation of course content for Canvas LMS from existing PDF or Markdown materials. It:
 
-- **Extracts** text from PDF documents
-- **Distills** each PDF into structured context JSON (concepts, examples, LaTeX-bearing prose) via an LLM provider — the shared input for everything below
+- **Extracts** text from PDF documents or selected Markdown sections
+- **Distills** each source into structured context JSON (concepts, examples, LaTeX-bearing prose) via an LLM provider — the shared input for everything below
 - **Generates** quiz questions (True/False, Multiple Answer, Multiple Choice, Short Answer, Essay, Matching, Numerical) from that context
 - **Renders** a human-reviewable Markdown draft for editing and approval, and converts approved drafts to Canvas-importable QTI 1.2 ZIP packages
 - **Builds** slide-deck Markdown from the same context and renders it into a PPTX using a template
@@ -56,7 +56,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
   "version": 1,
   "defaults": {
     "quiz": {
-      "titleTemplate": "Chapter {{.chapter}} Quiz",
+      "titleTemplate": "Chapter {{printf \"%02d\" .chapter}} Quiz",
       "counts": { "tf": 5, "ma": 3, "mc": 10 },
       "mcOptions": { "min": 4, "max": 4 },
       "maOptions": { "min": 4, "max": 6 }
@@ -96,10 +96,49 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 | `version` | Config schema version (must be `1`) |
 | `courseName` | Optional course-wide display name used as the PPTX title-slide subtitle |
 | `defaults` | Global defaults for `quiz`, `generation`, `validation`, and `workflow` |
-| `sources` | Array of PDF sources; each source can override any default |
+| `sources` | Array of PDF or Markdown context sources; each source can override any default |
 | `modules` | Array of modules grouping one or more `sources` (by `sourceIds`) for the `module` command |
 
-Each `source` requires at minimum an `id` and a `pdf` path. All other fields inherit from `defaults`.
+Each `source` requires an `id` and exactly one of a `pdf` path or a `context` object.
+PDF-only configurations remain valid. Generation, quiz, validation, and workflow settings inherit
+from `defaults` unless overridden.
+
+Markdown context can combine files and select sections:
+
+```json
+{
+  "id": "ch18",
+  "name": "Data Structures",
+  "chapter": 18,
+  "context": {
+    "files": [
+      { "path": "notes/ch18.md", "sections": ["18.8", "18.9"] },
+      { "path": "notes/examples.md", "include_preamble": true }
+    ]
+  }
+}
+```
+
+Each level-two heading (`##`) starts a section, ending at the next level-one or
+level-two heading. Nested headings, code fences, and Markdown formatting are retained.
+With the convention `## Section 18.8 - Trees`, select by `"18.8"` or the exact heading
+text `"Section 18.8 - Trees"` (without `##`). Omit `sections` or use `[]` to select all
+sections. Selection preserves document order; files are concatenated in configured order.
+Unknown selectors report the file path and available heading titles; duplicate or blank
+selectors are rejected.
+
+Text before the first `##` heading, including a document's `#` title, is preamble and
+excluded by default. Set `include_preamble: true` per file to include it, including for
+files with no level-two headings. Empty selected input is an error. Paths, like PDF paths,
+resolve from the current working directory. See [the runnable Markdown example](docs/examples/markdown-context/quiz_input.json).
+Run from the repository root:
+
+```bash
+pdf2qti --config docs/examples/markdown-context/quiz_input.json distill --all
+```
+
+The example uses the default stub provider; set `defaults.generation` to your LLM provider
+as shown above to generate substantive context.
 
 Each `module` requires an `id`, a `name`, and `sourceIds` (one or more `source.id` values it spans).
 
@@ -134,11 +173,11 @@ Global flags:
 ### Pipeline overview
 
 `distill` is the shared first step for everything else — it's the only command that reads the
-PDF. Every other command reads the `<outDir>/<id>_context.json` it produces.
+PDF or Markdown input. Every other command reads the `<outDir>/<id>_context.json` it produces.
 
 ```
                               ┌─→ generate → validate → approve → <id>.zip
-pdf.pdf → distill → context.json
+PDF or Markdown → distill → context.json
                               └─→ slides → pptx → <output>.pptx
 
 module <id>  (combines context.json for each source in the module → one slide deck)
@@ -156,14 +195,14 @@ pdf2qti pptx --slides=ctx/ch01_slides.md \
              --output=out/ch01.pptx template.pptx      # out/ch01.pptx
 ```
 
-### `distill` — Extract a PDF into structured context JSON
+### `distill` — Distill PDF or Markdown into structured context JSON
 
 ```bash
 pdf2qti distill ch01 [ch02 ...]   # specific sources
 pdf2qti distill --all             # every source in the config
 ```
 
-For each requested source, `distill` extracts the PDF text, calls the configured LLM to
+For each requested source, `distill` extracts PDF text or reads selected Markdown sections, then calls the configured LLM to
 distill it into structured context (concepts, worked examples, LaTeX-bearing prose, module
 name), and writes `<outDir>/<id>_context.json`. This file is the required input for `generate`,
 `slides`, `page`, `publish`, and `module`. Use `--force` to overwrite an existing context file.

@@ -71,7 +71,7 @@ func jsonSchemaObject(properties map[string]any) map[string]any {
 }
 
 // Distill calls the LLM to produce a DistilledContext for the given source.
-// chapterText is the raw text extracted from the source PDF.
+// chapterText is raw text extracted from the PDF or selected Markdown context.
 func Distill(ctx context.Context, src *config.Source, objectives []config.CourseObjective, llm LLM, chapterText string) (*DistilledContext, error) {
 	// condensedText is non-empty only when chapterText was too large to send directly. In that
 	// case it becomes the final Text field verbatim: asking the same synthesis call that
