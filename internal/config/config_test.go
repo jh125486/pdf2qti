@@ -2,6 +2,8 @@ package config_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +16,7 @@ func TestLoad_Table(t *testing.T) {
 	tests := []struct {
 		name       string
 		path       string
+		raw        string
 		wantErr    bool
 		errLike    string
 		wantVer    int
@@ -24,13 +27,29 @@ func TestLoad_Table(t *testing.T) {
 		{name: "bad json", path: "testdata/bad_json.json", wantErr: true, errLike: "parse config"},
 		{name: "invalid version", path: "testdata/invalid_version.json", wantErr: true, errLike: "validate config"},
 		{name: "no sources", path: "testdata/no_sources.json", wantErr: true, errLike: "validate config"},
+		{name: "Markdown JSON", raw: `{"version":1,"sources":[{"id":"md","context":{"files":[{"path":"notes.md"}]}}]}`, wantVer: 1, wantNumSrc: 1},
+		{name: "blank PDF beside Markdown", raw: `{"version":1,"sources":[{"id":"md","pdf":"","context":{"files":[{"path":"notes.md"}]}}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
+		{name: "whitespace PDF beside Markdown", raw: `{"version":1,"sources":[{"id":"md","pdf":" ","context":{"files":[{"path":"notes.md"}]}}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
+		{name: "PDF beside null context", raw: `{"version":1,"sources":[{"id":"pdf","pdf":"notes.pdf","context":null}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
+		{name: "null PDF beside Markdown", raw: `{"version":1,"sources":[{"id":"md","pdf":null,"context":{"files":[{"path":"notes.md"}]}}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
+		{name: "empty PDF JSON", raw: `{"version":1,"sources":[{"id":"pdf","pdf":""}]}`, wantErr: true, errLike: "pdf must not be empty"},
+		{name: "whitespace PDF JSON", raw: `{"version":1,"sources":[{"id":"pdf","pdf":" "}]}`, wantErr: true, errLike: "pdf must not be empty"},
+		{name: "null PDF JSON", raw: `{"version":1,"sources":[{"id":"pdf","pdf":null}]}`, wantErr: true, errLike: "pdf must not be empty"},
+		{name: "null context JSON", raw: `{"version":1,"sources":[{"id":"md","context":null}]}`, wantErr: true, errLike: "context must not be null"},
 	}
 
 	for _, tt := range tests {
 
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := config.Load(tt.path)
+			path := tt.path
+			if tt.raw != "" {
+				path = filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, []byte(tt.raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := config.Load(path)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error=%v wantErr=%v", err, tt.wantErr)
 			}
@@ -85,8 +104,15 @@ func TestValidate_Table(t *testing.T) {
 			name:    "missing source pdf",
 			cfg:     config.Config{Version: 1, Sources: []config.Source{{ID: "x"}}},
 			wantErr: true,
-			errLike: "pdf must not be empty",
+			errLike: "exactly one of pdf or context",
 		},
+		{name: "valid Markdown", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", Context: &config.Context{Files: []config.ContextFile{{Path: "notes.md"}}}}}}},
+		{name: "both PDF and Markdown", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", PDF: "notes.pdf", Context: &config.Context{Files: []config.ContextFile{{Path: "notes.md"}}}}}}, wantErr: true, errLike: "exactly one of pdf or context"},
+		{name: "empty context files", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", Context: &config.Context{}}}}, wantErr: true, errLike: "context.files must not be empty"},
+		{name: "blank context path", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", Context: &config.Context{Files: []config.ContextFile{{Path: " "}}}}}}, wantErr: true, errLike: "path must not be empty"},
+		{name: "blank selector", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", Context: &config.Context{Files: []config.ContextFile{{Path: "notes.md", Sections: []string{" "}}}}}}}, wantErr: true, errLike: "sections[0] must not be empty"},
+		{name: "duplicate selector", cfg: config.Config{Version: 1, Sources: []config.Source{{ID: "md", Context: &config.Context{Files: []config.ContextFile{{Path: "notes.md", Sections: []string{"1.1", "1.1"}}}}}}}, wantErr: true, errLike: "duplicates"},
+
 		{
 			name: "valid module",
 			cfg: config.Config{

@@ -12,7 +12,7 @@ import (
 	"github.com/jh125486/pdf2qti/internal/extract"
 )
 
-// DistillCmd distills a PDF into a structured context JSON file.
+// DistillCmd distills a PDF or Markdown source into a structured context JSON file.
 type DistillCmd struct {
 	Force bool     `help:"Overwrite existing context file." name:"force"`
 	All   bool     `help:"Distill all sources."             name:"all"`
@@ -78,10 +78,20 @@ func runDistillSource(ctx context.Context, cfg *config.Config, src *config.Sourc
 		}
 	}
 
-	logger.Info("extracting PDF", "source", src.ID, "pdf", src.PDF)
-	text, err := extract.ExtractText(src.PDF)
-	if err != nil {
-		return fmt.Errorf("extract PDF: %w", err)
+	var text string
+	var err error
+	if src.Context != nil {
+		logger.Info("reading Markdown context", "source", src.ID, "files", len(src.Context.Files))
+		text, err = extract.ReadMarkdown(src.Context.Files)
+		if err != nil {
+			return fmt.Errorf("read Markdown context: %w", err)
+		}
+	} else {
+		logger.Info("extracting PDF", "source", src.ID, "pdf", src.PDF)
+		text, err = extract.ExtractText(src.PDF)
+		if err != nil {
+			return fmt.Errorf("extract PDF: %w", err)
+		}
 	}
 
 	logger.Info("distilling context", "source", src.ID)
