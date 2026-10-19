@@ -185,53 +185,87 @@ func TestDistillCmdRun_NoSourcesSelected(t *testing.T) {
 	}
 }
 
-// Markdown scenarios use structured config and inspect the resulting context,
-// unlike the existing PDF fixture table, so their setup/assertions stay separate.
+type markdownDistillTestCase struct {
+	name        string
+	markdown    string
+	section     string
+	wantError   string
+	wantSource  string
+	wantBook    string
+	wantChapter int
+}
+
+func (tt *markdownDistillTestCase) setup(t *testing.T, dir string) (commands.DistillCmd, *commands.CLI, string) {
+	t.Helper()
+	mdPath := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(mdPath, []byte(tt.markdown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Version:  1,
+		Defaults: config.Defaults{Workflow: config.Workflow{OutDir: dir}},
+		Sources: []config.Source{{
+			ID: tt.wantSource, Name: tt.wantBook, Chapter: tt.wantChapter,
+			Context: &config.Context{Files: []config.ContextFile{{Path: mdPath, Sections: []string{tt.section}}}},
+		}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return commands.DistillCmd{All: true}, &commands.CLI{Config: cfgPath}, filepath.Join(dir, tt.wantSource+"_context.json")
+}
+
+func (tt *markdownDistillTestCase) assert(t *testing.T, contextPath string, err error) {
+	t.Helper()
+	if tt.wantError != "" {
+		if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+			t.Fatalf("error = %v; want %q", err, tt.wantError)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, err := distill.Load(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dc.SourceID != tt.wantSource {
+		t.Errorf("source ID = %q; want %q", dc.SourceID, tt.wantSource)
+	}
+	if dc.Book != tt.wantBook {
+		t.Errorf("book = %q; want %q", dc.Book, tt.wantBook)
+	}
+	if dc.Chapter != tt.wantChapter {
+		t.Errorf("chapter = %d; want %d", dc.Chapter, tt.wantChapter)
+	}
+}
+
 func TestDistillCmdRun_Markdown(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		section string
-		errLike string
-	}{
-		{name: "selected Markdown source", section: "1.1"},
-		{name: "unknown Markdown section", section: "9.9", errLike: "unknown section"},
+	const markdownNotes = "# Notes\nPreamble\n## Section 1.1 - Basics\nContent\n"
+	tests := []markdownDistillTestCase{
+		{
+			name: "selected Markdown source", markdown: markdownNotes,
+			section: "1.1", wantSource: "md01", wantBook: "Notes", wantChapter: 1,
+		},
+		{
+			name: "unknown Markdown section", markdown: markdownNotes,
+			section: "9.9", wantError: "unknown section", wantSource: "md01", wantBook: "Notes", wantChapter: 1,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			mdPath := filepath.Join(dir, "notes.md")
-			if err := os.WriteFile(mdPath, []byte("# Notes\nPreamble\n## Section 1.1 - Basics\nContent\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg := config.Config{Version: 1, Defaults: config.Defaults{Workflow: config.Workflow{OutDir: dir}}, Sources: []config.Source{{ID: "md01", Name: "Notes", Chapter: 1, Context: &config.Context{Files: []config.ContextFile{{Path: mdPath, Sections: []string{tt.section}}}}}}}
-			data, err := json.Marshal(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			cfgPath := filepath.Join(dir, "config.json")
-			if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cmd := commands.DistillCmd{All: true}
-			err = cmd.Run(t.Context(), &commands.CLI{Config: cfgPath})
-			if tt.errLike != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.errLike) {
-					t.Fatalf("error = %v; want %q", err, tt.errLike)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			dc, err := distill.Load(filepath.Join(dir, "md01_context.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if dc.SourceID != "md01" || dc.Book != "Notes" || dc.Chapter != 1 {
-				t.Fatalf("unexpected context metadata: %+v", dc)
-			}
+			cmd, cli, contextPath := tt.setup(t, dir)
+			err := cmd.Run(t.Context(), cli)
+			tt.assert(t, contextPath, err)
 		})
 	}
 }
