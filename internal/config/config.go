@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Stage represents a quiz generation stage.
@@ -93,16 +94,49 @@ type Defaults struct {
 	Workflow   Workflow   `json:"workflow"`
 }
 
-// Source represents a single PDF source.
+// ContextFile identifies Markdown input and optional heading-delimited sections.
+type ContextFile struct {
+	Path            string   `json:"path"`
+	Sections        []string `json:"sections,omitempty"`
+	IncludePreamble bool     `json:"include_preamble,omitempty"`
+}
+
+// Context groups Markdown files in the order they are read.
+type Context struct {
+	Files []ContextFile `json:"files"`
+}
+
+// Source represents a single PDF or Markdown context source.
 type Source struct {
-	ID         string      `json:"id"`
-	Name       string      `json:"name"`
-	Chapter    int         `json:"chapter"`
-	PDF        string      `json:"pdf"`
-	Quiz       *Quiz       `json:"quiz,omitempty"`
-	Generation *Generation `json:"generation,omitempty"`
-	Validation *Validation `json:"validation,omitempty"`
-	Workflow   *Workflow   `json:"workflow,omitempty"`
+	ID             string      `json:"id"`
+	Name           string      `json:"name"`
+	Chapter        int         `json:"chapter"`
+	PDF            string      `json:"pdf,omitempty"`
+	Context        *Context    `json:"context,omitempty"`
+	Quiz           *Quiz       `json:"quiz,omitempty"`
+	Generation     *Generation `json:"generation,omitempty"`
+	Validation     *Validation `json:"validation,omitempty"`
+	Workflow       *Workflow   `json:"workflow,omitempty"`
+	pdfPresent     bool
+	contextPresent bool
+}
+
+// UnmarshalJSON records input-key presence so blank or null values cannot bypass
+// the same PDF/context exclusivity rule enforced by the configuration schema.
+func (s *Source) UnmarshalJSON(data []byte) error {
+	type sourceAlias Source
+	var decoded sourceAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, decoded.pdfPresent = fields["pdf"]
+	_, decoded.contextPresent = fields["context"]
+	*s = Source(decoded)
+	return nil
 }
 
 // CourseObjective represents a single course-level learning objective.
@@ -160,9 +194,10 @@ func (c *Config) Validate() error {
 		if s.ID == "" {
 			return fmt.Errorf("sources[%d].id must not be empty", i)
 		}
-		if s.PDF == "" {
-			return fmt.Errorf("sources[%d].pdf must not be empty", i)
+		if err := validateSourceInput(i, s); err != nil {
+			return err
 		}
+
 		if sourceIDs[s.ID] {
 			return fmt.Errorf("sources[%d].id %q is duplicated", i, s.ID)
 		}
@@ -187,6 +222,46 @@ func (c *Config) Validate() error {
 			if !sourceIDs[id] {
 				return fmt.Errorf("modules[%d].sourceIds references unknown source %q", i, id)
 			}
+		}
+	}
+	return nil
+}
+
+func validateSourceInput(index int, source Source) error {
+	hasPDF := source.pdfPresent || source.PDF != ""
+	hasContext := source.contextPresent || source.Context != nil
+	if hasPDF == hasContext {
+		return fmt.Errorf("sources[%d] must specify exactly one of pdf or context", index)
+	}
+	if hasPDF {
+		if strings.TrimSpace(source.PDF) == "" {
+			return fmt.Errorf("sources[%d].pdf must not be empty", index)
+		}
+		return nil
+	}
+	if source.Context == nil {
+		return fmt.Errorf("sources[%d].context must not be null", index)
+	}
+	return validateContext(index, source.Context)
+}
+
+func validateContext(sourceIndex int, context *Context) error {
+	if len(context.Files) == 0 {
+		return fmt.Errorf("sources[%d].context.files must not be empty", sourceIndex)
+	}
+	for i, file := range context.Files {
+		if strings.TrimSpace(file.Path) == "" {
+			return fmt.Errorf("sources[%d].context.files[%d].path must not be empty", sourceIndex, i)
+		}
+		seen := make(map[string]bool, len(file.Sections))
+		for j, section := range file.Sections {
+			if strings.TrimSpace(section) == "" {
+				return fmt.Errorf("sources[%d].context.files[%d].sections[%d] must not be empty", sourceIndex, i, j)
+			}
+			if seen[section] {
+				return fmt.Errorf("sources[%d].context.files[%d].sections[%d] duplicates %q", sourceIndex, i, j, section)
+			}
+			seen[section] = true
 		}
 	}
 	return nil

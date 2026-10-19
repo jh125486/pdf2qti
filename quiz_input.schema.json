@@ -100,12 +100,33 @@
     },
     "source": {
       "type": "object",
-      "required": ["id", "pdf"],
+      "required": ["id"],
+      "oneOf": [
+        { "required": ["pdf"], "not": { "required": ["context"] } },
+        { "required": ["context"], "not": { "required": ["pdf"] } }
+      ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string" },
         "chapter": { "type": "integer", "minimum": 0 },
         "pdf": { "type": "string", "minLength": 1 },
+        "context": {
+          "type": "object",
+          "required": ["files"],
+          "properties": {
+            "files": {
+              "type": "array", "minItems": 1,
+              "items": {
+                "type": "object", "required": ["path"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "sections": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+                  "include_preamble": { "type": "boolean", "default": false }
+                }
+              }
+            }
+          }
+        },
         "quiz": { "$ref": "#/definitions/quiz" },
         "generation": { "$ref": "#/definitions/generation" },
         "validation": { "$ref": "#/definitions/validation" },

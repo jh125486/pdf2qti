@@ -14,7 +14,7 @@ import (
 type CLI struct {
 	Config      string        `default:"quiz_input.json" help:"Path to config file."                                                                                       short:"c"`
 	HTTPTimeout time.Duration `default:"5m"              help:"HTTP timeout for LLM API calls (e.g. \"10m\"). Content-heavy chapters can occasionally exceed the default."`
-	Distill     DistillCmd    `cmd:""                    help:"Distill PDF into structured context JSON."`
+	Distill     DistillCmd    `cmd:""                    help:"Distill PDF or Markdown into structured context JSON."`
 	Generate    GenerateCmd   `cmd:""                    help:"Generate quiz draft from distilled context."`
 	Approve     ApproveCmd    `cmd:""                    help:"Convert approved quiz markdown draft to QTI."`
 	ImportBank  ImportBankCmd `cmd:""                    help:"Import QTI ZIP into Canvas New Quizzes Item Bank via browser UI."`

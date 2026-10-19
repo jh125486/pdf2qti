@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "defaults": { "workflow": { "outDir": "out" } },
+  "sources": [
+    {
+      "id": "trees",
+      "name": "Trees",
+      "chapter": 18,
+      "context": {
+        "files": [
+          { "path": "docs/examples/markdown-context/notes.md", "sections": ["18.8", "18.9"] }
+        ]
+      }
+    }
+  ]
+}
