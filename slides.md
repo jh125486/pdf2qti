@@ -16,8 +16,11 @@ The deck is one Markdown document, split into blocks by `---` separator lines:
   top-level bullet per agenda item.
 - **Content slides** — one block per slide: a `<!-- meta: N tag -->` marker, a `# Slide Title`
   heading, and 5-8 bullets.
-- **Summary slide** — the final block: `<!-- meta: N summary -->`, a `# Summary` heading, and one
-  recap bullet per agenda item.
+- **Generated summary slide** — `slides` and `module` put this last, with `<!-- meta: N summary -->`,
+  a `# Summary` heading, and one recap bullet per agenda item.
+
+`pptx` also accepts hand-written decks in document order. It does not require a summary block or
+require one to be last; a `summary` block is rendered as an ordinary content slide.
 
 ### Meta markers
 
@@ -30,17 +33,18 @@ Every non-agenda, non-summary slide is tagged with the source chapter it came fr
 - `slides` and `module` generate sequential 1-based `N` values with no gaps or repeats (the agenda
   slide is always `1`). `validateProtoDeck` checks this generated-deck convention. `pptx` parses
   hand-written blocks in document order and does not reject gaps in their meta numbers.
-- `tag` is `agenda` for the agenda slide, `summary` for the summary slide, or a chapter's
-  `Tag` (its `config.Source.ID`) for a content slide — this is what groups slides into PPTX
-  sections when a deck spans multiple chapters (`module`).
+- `tag` is `agenda` for the agenda slide, `summary` for a summary slide, or a chapter's
+  `Tag` (its `config.Source.ID`) for a content slide. Consecutive slides with the same tag share a
+  PPTX section; a change in tag starts another section.
 
 ### Bullets
 
 - A top-level bullet is a Markdown list item: `- text`.
 - `pptx` requires 3-8 top-level bullets on an agenda slide; generated content slides use 5-8.
-- A sub-bullet is indented two spaces: `  - text`. Only one level of nesting is supported; use a
-  sub-bullet only when it directly elaborates the bullet immediately above it (a worked example, a
-  concrete instance, or a clarifying detail) — not as a place to put an unrelated top-level point.
+- A sub-bullet is indented two spaces: `  - text`. Only one level of nesting is represented;
+  deeper indentation is not preserved as additional levels. Use a sub-bullet only when it directly
+  elaborates the bullet immediately above it (a worked example, a concrete instance, or a
+  clarifying detail) — not as a place to put an unrelated top-level point.
 - Bullet text is a short phrase or fragment, not a full sentence — 11 words or fewer (LaTeX
   formulas don't count toward the limit). Wrap only key vocabulary/terms in `**bold**` inline where
   they're first introduced; never bold an entire bullet.

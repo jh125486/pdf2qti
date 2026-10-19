@@ -159,7 +159,7 @@ Global flags:
 
 | Command | Purpose |
 |---|---|
-| `distill` | Extract PDF text and distill it into `<outDir>/<id>_context.json` |
+| `distill` | Read PDF or Markdown input and distill it into `<outDir>/<id>_context.json` |
 | `generate` | Generate `<outDir>/<id>_quiz.md` from distilled context |
 | `validate` | Validate generated or hand-edited quiz Markdown |
 | `approve` | Convert approved quiz Markdown into `<outDir>/<id>.zip` QTI |
@@ -279,8 +279,10 @@ template path is a positional argument. `-v`/`--vars` passes extra `key=value` t
 variables (`;`-separated for multiple) available inside the template alongside the distilled
 context data.
 
-Mermaid diagram blocks (see [`slides.md`](slides.md)) render as PNGs on their own dedicated
-slides. A template used with such a deck needs a `Diagram` layout with `title`, `body`, and `pic`
+`slides` and `module` generate bullet-based content slides; they do not generate Mermaid blocks.
+You can add a Mermaid block by hand to proto-deck Markdown, and `pptx` renders it as a PNG on its
+own dedicated slide. See [`slides.md`](slides.md) for the diagram block format. A template used
+with such a deck needs a `Diagram` layout with `title`, `body`, and `pic`
 placeholders — `body` gets the visible caption, `pic` is replaced by the rendered diagram, and its
 alt text becomes the image's screen-reader description. Requires [`mmdc`](https://github.com/mermaid-js/mermaid-cli)
 on `PATH`; if a diagram fails to render, its slide still ships with title and caption, missing only
@@ -289,8 +291,10 @@ A template with no `Diagram` layout is still valid for a deck that has no diagra
 
 #### Markdown schema for `pptx` input
 
-`pptx` accepts the same proto-deck Markdown format produced by `slides` and `module`. The canonical
-reference is [`slides.md`](slides.md); the required structure is:
+`slides` and `module` generate proto-deck Markdown in the shape below. `pptx` also accepts
+hand-written blocks in document order; it does not require a summary block or require one to be
+last. A `summary` block is rendered as an ordinary content slide. The canonical format reference
+is [`slides.md`](slides.md):
 
 1. A first block containing only the deck title as `# Title`
 2. `---`
@@ -301,8 +305,8 @@ reference is [`slides.md`](slides.md); the required structure is:
 4. Zero or more content-slide blocks:
    - `<!-- meta: N <tag> -->`
    - `# Slide Title`
-   - generated decks use 5-8 bullets, or one Mermaid diagram block
-5. A final summary block:
+   - generated decks use 5-8 bullets
+5. A final summary block (generated-deck convention):
    - `<!-- meta: N summary -->`
    - `# Summary`
    - generated decks include one top-level recap bullet per agenda item
@@ -311,11 +315,12 @@ Rules:
 
 - `slides` and `module` generate 1-based sequential `N` values with no gaps. `pptx` parses
   hand-written blocks in document order and does not reject gaps in their meta numbers.
-- `<tag>` is the source/chapter ID used to group slides into PPTX sections
-- Bullets use `- text`; a single nested level is allowed via `  - text`
+- `<tag>` is the source/chapter ID; consecutive slides with the same tag share a PPTX section
+- Bullets use `- text`; indented `  - text` sub-bullets render one level deep. Deeper indentation
+  is not preserved as additional nesting.
 - Inline math uses `\(...\)` or `\[...\]`
 - Inline code uses single backticks
-- Diagram slides use exactly one Mermaid fenced block, one `<!-- alt: ... -->` line, and one `> caption` line, with no bullets
+- Hand-authored diagram slides use exactly one Mermaid fenced block, one `<!-- alt: ... -->` line, and one `> caption` line, with no bullets
 - `pptx` enforces 3-8 agenda bullets; generated content slides follow the 5-8 bullet convention
 
 Minimal example:
