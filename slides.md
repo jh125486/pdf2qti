@@ -27,9 +27,9 @@ Every non-agenda, non-summary slide is tagged with the source chapter it came fr
 <!-- meta: N tag -->
 ```
 
-- `N` is the slide's 1-based position in the deck and must be sequential with no gaps or repeats
-  (the agenda slide is always `1`) — `ParseProtoDeck`/`validateProtoDeck` treat a numbering gap as
-  a hard error, since it indicates broken generation.
+- `slides` and `module` generate sequential 1-based `N` values with no gaps or repeats (the agenda
+  slide is always `1`). `validateProtoDeck` checks this generated-deck convention. `pptx` parses
+  hand-written blocks in document order and does not reject gaps in their meta numbers.
 - `tag` is `agenda` for the agenda slide, `summary` for the summary slide, or a chapter's
   `Tag` (its `config.Source.ID`) for a content slide — this is what groups slides into PPTX
   sections when a deck spans multiple chapters (`module`).
@@ -37,6 +37,7 @@ Every non-agenda, non-summary slide is tagged with the source chapter it came fr
 ### Bullets
 
 - A top-level bullet is a Markdown list item: `- text`.
+- `pptx` requires 3-8 top-level bullets on an agenda slide; generated content slides use 5-8.
 - A sub-bullet is indented two spaces: `  - text`. Only one level of nesting is supported; use a
   sub-bullet only when it directly elaborates the bullet immediately above it (a worked example, a
   concrete instance, or a clarifying detail) — not as a place to put an unrelated top-level point.
@@ -125,6 +126,7 @@ emphasized text, so this is left unhandled.
   - Example: \((1,2) + (3,4) = (4,6)\)
 - **Scalar multiplication** scales every component
 - Dot product returns a single number, not a vector
+- Vector length measures magnitude
 
 ---
 
@@ -135,6 +137,7 @@ emphasized text, so this is left unhandled.
 - \((AB)_{ij}\) is the dot product of row \(i\) of \(A\) and column \(j\) of \(B\)
 - Multiplication is defined only when inner dimensions match
 - Not commutative: \(AB \neq BA\) in general
+- The identity matrix preserves any vector
   - Row 1: \(3x_1-2x_2+2x_3=2\)
   - Row 2: \(x_1+4x_2-x_3=1\)
 
@@ -145,4 +148,5 @@ emphasized text, so this is left unhandled.
 
 - Vectors combine via componentwise **addition** and scalar multiplication
 - Matrix multiplication combines rows and columns via the dot product, order-dependent
+- Systems of linear equations can be represented with matrices
 ```

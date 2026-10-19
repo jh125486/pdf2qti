@@ -297,24 +297,26 @@ reference is [`slides.md`](slides.md); the required structure is:
 3. An agenda block:
    - `<!-- meta: 1 agenda -->`
    - `# Agenda`
-   - one top-level `- bullet` per agenda item
+   - 3-8 top-level `- bullet` items
 4. Zero or more content-slide blocks:
    - `<!-- meta: N <tag> -->`
    - `# Slide Title`
-   - either 5-8 bullets, or one Mermaid diagram block
+   - generated decks use 5-8 bullets, or one Mermaid diagram block
 5. A final summary block:
    - `<!-- meta: N summary -->`
    - `# Summary`
-   - one top-level `- bullet` per agenda item recap
+   - generated decks include one top-level recap bullet per agenda item
 
 Rules:
 
-- `N` is the 1-based slide position and must be sequential with no gaps
+- `slides` and `module` generate 1-based sequential `N` values with no gaps. `pptx` parses
+  hand-written blocks in document order and does not reject gaps in their meta numbers.
 - `<tag>` is the source/chapter ID used to group slides into PPTX sections
 - Bullets use `- text`; a single nested level is allowed via `  - text`
 - Inline math uses `\(...\)` or `\[...\]`
 - Inline code uses single backticks
 - Diagram slides use exactly one Mermaid fenced block, one `<!-- alt: ... -->` line, and one `> caption` line, with no bullets
+- `pptx` enforces 3-8 agenda bullets; generated content slides follow the 5-8 bullet convention
 
 Minimal example:
 
@@ -328,6 +330,7 @@ Minimal example:
 
 - Vector operations
 - Matrix multiplication
+- Systems of linear equations
 
 ---
 
@@ -348,6 +351,7 @@ Minimal example:
 
 - Vectors combine via componentwise **addition**
 - Matrix multiplication combines rows and columns
+- Systems of linear equations can be represented with matrices
 ````
 
 ### `module` — Build a combined slide-deck Markdown doc across chapters
@@ -418,6 +422,7 @@ Important flags:
 - `--course-id` — Canvas course ID
 - `--bank-name` — exact final Item Bank name
 - `--package` — QTI ZIP to import
+- `--base-url` — Canvas base URL (default: `https://unt.instructure.com`)
 - `--on-existing=fail|append` — fail on existing bank, or append into it
 - `--create-random-quiz=N` — optionally create an unpublished random New Quiz after import
 - `--dry-run` — validate inputs and report the action without changing Canvas
