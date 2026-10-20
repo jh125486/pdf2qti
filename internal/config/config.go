@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -63,20 +64,22 @@ type Quiz struct {
 // invalid or unrecognized key inside it surfaces as a normal API error from the provider, not a
 // client-side one.
 type Generation struct {
-	Stages      []Stage         `json:"stages"`
-	Seed        int             `json:"seed"`
-	Provider    string          `json:"provider"`
-	Model       string          `json:"model"`
-	APIKeyEnv   string          `json:"apiKeyEnv"`
-	ModelParams json.RawMessage `json:"modelParams,omitempty"`
+	Instructions string          `json:"instructions,omitempty"`
+	Stages       []Stage         `json:"stages"`
+	Seed         int             `json:"seed"`
+	Provider     string          `json:"provider"`
+	Model        string          `json:"model"`
+	APIKeyEnv    string          `json:"apiKeyEnv"`
+	ModelParams  json.RawMessage `json:"modelParams,omitempty"`
 }
 
 // Validation holds quiz validation rules.
 type Validation struct {
-	MAMaxCorrectDensity             float64 `json:"maMaxCorrectDensity"`
-	EnforceUniqueOptionsPerQuestion bool    `json:"enforceUniqueOptionsPerQuestion"`
-	RequireSequentialNumbering      bool    `json:"requireSequentialNumbering"`
-	RequireExactlyOneCorrectForTFMC bool    `json:"requireExactlyOneCorrectForTfMc"`
+	ForbiddenPhrases                []string `json:"forbiddenPhrases"`
+	MAMaxCorrectDensity             float64  `json:"maMaxCorrectDensity"`
+	EnforceUniqueOptionsPerQuestion bool     `json:"enforceUniqueOptionsPerQuestion"`
+	RequireSequentialNumbering      bool     `json:"requireSequentialNumbering"`
+	RequireExactlyOneCorrectForTFMC bool     `json:"requireExactlyOneCorrectForTfMc"`
 }
 
 // Workflow holds workflow parameters.
@@ -189,15 +192,14 @@ func (c *Config) Validate() error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("sources must not be empty")
 	}
+	if err := validateForbiddenPhrases(c.Defaults.Validation.ForbiddenPhrases, "defaults.validation.forbiddenPhrases"); err != nil {
+		return err
+	}
 	sourceIDs := make(map[string]bool, len(c.Sources))
 	for i, s := range c.Sources {
-		if s.ID == "" {
-			return fmt.Errorf("sources[%d].id must not be empty", i)
-		}
-		if err := validateSourceInput(i, &s); err != nil {
+		if err := validateSource(i, &s); err != nil {
 			return err
 		}
-
 		if sourceIDs[s.ID] {
 			return fmt.Errorf("sources[%d].id %q is duplicated", i, s.ID)
 		}
@@ -223,6 +225,19 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("modules[%d].sourceIds references unknown source %q", i, id)
 			}
 		}
+	}
+	return nil
+}
+
+func validateSource(index int, source *Source) error {
+	if source.ID == "" {
+		return fmt.Errorf("sources[%d].id must not be empty", index)
+	}
+	if err := validateSourceInput(index, source); err != nil {
+		return err
+	}
+	if source.Validation != nil {
+		return validateForbiddenPhrases(source.Validation.ForbiddenPhrases, fmt.Sprintf("sources[%d].validation.forbiddenPhrases", index))
 	}
 	return nil
 }
@@ -372,6 +387,9 @@ func (c *Config) EffectiveGeneration(s *Source) Generation {
 	if len(sg.Stages) > 0 {
 		g.Stages = sg.Stages
 	}
+	if sg.Instructions != "" {
+		g.Instructions = sg.Instructions
+	}
 	if sg.Seed != 0 {
 		g.Seed = sg.Seed
 	}
@@ -390,13 +408,20 @@ func (c *Config) EffectiveGeneration(s *Source) Generation {
 	return g
 }
 
-// EffectiveValidation returns the resolved Validation for a source, merging non-zero source fields over defaults.
+// EffectiveValidation merges non-zero source fields over defaults. A non-nil
+// ForbiddenPhrases slice replaces inherited rules, including an empty slice.
 func (c *Config) EffectiveValidation(s *Source) Validation {
 	v := c.Defaults.Validation
+	if v.ForbiddenPhrases == nil {
+		v.ForbiddenPhrases = DefaultForbiddenPhrases()
+	}
 	if s.Validation == nil {
 		return v
 	}
 	sv := s.Validation
+	if sv.ForbiddenPhrases != nil {
+		v.ForbiddenPhrases = sv.ForbiddenPhrases
+	}
 	if sv.MAMaxCorrectDensity != 0 {
 		v.MAMaxCorrectDensity = sv.MAMaxCorrectDensity
 	}
@@ -421,4 +446,19 @@ func (c *Config) OutDir(s *Source) string {
 		return c.Defaults.Workflow.OutDir
 	}
 	return "out"
+}
+
+// DefaultForbiddenPhrases returns fresh, case-insensitive rules for references
+// that prevent a question from standing alone without its source material.
+func DefaultForbiddenPhrases() []string {
+	return []string{`(?i)\bthe\s+source\b`, `(?i)\bthe\s+text\b`, `(?i)\bthe\s+chapter\b`, `(?i)\bthe\s+passage\b`, `(?i)\bthe\s+author\b`}
+}
+
+func validateForbiddenPhrases(patterns []string, path string) error {
+	for index, pattern := range patterns {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("%s[%d]: invalid regular expression %q: %w", path, index, pattern, err)
+		}
+	}
+	return nil
 }

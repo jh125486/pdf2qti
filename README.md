@@ -65,6 +65,7 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
       "provider": "openai",
       "model": "gpt-4o",
       "apiKeyEnv": "OPENAI_API_KEY",
+      "instructions": "Prefer applied questions with short scenarios.",
       "modelParams": { "temperature": 0.7 }
     },
     "workflow": {
@@ -102,6 +103,20 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 Each `source` requires an `id` and exactly one of a `pdf` path or a `context` object.
 PDF-only configurations remain valid. Generation, quiz, validation, and workflow settings inherit
 from `defaults` unless overridden.
+
+Quiz prompts always require standalone, student-facing questions and answers, without references
+to “the source,” “the text,” “the chapter,” “the passage,” or “the author.” Add course-specific
+requirements with `defaults.generation.instructions`; a nonempty `sources[].generation.instructions`
+replaces those default instructions and is appended to the generation prompt.
+
+Validation rejects those five phrases by default, ignoring case and allowing whitespace between
+words. It checks every question type, answer option, and matching answer. Customize
+`defaults.validation.forbiddenPhrases` or `sources[].validation.forbiddenPhrases` with an array of
+Go regular expressions, for example `["(?i)according\\s+to"]`. Omitted or `null` values inherit
+the default rules; any array replaces the inherited rules, and `[]` disables this check. Custom
+rules are case-sensitive unless prefixed with `(?i)`. Invalid regular expressions fail config
+validation. Matching errors identify the question, option when applicable, matched phrase,
+and rule so the draft can be corrected before approval.
 
 Markdown context can combine files and select sections:
 

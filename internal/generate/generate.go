@@ -23,7 +23,8 @@ type LLM interface {
 
 // Generator generates quiz questions from source text.
 type Generator struct {
-	llm LLM
+	llm          LLM
+	instructions string
 }
 
 const schemaTypeKey = "type"
@@ -35,11 +36,14 @@ func New(cfg config.Generation, httpTimeout time.Duration) (*Generator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create generation LLM: %w", err)
 	}
-	return NewWithLLM(llm), nil
+	return NewWithLLM(llm, cfg.Instructions), nil
 }
 
-// NewWithLLM creates a generator with llm. Intended for embedding and deterministic tests.
-func NewWithLLM(llm LLM) *Generator { return &Generator{llm: llm} }
+// NewWithLLM creates a generator with llm and optional additional prompt instructions.
+// Intended for embedding and deterministic tests.
+func NewWithLLM(llm LLM, instructions ...string) *Generator {
+	return &Generator{llm: llm, instructions: strings.Join(instructions, "\n")}
+}
 
 type stageResponse struct {
 	Questions []generatedQuestion `json:"questions"`
@@ -74,7 +78,7 @@ func (g *Generator) GenerateStage(ctx context.Context, stage config.Stage, sourc
 		return nil, fmt.Errorf("generation LLM is not configured")
 	}
 
-	raw, err := g.llm.Complete(ctx, buildPrompt(stage, sourceText, count), questionSchema())
+	raw, err := g.llm.Complete(ctx, buildPrompt(stage, sourceText, count, g.instructions), questionSchema())
 	if err != nil {
 		return nil, fmt.Errorf("llm complete: %w", err)
 	}
@@ -160,15 +164,17 @@ func validateQuestion(stage config.Stage, question generatedQuestion) error { //
 	return nil
 }
 
-func buildPrompt(stage config.Stage, sourceText string, count int) string {
+func buildPrompt(stage config.Stage, sourceText string, count int, instructions string) string {
 	return fmt.Sprintf(`Create at least %d %s quiz questions from source material below.
+
+Write standalone, student-facing questions and answers that are understandable without seeing the source material. Never refer to the source, the text, the chapter, the passage, or the author; ask directly about the subject and include any necessary context in the question.
 
 Ground every question and answer in source material. Do not invent facts. Return JSON only, matching supplied schema. Write every mathematical expression in LaTeX delimiters: inline math uses \\(...\\) and display math uses \\[...\\]. Preserve source LaTeX exactly when it already uses these delimiters. Code identifiers, function names, and variable names (e.g. create_vector, get_component) must stay in plain markdown backtick spans and never be placed inside LaTeX delimiters or \texttt{}: Canvas's MathJax renders an escaped underscore (\_) inside \texttt{} as a literal backslash instead of collapsing it, so escaping is only for math-mode content, not code. For unused match_text fields return an empty string.
 
 %s
 
 ## Source material
-%s`, count, stage, stageInstructions(stage), sourceText)
+%s`, count, stage, stageInstructions(stage), sourceText) + additionalInstructions(instructions)
 }
 
 func stageInstructions(stage config.Stage) string {
@@ -233,4 +239,11 @@ func strictObject(properties map[string]any) map[string]any {
 		required = append(required, name)
 	}
 	return map[string]any{schemaTypeKey: "object", "properties": properties, "required": required, "additionalProperties": false}
+}
+
+func additionalInstructions(instructions string) string {
+	if strings.TrimSpace(instructions) == "" {
+		return ""
+	}
+	return "\n\n## Additional generation instructions\n" + instructions
 }

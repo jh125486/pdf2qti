@@ -3,6 +3,7 @@ package validate
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/jh125486/pdf2qti/internal/config"
 	"github.com/jh125486/pdf2qti/internal/render"
@@ -22,6 +23,8 @@ func (r *Result) IsValid() bool {
 // ValidateDraft validates a quiz draft against the given validation config.
 func ValidateDraft(d *render.QuizDraft, v config.Validation) *Result { //nolint:revive // stutter is acceptable for exported package function
 	result := &Result{}
+
+	result.Errors = append(result.Errors, validateForbiddenPhrases(d, v.ForbiddenPhrases)...)
 
 	// Check sequential numbering
 	if v.RequireSequentialNumbering {
@@ -112,4 +115,42 @@ func validateMA(q render.Question, v config.Validation) []string {
 		}
 	}
 	return errs
+}
+
+func validateForbiddenPhrases(draft *render.QuizDraft, patterns []string) []string {
+	if patterns == nil {
+		patterns = config.DefaultForbiddenPhrases()
+	}
+	var errors []string
+	for _, pattern := range patterns {
+		rule, err := regexp.Compile(pattern)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("validation.forbiddenPhrases: invalid regular expression %q: %v", pattern, err))
+			continue
+		}
+		for _, questions := range [][]render.Question{draft.TFQuestions, draft.MAQuestions, draft.MCQuestions, draft.SAQuestions, draft.ESQuestions, draft.MTQuestions, draft.NRQuestions} {
+			for _, question := range questions {
+				errors = append(errors, checkForbiddenPhrase(rule, question.Text, fmt.Sprintf("question %d", question.Number))...)
+				for index, option := range question.Options {
+					location := fmt.Sprintf("question %d option %d", question.Number, index+1)
+					errors = append(errors, checkForbiddenPhrase(rule, option.Text, location)...)
+				}
+			}
+		}
+		for _, question := range draft.MTQuestions {
+			for index, option := range question.Options {
+				location := fmt.Sprintf("question %d option %d matching answer", question.Number, index+1)
+				errors = append(errors, checkForbiddenPhrase(rule, option.MatchText, location)...)
+			}
+		}
+	}
+	return errors
+}
+
+func checkForbiddenPhrase(rule *regexp.Regexp, text, location string) []string {
+	if rule.MatchString(text) {
+		match := rule.FindString(text)
+		return []string{fmt.Sprintf("%s: forbidden phrase %q matches %q; rewrite as standalone student-facing content", location, match, rule.String())}
+	}
+	return nil
 }
