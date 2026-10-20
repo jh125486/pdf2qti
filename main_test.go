@@ -89,6 +89,7 @@ func TestAgenticHelp(t *testing.T) {
 
 			got := decodeAgenticHelp(t, &stdout)
 			assertAgenticCommands(t, &got)
+			assertAgenticMetadata(t, &got)
 			assertAgenticSchemas(t, &got, configSchema, slides)
 		})
 	}
@@ -103,20 +104,28 @@ func mustQuestionSchema(t *testing.T) []byte {
 	return data
 }
 
+type agenticHelpValue struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Type        string   `json:"type"`
+	Required    bool     `json:"required"`
+	Default     *string  `json:"default"`
+	Enum        []string `json:"enum"`
+	Env         []string `json:"env"`
+	Short       string   `json:"short"`
+}
+
+type agenticHelpCommand struct {
+	Name      string               `json:"name"`
+	Flags     []agenticHelpValue   `json:"flags"`
+	Arguments []agenticHelpValue   `json:"arguments"`
+	Commands  []agenticHelpCommand `json:"commands"`
+}
+
 type agenticHelpDocument struct {
-	FormatVersion int `json:"format_version"`
-	CLI           struct {
-		Name  string `json:"name"`
-		Flags []struct {
-			Name    string  `json:"name"`
-			Default *string `json:"default"`
-		} `json:"flags"`
-		Commands []struct {
-			Name  string            `json:"name"`
-			Flags []json.RawMessage `json:"flags"`
-		} `json:"commands"`
-	} `json:"cli"`
-	Schemas struct {
+	FormatVersion int                `json:"format_version"`
+	CLI           agenticHelpCommand `json:"cli"`
+	Schemas       struct {
 		Config    json.RawMessage `json:"config"`
 		Questions json.RawMessage `json:"questions"`
 		Slides    struct {
@@ -189,3 +198,67 @@ func assertAgenticSchemas(t *testing.T, got *agenticHelpDocument, configSchema, 
 		t.Error("slide schema differs from slides.md")
 	}
 }
+
+func assertAgenticMetadata(t *testing.T, got *agenticHelpDocument) {
+	t.Helper()
+	commands := map[string]agenticHelpCommand{"": got.CLI}
+	for _, command := range got.CLI.Commands {
+		commands[command.Name] = command
+	}
+	for _, tt := range []*struct {
+		name     string
+		command  string
+		argument bool
+		want     agenticHelpValue
+	}{
+		{name: "global config default and short flag", want: agenticHelpValue{
+			Name: "config", Description: "Path to config file.", Type: "string",
+			Default: pointerToString("quiz_input.json"), Enum: []string{}, Env: []string{}, Short: "c",
+		}},
+		{name: "bank behavior enum", command: "import-bank", want: agenticHelpValue{
+			Name: "on-existing", Description: "Existing bank behavior.", Type: "string",
+			Default: pointerToString("fail"), Enum: []string{"fail", "append"}, Env: []string{},
+		}},
+		{name: "credential environment name", command: "publish", want: agenticHelpValue{
+			Name: "canvas-token", Description: "Canvas API token.", Type: "string",
+			Enum: []string{}, Env: []string{"CANVAS_TOKEN"},
+		}},
+		{name: "required template positional", command: "pptx", argument: true, want: agenticHelpValue{
+			Name: "template", Description: "Path to PPTX template file.", Type: "string", Required: true,
+			Enum: []string{}, Env: []string{},
+		}},
+		{name: "optional source list positional", command: "distill", argument: true, want: agenticHelpValue{
+			Name: "i-ds", Description: "Source IDs to distill.", Type: "[]string",
+			Enum: []string{}, Env: []string{},
+		}},
+		{name: "required path flag", command: "import-bank", want: agenticHelpValue{
+			Name: "package", Description: "QTI ZIP package.", Type: "path", Required: true,
+			Enum: []string{}, Env: []string{},
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			values := commands[tt.command].Flags
+			if tt.argument {
+				values = commands[tt.command].Arguments
+			}
+			value := findAgenticValue(t, values, tt.want.Name)
+			if !reflect.DeepEqual(value, tt.want) {
+				t.Fatalf("metadata = %+v, want %+v", value, tt.want)
+			}
+		})
+	}
+}
+
+func findAgenticValue(t *testing.T, values []agenticHelpValue, name string) agenticHelpValue {
+	t.Helper()
+	for index := range values {
+		if values[index].Name == name {
+			return values[index]
+		}
+	}
+	t.Fatalf("metadata missing for %q", name)
+	return agenticHelpValue{}
+}
+
+func pointerToString(value string) *string { return &value }
