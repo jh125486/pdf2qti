@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -188,6 +189,25 @@ func stageInstructions(stage config.Stage) string {
 		return "Each question: one exact numeric answer marked correct; optional tolerance options marked incorrect."
 	default:
 		return ""
+	}
+}
+
+// QuestionSchema returns a fresh copy of the strict schema used for generated questions.
+func QuestionSchema() *distill.Schema {
+	schema := questionSchema()
+	sortSchemaRequired(schema.Definition)
+	return schema
+}
+
+// sortSchemaRequired stabilizes reference output without changing generation.
+func sortSchemaRequired(schema map[string]any) {
+	if required, ok := schema["required"].([]string); ok {
+		sort.Strings(required)
+	}
+	for _, value := range schema {
+		if object, ok := value.(map[string]any); ok {
+			sortSchemaRequired(object)
+		}
 	}
 }
 

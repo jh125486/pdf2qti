@@ -12,26 +12,33 @@ import (
 
 // CLI is the root command structure for pdf2qti.
 type CLI struct {
-	Config      string        `default:"quiz_input.json" help:"Path to config file."                                                                                       short:"c"`
-	HTTPTimeout time.Duration `default:"5m"              help:"HTTP timeout for LLM API calls (e.g. \"10m\"). Content-heavy chapters can occasionally exceed the default."`
-	Distill     DistillCmd    `cmd:""                    help:"Distill PDF or Markdown into structured context JSON."`
-	Generate    GenerateCmd   `cmd:""                    help:"Generate quiz draft from distilled context."`
-	Approve     ApproveCmd    `cmd:""                    help:"Convert approved quiz markdown draft to QTI."`
-	ImportBank  ImportBankCmd `cmd:""                    help:"Import QTI ZIP into Canvas New Quizzes Item Bank via browser UI."`
-	Validate    ValidateCmd   `cmd:""                    help:"Validate quiz markdown draft."`
-	Page        PageCmd       `cmd:""                    help:"Render HTML page from distilled context and template."`
-	Slides      SlidesCmd     `cmd:""                    help:"Generate proto-deck slide Markdown from distilled context."`
-	PPTX        PPTXCmd       `cmd:""                    help:"Render PPTX from slide Markdown and template."`
-	Publish     PublishCmd    `cmd:""                    help:"Render and publish Canvas pages for each module context."`
-	Module      ModuleCmd     `cmd:""                    help:"Build a combined Markdown doc for a module spanning several chapters."`
+	AgenticHelp agenticHelpFlag `help:"Print command metadata and input schemas as JSON, then exit."`
+	Config      string          `default:"quiz_input.json" help:"Path to config file."                                                                                       short:"c"`
+	HTTPTimeout time.Duration   `default:"5m"              help:"HTTP timeout for LLM API calls (e.g. \"10m\"). Content-heavy chapters can occasionally exceed the default."`
+	Distill     DistillCmd      `cmd:""                    help:"Distill PDF or Markdown into structured context JSON."`
+	Generate    GenerateCmd     `cmd:""                    help:"Generate quiz draft from distilled context."`
+	Approve     ApproveCmd      `cmd:""                    help:"Convert approved quiz markdown draft to QTI."`
+	ImportBank  ImportBankCmd   `cmd:""                    help:"Import QTI ZIP into Canvas New Quizzes Item Bank via browser UI."`
+	Validate    ValidateCmd     `cmd:""                    help:"Validate quiz markdown draft."`
+	Page        PageCmd         `cmd:""                    help:"Render HTML page from distilled context and template."`
+	Slides      SlidesCmd       `cmd:""                    help:"Generate proto-deck slide Markdown from distilled context."`
+	PPTX        PPTXCmd         `cmd:""                    help:"Render PPTX from slide Markdown and template."`
+	Publish     PublishCmd      `cmd:""                    help:"Render and publish Canvas pages for each module context."`
+	Module      ModuleCmd       `cmd:""                    help:"Build a combined Markdown doc for a module spanning several chapters."`
 }
 
 // Execute parses and runs the CLI.
 func Execute() error {
+	return ExecuteWithDocumentation(Documentation{})
+}
+
+// ExecuteWithDocumentation parses and runs the CLI with embedded reference documents.
+func ExecuteWithDocumentation(docs Documentation) error {
 	var cli CLI
 	runCtx := WithLogger(context.Background(), audit.New(os.Stdout))
 	ctx := kong.Parse(&cli,
 		kong.Name("pdf2qti"),
+		kong.Bind(docs),
 		kong.Description("Convert PDF sources to Canvas-compatible QTI quizzes."),
 		kong.BindTo(runCtx, (*context.Context)(nil)),
 		kong.UsageOnError(),

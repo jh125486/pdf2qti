@@ -152,6 +152,7 @@ pdf2qti [--config <file>] [--http-timeout <duration>] <command>
 
 Global flags:
 
+- `--agentic-help` — print one JSON document containing the complete command tree, flag and argument metadata, quiz config and generated-question JSON Schemas, and slide Markdown format; exits without loading config or credentials
 - `-c`, `--config` — config file path (defaults to `quiz_input.json`)
 - `--http-timeout` — per-request LLM HTTP timeout (defaults to `5m`)
 
