@@ -88,8 +88,8 @@ func TestAgenticHelp(t *testing.T) {
 			}
 
 			got := decodeAgenticHelp(t, &stdout)
-			assertAgenticCommands(t, got)
-			assertAgenticSchemas(t, got, configSchema, slides)
+			assertAgenticCommands(t, &got)
+			assertAgenticSchemas(t, &got, configSchema, slides)
 		})
 	}
 }
@@ -139,7 +139,7 @@ func decodeAgenticHelp(t *testing.T, output io.Reader) agenticHelpDocument {
 	return got
 }
 
-func assertAgenticCommands(t *testing.T, got agenticHelpDocument) {
+func assertAgenticCommands(t *testing.T, got *agenticHelpDocument) {
 	t.Helper()
 	if got.FormatVersion != 1 || got.CLI.Name != "pdf2qti" {
 		t.Fatalf("unexpected envelope: %+v", got)
@@ -165,7 +165,7 @@ func assertAgenticCommands(t *testing.T, got agenticHelpDocument) {
 	}
 }
 
-func assertAgenticSchemas(t *testing.T, got agenticHelpDocument, configSchema, slides []byte) {
+func assertAgenticSchemas(t *testing.T, got *agenticHelpDocument, configSchema, slides []byte) {
 	t.Helper()
 	for _, schema := range []struct {
 		name      string
