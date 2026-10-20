@@ -1,6 +1,7 @@
 package validate_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jh125486/pdf2qti/internal/config"
@@ -25,7 +26,23 @@ func TestValidateDraft_Table(t *testing.T) {
 		draft     *render.QuizDraft
 		v         config.Validation
 		wantValid bool
+		wantError string
 	}{
+		{name: "TFQuestions rejects source references", draft: &render.QuizDraft{TFQuestions: []render.Question{{Number: 3, Text: "According to the source, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "MAQuestions rejects source references", draft: &render.QuizDraft{MAQuestions: []render.Question{{Number: 3, Text: "According to THE TEXT, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "MCQuestions rejects source references", draft: &render.QuizDraft{MCQuestions: []render.Question{{Number: 3, Text: "According to the chapter, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "SAQuestions rejects source references", draft: &render.QuizDraft{SAQuestions: []render.Question{{Number: 3, Text: "According to the passage, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "ESQuestions rejects source references", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 3, Text: "According to the author, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "MTQuestions rejects source references", draft: &render.QuizDraft{MTQuestions: []render.Question{{Number: 3, Text: "According to the source, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "NRQuestions rejects source references", draft: &render.QuizDraft{NRQuestions: []render.Question{{Number: 3, Text: "According to the text, what happens?"}}}, wantError: "question 3: forbidden phrase"},
+		{name: "option reference rejected", draft: &render.QuizDraft{MCQuestions: []render.Question{{Number: 4, Text: "What happens?", Options: []render.Option{{Text: "As the author explains"}}}}}, wantError: "question 4 option 1: forbidden phrase"},
+		{name: "matching answer reference rejected", draft: &render.QuizDraft{MTQuestions: []render.Question{{Number: 5, Text: "Match concepts", Options: []render.Option{{Text: "Concept", MatchText: "the passage"}}}}}, wantError: "question 5 option 1 matching answer: forbidden phrase"},
+		{name: "custom regex replaces builtins", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 1, Text: "the source"}}}, v: config.Validation{ForbiddenPhrases: []string{`(?i)forbidden`}}, wantValid: true},
+		{name: "custom regex matched", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 2, Text: "FORBIDDEN content"}}}, v: config.Validation{ForbiddenPhrases: []string{`(?i)forbidden`}}, wantError: "question 2: forbidden phrase"},
+		{name: "empty list disables rules", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 1, Text: "the source"}}}, v: config.Validation{ForbiddenPhrases: []string{}}, wantValid: true},
+		{name: "word boundaries prevent partial matches", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 1, Text: "Describe the sourcebook and the textbook."}}}, wantValid: true},
+		{name: "malformed programmatic rule fails", draft: makeDraft(nil, nil, nil), v: config.Validation{ForbiddenPhrases: []string{"["}}, wantError: "invalid regular expression"},
+		{name: "empty matching rule applies", draft: &render.QuizDraft{ESQuestions: []render.Question{{Number: 1, Text: "Question"}}}, v: config.Validation{ForbiddenPhrases: []string{"^"}}, wantError: "question 1: forbidden phrase"},
 		{
 			name: "valid sequential numbering",
 			draft: makeDraft(
@@ -146,6 +163,9 @@ func TestValidateDraft_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := validate.ValidateDraft(tt.draft, tt.v)
+			if tt.wantError != "" && !strings.Contains(strings.Join(result.Errors, "\n"), tt.wantError) {
+				t.Errorf("errors=%v want substring %q", result.Errors, tt.wantError)
+			}
 			if result.IsValid() != tt.wantValid {
 				t.Errorf("IsValid()=%v, want %v; errors: %v", result.IsValid(), tt.wantValid, result.Errors)
 			}

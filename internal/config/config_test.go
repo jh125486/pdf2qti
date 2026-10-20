@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +28,8 @@ func TestLoad_Table(t *testing.T) {
 		{name: "bad json", path: "testdata/bad_json.json", wantErr: true, errLike: "parse config"},
 		{name: "invalid version", path: "testdata/invalid_version.json", wantErr: true, errLike: "validate config"},
 		{name: "no sources", path: "testdata/no_sources.json", wantErr: true, errLike: "validate config"},
+		{name: "invalid default forbidden regex", raw: `{"version":1,"defaults":{"validation":{"forbiddenPhrases":["["]}},"sources":[{"id":"s","pdf":"s.pdf"}]}`, wantErr: true, errLike: "defaults.validation.forbiddenPhrases[0]"},
+		{name: "invalid source forbidden regex", raw: `{"version":1,"sources":[{"id":"s","pdf":"s.pdf","validation":{"forbiddenPhrases":["["]}}]}`, wantErr: true, errLike: "sources[0].validation.forbiddenPhrases[0]"},
 		{name: "Markdown JSON", raw: `{"version":1,"sources":[{"id":"md","context":{"files":[{"path":"notes.md"}]}}]}`, wantVer: 1, wantNumSrc: 1},
 		{name: "blank PDF beside Markdown", raw: `{"version":1,"sources":[{"id":"md","pdf":"","context":{"files":[{"path":"notes.md"}]}}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
 		{name: "whitespace PDF beside Markdown", raw: `{"version":1,"sources":[{"id":"md","pdf":" ","context":{"files":[{"path":"notes.md"}]}}]}`, wantErr: true, errLike: "exactly one of pdf or context"},
@@ -355,14 +358,17 @@ func TestEffectiveGeneration_Table(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		cfg             config.Config
-		wantModel       string
-		wantProvider    string
-		wantSeed        int
-		wantStages      []config.Stage
-		wantModelParams string
+		name             string
+		cfg              config.Config
+		wantModel        string
+		wantProvider     string
+		wantSeed         int
+		wantStages       []config.Stage
+		wantInstructions string
+		wantModelParams  string
 	}{
+		{name: "default instructions inherited", cfg: config.Config{Defaults: config.Defaults{Generation: config.Generation{Instructions: "Ask about trees."}}, Sources: []config.Source{{ID: "s1", Generation: &config.Generation{Model: "test"}}}}, wantInstructions: "Ask about trees."},
+		{name: "source instructions replace defaults", cfg: config.Config{Defaults: config.Defaults{Generation: config.Generation{Instructions: "Ask about trees."}}, Sources: []config.Source{{ID: "s1", Generation: &config.Generation{Instructions: "Ask about graphs."}}}}, wantInstructions: "Ask about graphs."},
 		{
 			name: "no source override",
 			cfg: config.Config{
@@ -422,6 +428,9 @@ func TestEffectiveGeneration_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := tt.cfg.EffectiveGeneration(&tt.cfg.Sources[0])
+			if got.Instructions != tt.wantInstructions {
+				t.Errorf("Instructions=%q want=%q", got.Instructions, tt.wantInstructions)
+			}
 			if tt.wantModel != "" && got.Model != tt.wantModel {
 				t.Errorf("Model=%q want=%q", got.Model, tt.wantModel)
 			}
@@ -447,11 +456,16 @@ func TestEffectiveValidation_Table(t *testing.T) {
 	tests := []struct {
 		name                string
 		cfg                 config.Config
+		wantForbidden       []string
 		wantMAMaxDensity    float64
 		wantEnforceUnique   bool
 		wantRequireSeq      bool
 		wantRequireExactOne bool
 	}{
+		{name: "default custom phrases inherited", cfg: config.Config{Defaults: config.Defaults{Validation: config.Validation{ForbiddenPhrases: []string{"custom"}}}, Sources: []config.Source{{ID: "s1", Validation: &config.Validation{}}}}, wantForbidden: []string{"custom"}},
+		{name: "source phrases replace defaults", cfg: config.Config{Defaults: config.Defaults{Validation: config.Validation{ForbiddenPhrases: []string{"default"}}}, Sources: []config.Source{{ID: "s1", Validation: &config.Validation{ForbiddenPhrases: []string{"source"}}}}}, wantForbidden: []string{"source"}},
+		{name: "empty source list disables defaults", cfg: config.Config{Sources: []config.Source{{ID: "s1", Validation: &config.Validation{ForbiddenPhrases: []string{}}}}}, wantForbidden: []string{}},
+		{name: "empty default list disables builtins", cfg: config.Config{Defaults: config.Defaults{Validation: config.Validation{ForbiddenPhrases: []string{}}}, Sources: []config.Source{{ID: "s1"}}}, wantForbidden: []string{}},
 		{
 			name: "no source override",
 			cfg: config.Config{
@@ -509,6 +523,13 @@ func TestEffectiveValidation_Table(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := tt.cfg.EffectiveValidation(&tt.cfg.Sources[0])
+			wantForbidden := tt.wantForbidden
+			if wantForbidden == nil {
+				wantForbidden = config.DefaultForbiddenPhrases()
+			}
+			if !slices.Equal(got.ForbiddenPhrases, wantForbidden) {
+				t.Errorf("ForbiddenPhrases=%v want=%v", got.ForbiddenPhrases, wantForbidden)
+			}
 			if got.MAMaxCorrectDensity != tt.wantMAMaxDensity {
 				t.Errorf("MAMaxCorrectDensity=%f want=%f", got.MAMaxCorrectDensity, tt.wantMAMaxDensity)
 			}

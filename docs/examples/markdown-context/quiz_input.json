@@ -1,6 +1,9 @@
 {
   "version": 1,
-  "defaults": { "workflow": { "outDir": "out" } },
+  "defaults": {
+    "generation": { "instructions": "Ask applied questions about tree operations using short scenarios." },
+    "workflow": { "outDir": "out" }
+  },
   "sources": [
     {
       "id": "trees",

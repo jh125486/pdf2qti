@@ -153,3 +153,32 @@ func TestNew_WithConfiguredOpenAI(t *testing.T) { //nolint:gosec // test-only cr
 		t.Fatal("New() returned nil generator")
 	}
 }
+
+func TestNewWithLLM(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		instructions []string
+		wantExtra    string
+	}{
+		{name: "universal standalone rule"},
+		{name: "extra instructions appended", instructions: []string{"Use short, applied questions."}, wantExtra: "Use short, applied questions."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			llm := &fakeLLM{response: `{"questions":[{"text":"Explain polymorphism.","options":[]}]}`}
+			generator := generate.NewWithLLM(llm, tt.instructions...)
+			if _, err := generator.GenerateStage(t.Context(), config.StageES, "Polymorphism supports multiple implementations.", 1); err != nil {
+				t.Fatal(err)
+			}
+			for _, rule := range []string{"standalone, student-facing", "Never refer to the source, the text, the chapter, the passage, or the author"} {
+				if !strings.Contains(llm.prompt, rule) {
+					t.Errorf("prompt missing %q: %s", rule, llm.prompt)
+				}
+			}
+			if tt.wantExtra != "" && !strings.HasSuffix(llm.prompt, "## Additional generation instructions\n"+tt.wantExtra) {
+				t.Errorf("prompt missing appended instructions: %s", llm.prompt)
+			}
+		})
+	}
+}

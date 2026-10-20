@@ -60,6 +60,7 @@
           "type": "array",
           "items": { "type": "string", "enum": ["tf", "ma", "mc"] }
         },
+        "instructions": { "type": "string", "description": "Additional quiz-generation prompt instructions. A nonempty source value replaces the default instructions." },
         "seed": { "type": "integer" },
         "provider": { "type": "string" },
         "model": { "type": "string" },
@@ -73,6 +74,12 @@
     "validation": {
       "type": "object",
       "properties": {
+        "forbiddenPhrases": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Go regular expressions rejected in question and option text, including matching answers. Omitted or null inherits defaults; a source array replaces defaults; [] disables this check. Custom rules are case-sensitive unless they include (?i). Malformed rules fail config validation.",
+          "default": ["(?i)\\bthe\\s+source\\b", "(?i)\\bthe\\s+text\\b", "(?i)\\bthe\\s+chapter\\b", "(?i)\\bthe\\s+passage\\b", "(?i)\\bthe\\s+author\\b"]
+        },
         "maMaxCorrectDensity": { "type": "number", "minimum": 0, "maximum": 1 },
         "enforceUniqueOptionsPerQuestion": { "type": "boolean" },
         "requireSequentialNumbering": { "type": "boolean" },
