@@ -62,16 +62,20 @@ func TestAgenticHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name string
-		args []string
+		name    string
+		command func(t *testing.T) *exec.Cmd
 	}{
-		{name: "root", args: []string{"--agentic-help"}},
-		{name: "missing config and required arguments", args: []string{"--config", "missing.json", "distill", "--agentic-help"}},
+		{name: "root", command: func(t *testing.T) *exec.Cmd {
+			return exec.CommandContext(t.Context(), binary, "--agentic-help")
+		}},
+		{name: "missing config and required arguments", command: func(t *testing.T) *exec.Cmd {
+			return exec.CommandContext(t.Context(), binary, "--config", "missing.json", "distill", "--agentic-help")
+		}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cmd := exec.CommandContext(t.Context(), binary, tt.args...)
+			cmd := tt.command(t)
 			cmd.Dir = t.TempDir()
 			cmd.Env = []string{}
 			var stdout, stderr bytes.Buffer
@@ -82,78 +86,10 @@ func TestAgenticHelp(t *testing.T) {
 			if stderr.Len() != 0 {
 				t.Fatalf("unexpected stderr: %s", stderr.String())
 			}
-			var got struct {
-				FormatVersion int `json:"format_version"`
-				CLI           struct {
-					Name  string `json:"name"`
-					Flags []struct {
-						Name    string  `json:"name"`
-						Default *string `json:"default"`
-					} `json:"flags"`
-					Commands []struct {
-						Name  string            `json:"name"`
-						Flags []json.RawMessage `json:"flags"`
-					} `json:"commands"`
-				} `json:"cli"`
-				Schemas struct {
-					Config    json.RawMessage `json:"config"`
-					Questions json.RawMessage `json:"questions"`
-					Slides    struct {
-						MediaType string `json:"media_type"`
-						Content   string `json:"content"`
-					} `json:"slides"`
-				} `json:"schemas"`
-			}
-			decoder := json.NewDecoder(&stdout)
-			if err := decoder.Decode(&got); err != nil {
-				t.Fatal(err)
-			}
-			if err := decoder.Decode(new(any)); err != io.EOF {
-				t.Fatalf("expected exactly one JSON document; got %v", err)
-			}
-			if got.FormatVersion != 1 || got.CLI.Name != "pdf2qti" {
-				t.Fatalf("unexpected envelope: %+v", got)
-			}
-			wantCommands := []string{"approve", "distill", "generate", "import-bank", "module", "page", "pptx", "publish", "slides", "validate"}
-			var names []string
-			for _, command := range got.CLI.Commands {
-				names = append(names, command.Name)
-			}
-			slices.Sort(names)
-			if !slices.Equal(names, wantCommands) {
-				t.Fatalf("commands = %v, want %v", names, wantCommands)
-			}
-			flags := map[string]*string{}
-			for _, flag := range got.CLI.Flags {
-				flags[flag.Name] = flag.Default
-			}
-			if flags["config"] == nil || *flags["config"] != "quiz_input.json" {
-				t.Errorf("config default missing: %v", flags)
-			}
-			if _, ok := flags["agentic-help"]; !ok {
-				t.Error("agentic-help flag missing")
-			}
-			for _, schema := range []struct {
-				name      string
-				got, want []byte
-			}{
-				{name: "config", got: got.Schemas.Config, want: configSchema},
-				{name: "questions", got: got.Schemas.Questions, want: mustQuestionSchema(t)},
-			} {
-				var actual, expected any
-				if err := json.Unmarshal(schema.got, &actual); err != nil {
-					t.Fatal(err)
-				}
-				if err := json.Unmarshal(schema.want, &expected); err != nil {
-					t.Fatal(err)
-				}
-				if !reflect.DeepEqual(actual, expected) {
-					t.Errorf("%s schema differs from canonical source", schema.name)
-				}
-			}
-			if got.Schemas.Slides.MediaType != "text/markdown" || got.Schemas.Slides.Content != string(slides) {
-				t.Error("slide schema differs from slides.md")
-			}
+
+			got := decodeAgenticHelp(t, &stdout)
+			assertAgenticCommands(t, got)
+			assertAgenticSchemas(t, got, configSchema, slides)
 		})
 	}
 }
@@ -165,4 +101,91 @@ func mustQuestionSchema(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+type agenticHelpDocument struct {
+	FormatVersion int `json:"format_version"`
+	CLI           struct {
+		Name  string `json:"name"`
+		Flags []struct {
+			Name    string  `json:"name"`
+			Default *string `json:"default"`
+		} `json:"flags"`
+		Commands []struct {
+			Name  string            `json:"name"`
+			Flags []json.RawMessage `json:"flags"`
+		} `json:"commands"`
+	} `json:"cli"`
+	Schemas struct {
+		Config    json.RawMessage `json:"config"`
+		Questions json.RawMessage `json:"questions"`
+		Slides    struct {
+			MediaType string `json:"media_type"`
+			Content   string `json:"content"`
+		} `json:"slides"`
+	} `json:"schemas"`
+}
+
+func decodeAgenticHelp(t *testing.T, output io.Reader) agenticHelpDocument {
+	t.Helper()
+	var got agenticHelpDocument
+	decoder := json.NewDecoder(output)
+	if err := decoder.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatalf("expected exactly one JSON document; got %v", err)
+	}
+	return got
+}
+
+func assertAgenticCommands(t *testing.T, got agenticHelpDocument) {
+	t.Helper()
+	if got.FormatVersion != 1 || got.CLI.Name != "pdf2qti" {
+		t.Fatalf("unexpected envelope: %+v", got)
+	}
+	wantCommands := []string{"approve", "distill", "generate", "import-bank", "module", "page", "pptx", "publish", "slides", "validate"}
+	names := make([]string, 0, len(got.CLI.Commands))
+	for _, command := range got.CLI.Commands {
+		names = append(names, command.Name)
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, wantCommands) {
+		t.Fatalf("commands = %v, want %v", names, wantCommands)
+	}
+	flags := map[string]*string{}
+	for _, flag := range got.CLI.Flags {
+		flags[flag.Name] = flag.Default
+	}
+	if flags["config"] == nil || *flags["config"] != "quiz_input.json" {
+		t.Errorf("config default missing: %v", flags)
+	}
+	if _, ok := flags["agentic-help"]; !ok {
+		t.Error("agentic-help flag missing")
+	}
+}
+
+func assertAgenticSchemas(t *testing.T, got agenticHelpDocument, configSchema, slides []byte) {
+	t.Helper()
+	for _, schema := range []struct {
+		name      string
+		got, want []byte
+	}{
+		{name: "config", got: got.Schemas.Config, want: configSchema},
+		{name: "questions", got: got.Schemas.Questions, want: mustQuestionSchema(t)},
+	} {
+		var actual, expected any
+		if err := json.Unmarshal(schema.got, &actual); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(schema.want, &expected); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Errorf("%s schema differs from canonical source", schema.name)
+		}
+	}
+	if got.Schemas.Slides.MediaType != "text/markdown" || got.Schemas.Slides.Content != string(slides) {
+		t.Error("slide schema differs from slides.md")
+	}
 }
