@@ -134,8 +134,13 @@ func validateForbiddenPhrases(draft *render.QuizDraft, patterns []string) []stri
 				for index, option := range question.Options {
 					location := fmt.Sprintf("question %d option %d", question.Number, index+1)
 					errors = append(errors, checkForbiddenPhrase(rule, option.Text, location)...)
-					errors = append(errors, checkForbiddenPhrase(rule, option.MatchText, location+" matching answer")...)
 				}
+			}
+		}
+		for _, question := range draft.MTQuestions {
+			for index, option := range question.Options {
+				location := fmt.Sprintf("question %d option %d matching answer", question.Number, index+1)
+				errors = append(errors, checkForbiddenPhrase(rule, option.MatchText, location)...)
 			}
 		}
 	}
