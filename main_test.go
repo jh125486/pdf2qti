@@ -163,7 +163,8 @@ func assertAgenticCommands(t *testing.T, got *agenticHelpDocument) {
 		t.Fatalf("commands = %v, want %v", names, wantCommands)
 	}
 	flags := map[string]*string{}
-	for _, flag := range got.CLI.Flags {
+	for index := range got.CLI.Flags {
+		flag := &got.CLI.Flags[index]
 		flags[flag.Name] = flag.Default
 	}
 	if flags["config"] == nil || *flags["config"] != "quiz_input.json" {
