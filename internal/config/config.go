@@ -89,8 +89,19 @@ type Workflow struct {
 	ReviewTarget string `json:"reviewTarget"`
 }
 
+// Grounding controls how unsupported source-derived context is handled.
+type Grounding struct {
+	Mode string `json:"mode,omitempty"`
+}
+
+// Distill holds distillation verification settings.
+type Distill struct {
+	Grounding Grounding `json:"grounding,omitempty"`
+}
+
 // Defaults holds global defaults.
 type Defaults struct {
+	Distill    Distill    `json:"distill,omitempty"`
 	Quiz       Quiz       `json:"quiz"`
 	Generation Generation `json:"generation"`
 	Validation Validation `json:"validation"`
@@ -120,6 +131,7 @@ type Source struct {
 	Generation     *Generation `json:"generation,omitempty"`
 	Validation     *Validation `json:"validation,omitempty"`
 	Workflow       *Workflow   `json:"workflow,omitempty"`
+	Distill        *Distill    `json:"distill,omitempty"`
 	pdfPresent     bool
 	contextPresent bool
 }
@@ -192,6 +204,9 @@ func (c *Config) Validate() error {
 	if len(c.Sources) == 0 {
 		return fmt.Errorf("sources must not be empty")
 	}
+	if err := validateGroundingMode(c.Defaults.Distill.Grounding.Mode, "defaults.distill.grounding.mode"); err != nil {
+		return err
+	}
 	if err := validateForbiddenPhrases(c.Defaults.Validation.ForbiddenPhrases, "defaults.validation.forbiddenPhrases"); err != nil {
 		return err
 	}
@@ -233,6 +248,11 @@ func validateSource(index int, source *Source) error {
 	if source.ID == "" {
 		return fmt.Errorf("sources[%d].id must not be empty", index)
 	}
+	if source.Distill != nil {
+		if err := validateGroundingMode(source.Distill.Grounding.Mode, fmt.Sprintf("sources[%d].distill.grounding.mode", index)); err != nil {
+			return err
+		}
+	}
 	if err := validateSourceInput(index, source); err != nil {
 		return err
 	}
@@ -240,6 +260,26 @@ func validateSource(index int, source *Source) error {
 		return validateForbiddenPhrases(source.Validation.ForbiddenPhrases, fmt.Sprintf("sources[%d].validation.forbiddenPhrases", index))
 	}
 	return nil
+}
+
+func validateGroundingMode(mode, path string) error {
+	switch mode {
+	case "", "fail", "drop", "warn":
+		return nil
+	default:
+		return fmt.Errorf("%s must be fail, drop, or warn (got %q)", path, mode)
+	}
+}
+
+// EffectiveGroundingMode resolves the source override and defaults to fail.
+func (c *Config) EffectiveGroundingMode(s *Source) string {
+	if s.Distill != nil && s.Distill.Grounding.Mode != "" {
+		return s.Distill.Grounding.Mode
+	}
+	if c.Defaults.Distill.Grounding.Mode != "" {
+		return c.Defaults.Distill.Grounding.Mode
+	}
+	return "fail"
 }
 
 func validateSourceInput(index int, source *Source) error {
