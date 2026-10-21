@@ -96,13 +96,25 @@ A JSON Schema is provided in [`quiz_input.schema.json`](quiz_input.schema.json) 
 |---|---|
 | `version` | Config schema version (must be `1`) |
 | `courseName` | Optional course-wide display name used as the PPTX title-slide subtitle |
-| `defaults` | Global defaults for `quiz`, `generation`, `validation`, and `workflow` |
+| `defaults` | Global defaults for `distill`, `quiz`, `generation`, `validation`, and `workflow` |
 | `sources` | Array of PDF or Markdown context sources; each source can override any default |
 | `modules` | Array of modules grouping one or more `sources` (by `sourceIds`) for the `module` command |
 
 Each `source` requires an `id` and exactly one of a `pdf` path or a `context` object.
-PDF-only configurations remain valid. Generation, quiz, validation, and workflow settings inherit
+PDF-only configurations remain valid. Distill, generation, quiz, validation, and workflow settings inherit
 from `defaults` unless overridden.
+
+Distillation checks source-derived facts against the original extracted PDF or Markdown text.
+The verifier collects source quotes across all input chunks, checks each quote against that
+original text, then judges whether the collected evidence supports every factual claim in each
+context field. This is an LLM judgment with verified quotes, so semantic support still needs
+human review for consequential use. Configure `defaults.distill.grounding.mode` or a source's
+`distill.grounding.mode` as `fail` (default), `drop`, or `warn`. `fail` stops before writing context
+and reports field IDs and reasons; `drop` clears unsupported fields; `warn` retains them. Both
+`drop` and `warn` record findings in `verification_warnings` and the CLI log. IDs are JSON pointers
+such as `/overview` or `/vocabulary/0` (term and definition together). The check also covers the model's selection
+of which configured course objectives a chapter satisfies. Source IDs, book names, and chapter
+numbers come from config and are outside this check.
 
 Quiz prompts always require standalone, student-facing questions and answers, without references
 to “the source,” “the text,” “the chapter,” “the passage,” or “the author.” Add course-specific
