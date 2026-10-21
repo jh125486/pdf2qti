@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,11 +81,29 @@ func stubChunkOutlineJSON() string {
 // rather than always falling back to full chapter text.
 func stubReconcileOutlineJSON(prompt string) string {
 	matches := reReconcileLine.FindAllStringSubmatch(prompt, -1)
-	entries := make([]string, len(matches))
-	for i, m := range matches {
-		entries[i] = fmt.Sprintf(`{"tag":%q,"title":%q,"focus":%q,"chunk_indices":[%s]}`, m[1], m[3], m[4], m[2])
+	type outlineEntry struct {
+		Tag          string `json:"tag"`
+		Title        string `json:"title"`
+		Focus        string `json:"focus"`
+		ChunkIndices []int  `json:"chunk_indices"`
 	}
-	return fmt.Sprintf(`{"outline":[%s],"warnings":[]}`, strings.Join(entries, ","))
+	entries := make([]outlineEntry, 0, len(matches))
+	for _, m := range matches {
+		chunkIndex, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue // reReconcileLine only matches decimal digits; defensive fallback.
+		}
+		entries = append(entries, outlineEntry{Tag: m[1], Title: m[3], Focus: m[4], ChunkIndices: []int{chunkIndex}})
+	}
+	response := struct {
+		Outline  []outlineEntry `json:"outline"`
+		Warnings []string       `json:"warnings"`
+	}{Outline: entries, Warnings: []string{}}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return `{"outline":[],"warnings":[]}` // No marshaler or nonfinite values in response.
+	}
+	return string(data)
 }
 
 // stubAgendaJSON builds a minimal but valid deck-framing response.
