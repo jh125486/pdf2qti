@@ -172,7 +172,7 @@ var reProtoSeparator = regexp.MustCompile(`^---\s*$`)
 // reFenceLine matches any line that opens or could close a fenced code block: a run of 3-or-more
 // backticks, optionally followed by an info string containing no further backticks — CommonMark
 // forbids a backtick in a fence's own info string precisely so a prose line mentioning an inline
-// code span right after opening backticks (`` ```mermaid``` is the opener `` in running text) isn't
+// code span right after opening backticks (“ ```mermaid``` is the opener “ in running text) isn't
 // misread as a fence itself; requiring group 2 to be backtick-free is what makes such a line fail
 // to match reFenceLine at all, rather than being treated as an open with a garbled info string.
 // Shared by splitProtoDeckBlocks and findMermaidFence so both agree on the one thing that actually

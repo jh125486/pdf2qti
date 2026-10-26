@@ -1034,13 +1034,13 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 					Agenda:     []string{"One", "Two", "Three"},
 					Slides: []distill.Slide{
 						{
-							Title: "First",
-							Tag:   "ch01",
+							Title:   "First",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  A --> B", Alt: "A leads to B.", Caption: "First diagram."},
 						},
 						{
-							Title: "Second",
-							Tag:   "ch01",
+							Title:   "Second",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  X --> Y", Alt: "X leads to Y.", Caption: "Second diagram."},
 						},
 					},
@@ -1062,8 +1062,8 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 					Agenda:     []string{"One", "Two", "Three"},
 					Slides: []distill.Slide{
 						{
-							Title: "Lifecycle",
-							Tag:   "ch01",
+							Title:   "Lifecycle",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  P --> Q", Alt: "P leads to Q.", Caption: "A single step."},
 						},
 					},
@@ -1092,8 +1092,8 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 					Agenda:     []string{"One", "Two", "Three"},
 					Slides: []distill.Slide{
 						{
-							Title: "Lifecycle",
-							Tag:   "ch01",
+							Title:   "Lifecycle",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  M --> N", Alt: "M leads to N.", Caption: "One more step."},
 						},
 					},
@@ -1102,8 +1102,8 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 			verify: verifySectionCleanup,
 		},
 		{
-			name:   "diagram title/caption collide with the picture placeholder marker",
-			script: mmdcCopyFixtureScript,
+			name:            "diagram title/caption collide with the picture placeholder marker",
+			script:          mmdcCopyFixtureScript,
 			templateEntries: diagramTemplateEntries,
 			dc: func() *distill.DistilledContext {
 				return &distill.DistilledContext{
@@ -1142,8 +1142,8 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 					Agenda:     []string{"One", "Two", "Three"},
 					Slides: []distill.Slide{
 						{
-							Title: "Duplicate Layout",
-							Tag:   "ch01",
+							Title:   "Duplicate Layout",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  U --> V", Alt: "U leads to V.", Caption: "One duplicate-layout diagram."},
 						},
 					},
@@ -1165,8 +1165,8 @@ func mermaidDiagramMmdcScenarios() []mermaidDiagramMmdcScenario {
 					Agenda:     []string{"One", "Two", "Three"},
 					Slides: []distill.Slide{
 						{
-							Title: "Lifecycle",
-							Tag:   "ch01",
+							Title:   "Lifecycle",
+							Tag:     "ch01",
 							Diagram: &distill.Diagram{Source: "flowchart LR\n  W --> X", Alt: "W leads to X.", Caption: "Missing placeholder."},
 						},
 					},
@@ -1358,16 +1358,16 @@ func verifyDuplicateLayoutCleanup(t *testing.T, dir string, out map[string][]byt
 // betweenFirst returns the substring of s between the first occurrence of open and the following
 // occurrence of closeMarker, and whether both were found.
 func betweenFirst(s, open, closeMarker string) (string, bool) {
-	i := strings.Index(s, open)
-	if i == -1 {
+	_, after, ok := strings.Cut(s, open)
+	if !ok {
 		return "", false
 	}
-	rest := s[i+len(open):]
-	j := strings.Index(rest, closeMarker)
-	if j == -1 {
+	rest := after
+	before, _, ok := strings.Cut(rest, closeMarker)
+	if !ok {
 		return "", false
 	}
-	return rest[:j], true
+	return before, true
 }
 
 // sldIDOrder returns the r:id values from presXML's <p:sldIdLst>, in document order.

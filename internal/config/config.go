@@ -96,12 +96,12 @@ type Grounding struct {
 
 // Distill holds distillation verification settings.
 type Distill struct {
-	Grounding Grounding `json:"grounding,omitempty"`
+	Grounding Grounding `json:"grounding"`
 }
 
 // Defaults holds global defaults.
 type Defaults struct {
-	Distill    Distill    `json:"distill,omitempty"`
+	Distill    Distill    `json:"distill"`
 	Quiz       Quiz       `json:"quiz"`
 	Generation Generation `json:"generation"`
 	Validation Validation `json:"validation"`
