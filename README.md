@@ -106,9 +106,12 @@ from `defaults` unless overridden.
 
 Distillation checks source-derived facts against the original extracted PDF or Markdown text.
 The verifier collects source quotes across all input chunks, checks each quote against that
-original text (modulo whitespace, typography and Markdown emphasis; quotes the model cannot
-reproduce verbatim are discarded as evidence, and items left without evidence are reported as
-unsupported and handled by the policy below), then judges whether the collected evidence supports every factual claim in each
+original text. Quotes are matched leniently (whitespace, typography, Markdown emphasis and code
+markers, and literal `\n` `\t` `\r` escapes), and the evidence stored and shown to the judge is the
+matching source text itself, not the model's rendition. Unmatched quotes are discarded and counted,
+and items left without evidence are reported as unsupported (pedagogical-only `/teaching_notes`
+excepted). If every quote offered for a batch is absent from the source, the run fails loudly
+instead. The verifier then judges whether the collected evidence supports every factual claim in each
 context field. This is an LLM judgment with verified quotes, so semantic support still needs
 human review for consequential use. Configure `defaults.distill.grounding.mode` or a source's
 `distill.grounding.mode` as `fail` (default), `drop`, or `warn`. `fail` stops before writing context

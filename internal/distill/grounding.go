@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // GroundingFinding identifies source-derived content for which source evidence was insufficient.
@@ -47,11 +50,11 @@ func VerifyGrounding(ctx context.Context, llm LLM, dc *DistilledContext, chapter
 	var findings []GroundingFinding
 	found := make(map[string]bool)
 	for _, batch := range groundingBatches(items) {
-		quotes, err := collectGroundingEvidence(ctx, llm, batch, chunks)
+		quotes, discarded, err := collectGroundingEvidence(ctx, llm, batch, chunks)
 		if err != nil {
 			return nil, err
 		}
-		batchFindings, err := decideGrounding(ctx, llm, batch, quotes)
+		batchFindings, err := decideGrounding(ctx, llm, batch, quotes, discarded)
 		if err != nil {
 			return nil, err
 		}
@@ -66,45 +69,60 @@ func VerifyGrounding(ctx context.Context, llm LLM, dc *DistilledContext, chapter
 	return findings, nil
 }
 
-// collectGroundingEvidence gathers verified source quotes for every item in batch across all chunks.
-// Quotes the model could not reproduce from the chunk (modulo whitespace, typography and Markdown
-// emphasis) are discarded as invalid evidence rather than treated as errors; items left without
-// quotes are later reported as unsupported. Malformed model output is still an error.
-func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingItem, chunks []string) (map[string][]string, error) {
-	quotes := make(map[string][]string, len(batch))
+// collectGroundingEvidence gathers source evidence for every item in batch across all chunks.
+// Each model quote is matched leniently against the chunk (see normalizeWithMap); on a match the
+// stored evidence is the matching original source span, never the model's own text. Quotes that
+// do not match are discarded and counted per item in the second return value. If quotes were
+// offered but none matched anywhere in the batch, the mismatch is systematic and is an error.
+// Malformed model output is also an error.
+func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingItem, chunks []string) (quotes map[string][]string, discarded map[string]int, err error) {
+	quotes = make(map[string][]string, len(batch))
+	discarded = make(map[string]int, len(batch))
+	offered, matched := 0, 0
 	for chunkIndex, chunk := range chunks {
 		raw, err := llm.Complete(ctx, groundingEvidencePrompt(batch, chunk), nil)
 		if err != nil {
-			return nil, fmt.Errorf("collect evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+			return nil, nil, fmt.Errorf("collect evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
 		}
 		var response struct {
 			Items []groundingEvidence `json:"items"`
 		}
 		if err := unmarshalRepaired(raw, &response); err != nil {
-			return nil, fmt.Errorf("parse grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+			return nil, nil, fmt.Errorf("parse grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
 		}
 		if err := validateGroundingIDs(batch, evidenceIDs(response.Items)); err != nil {
-			return nil, fmt.Errorf("grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+			return nil, nil, fmt.Errorf("grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
 		}
+		norm := normalizeWithMap(chunk)
 		for _, item := range response.Items {
 			if item.Quotes == nil {
-				return nil, fmt.Errorf("grounding evidence %s: missing evidence_quotes array", item.ID)
+				return nil, nil, fmt.Errorf("grounding evidence %s: missing evidence_quotes array", item.ID)
 			}
 			for _, quote := range *item.Quotes {
-				if !sourceContainsQuote(chunk, quote) {
+				offered++
+				span, ok := norm.find(chunk, quote)
+				if !ok {
+					discarded[item.ID]++
 					continue
 				}
-				quotes[item.ID] = append(quotes[item.ID], quote)
+				matched++
+				if !slices.Contains(quotes[item.ID], span) {
+					quotes[item.ID] = append(quotes[item.ID], span)
+				}
 			}
 		}
 	}
-	return quotes, nil
+	if offered > 0 && matched == 0 {
+		return nil, nil, fmt.Errorf("grounding evidence: all %d offered quotes were absent from the source (check source/quote formatting)", offered)
+	}
+	return quotes, discarded, nil
 }
 
-// decideGrounding asks the model whether the verified quotes support each item in batch.
-// An item the model calls supported without any verified quote (and not pedagogical-only
-// teaching notes) becomes a finding rather than an error.
-func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes map[string][]string) ([]GroundingFinding, error) {
+// decideGrounding asks the model whether the verified source spans support each item in batch.
+// An item the model calls supported without any verified span (and not pedagogical-only
+// teaching notes) becomes a finding rather than an error; its reason notes how many quotes were
+// discarded. The discarded counts are never sent to the model.
+func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes map[string][]string, discarded map[string]int) ([]GroundingFinding, error) {
 	raw, err := llm.Complete(ctx, groundingDecisionPrompt(batch, quotes), nil)
 	if err != nil {
 		return nil, fmt.Errorf("decide grounding: %w", err)
@@ -125,7 +143,11 @@ func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes
 		}
 		pedagogicalOnly := item.ID == "/teaching_notes" && item.PedagogicalOnly != nil && *item.PedagogicalOnly
 		if *item.Supported && len(quotes[item.ID]) == 0 && !pedagogicalOnly {
-			findings = append(findings, GroundingFinding{ID: item.ID, Reason: "no verbatim source quote could be verified"})
+			reason := "no verbatim source quote could be verified"
+			if n := discarded[item.ID]; n > 0 {
+				reason += fmt.Sprintf(" (%d quote(s) discarded as not found in source)", n)
+			}
+			findings = append(findings, GroundingFinding{ID: item.ID, Reason: reason})
 			continue
 		}
 		if *item.Supported {
@@ -140,27 +162,111 @@ func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes
 	return findings, nil
 }
 
-// sourceContainsQuote reports whether quote is a non-empty contiguous substring of chunk after
-// both are passed through normalizeForQuote.
-func sourceContainsQuote(chunk, quote string) bool {
-	q := normalizeForQuote(quote)
-	return q != "" && strings.Contains(normalizeForQuote(chunk), q)
+// quoteReplacements folds typography to ASCII; an empty replacement strips the sequence. Literal
+// backslash escapes for newline, tab and carriage return (which models emit when joining a
+// multi-line quote) count as whitespace. Underscores are kept because identifiers use them.
+var quoteReplacements = []struct{ from, to string }{
+	{"\u2018", "'"}, {"\u2019", "'"}, {"\u201C", `"`}, {"\u201D", `"`},
+	{"\u2013", "-"}, {"\u2014", "-"}, {"\u2026", "..."},
+	{"`", ""}, {"*", ""},
+	{`\n`, " "}, {`\t`, " "}, {`\r`, " "},
 }
 
-var quoteFolder = strings.NewReplacer(
-	"\u2018", "'", "\u2019", "'", "\u201C", `"`, "\u201D", `"`,
-	"\u2013", "-", "\u2014", "-", "\u2026", "...",
-	"`", "", "*", "",
-	`\n`, " ", `\t`, " ", `\r`, " ",
-)
+// normalized is a normalized string plus, for each of its bytes, the half-open byte range of the
+// original text that produced it.
+type normalized struct {
+	text       string
+	buf        []byte
+	start, end []int
+}
 
-// normalizeForQuote collapses whitespace, folds curly quotes, dashes and the ellipsis character to
-// ASCII, and removes backticks and asterisks. Literal backslash escapes for newline, tab and carriage
-// return (which models emit when joining a multi-line quote) count as whitespace. Both sides are
-// normalized alike, so a literal "\n" in source code still matches. Underscores are kept because
-// identifiers use them.
-func normalizeForQuote(s string) string {
-	return strings.Join(strings.Fields(quoteFolder.Replace(s)), " ")
+// normalizeWithMap normalizes s (whitespace runs collapse to one space and are trimmed, typography
+// folded, backticks and asterisks removed) and records where every output byte came from in s.
+func normalizeWithMap(s string) normalized {
+	var n normalized
+	for i := 0; i < len(s); {
+		if j := spaceRunEnd(s, i); j > i {
+			n.addSpace(i, j)
+			i = j
+			continue
+		}
+		if rep, ok := matchReplacement(s[i:]); ok {
+			if rep.to == " " {
+				n.addSpace(i, i+len(rep.from))
+			} else {
+				n.add(rep.to, i, i+len(rep.from))
+			}
+			i += len(rep.from)
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		n.add(s[i:i+size], i, i+size)
+		i += size
+	}
+	for len(n.buf) > 0 && n.buf[len(n.buf)-1] == ' ' {
+		n.buf = n.buf[:len(n.buf)-1]
+		n.start = n.start[:len(n.start)-1]
+		n.end = n.end[:len(n.end)-1]
+	}
+	n.text = string(n.buf)
+	return n
+}
+
+// add appends text, attributing every byte to the original range [from, to).
+func (n *normalized) add(text string, from, to int) {
+	for i := 0; i < len(text); i++ {
+		n.buf = append(n.buf, text[i])
+		n.start = append(n.start, from)
+		n.end = append(n.end, to)
+	}
+}
+
+// addSpace records whitespace ending at original offset to: leading space is dropped and
+// consecutive spaces extend the previous one's range.
+func (n *normalized) addSpace(from, to int) {
+	switch {
+	case len(n.buf) == 0:
+	case n.buf[len(n.buf)-1] == ' ':
+		n.end[len(n.end)-1] = to
+	default:
+		n.add(" ", from, to)
+	}
+}
+
+// spaceRunEnd returns the end of the run of Unicode whitespace starting at s[i], or i if none.
+func spaceRunEnd(s string, i int) int {
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		i += size
+	}
+	return i
+}
+
+func matchReplacement(s string) (struct{ from, to string }, bool) {
+	for _, rep := range quoteReplacements {
+		if strings.HasPrefix(s, rep.from) {
+			return rep, true
+		}
+	}
+	return struct{ from, to string }{}, false
+}
+
+// find locates the first occurrence of quote (normalized the same way) in n, which must be
+// normalizeWithMap(chunk). It returns the original chunk text spanning the match, so callers
+// store real source text rather than the model's rendition. An empty normalized quote never matches.
+func (n *normalized) find(chunk, quote string) (string, bool) {
+	q := normalizeWithMap(quote).text
+	if q == "" {
+		return "", false
+	}
+	idx := strings.Index(n.text, q)
+	if idx < 0 {
+		return "", false
+	}
+	return chunk[n.start[idx]:n.end[idx+len(q)-1]], true
 }
 
 func boundedGroundingReason(reason string) string {
