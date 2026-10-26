@@ -46,7 +46,8 @@ Slide-writing guidance distinct from the content itself. How to *teach* this cha
 - Recommended slide structure and narrative arc
 - Which details belong in a later chapter and should be deferred
 - What to emphasize as "why" vs. "what"
-- Concepts this cohort of students consistently misunderstands
+- Concepts students may misunderstand, phrased as teaching suggestions; do not assert facts
+  about a particular cohort unless chapter text explicitly supplies that evidence
 
 ## Exclude
 The chapter text below is raw text extracted from an interactive zyBooks PDF and contains

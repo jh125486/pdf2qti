@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/jh125486/pdf2qti/internal/config"
 )
@@ -70,9 +71,45 @@ func jsonSchemaObject(properties map[string]any) map[string]any {
 	}
 }
 
+const (
+	groundingFail = "fail"
+	groundingDrop = "drop"
+	groundingWarn = "warn"
+)
+
+// applyGroundingPolicy fails, drops, or retains-with-warning the ungrounded findings per mode.
+func applyGroundingPolicy(dc *DistilledContext, findings []GroundingFinding, mode string) error {
+	if len(findings) == 0 {
+		return nil
+	}
+	if mode == groundingFail {
+		lines := make([]string, len(findings))
+		for i, finding := range findings {
+			lines[i] = finding.ID + ": " + finding.Reason
+		}
+		return fmt.Errorf("unsupported distilled context: %s", strings.Join(lines, "; "))
+	}
+	action := "retained"
+	if mode == groundingDrop {
+		DropUngrounded(dc, findings)
+		action = "dropped"
+	}
+	for _, finding := range findings {
+		dc.VerificationWarnings = append(dc.VerificationWarnings, "grounding "+action+" "+finding.ID+": "+finding.Reason)
+	}
+	return nil
+}
+
 // Distill calls the LLM to produce a DistilledContext for the given source.
 // chapterText is raw text extracted from the PDF or selected Markdown context.
-func Distill(ctx context.Context, src *config.Source, objectives []config.CourseObjective, llm LLM, chapterText string) (*DistilledContext, error) {
+func Distill(ctx context.Context, src *config.Source, objectives []config.CourseObjective, llm LLM, chapterText string, groundingMode ...string) (*DistilledContext, error) {
+	mode := groundingFail
+	if len(groundingMode) > 0 {
+		mode = groundingMode[0]
+	}
+	if mode != groundingFail && mode != groundingDrop && mode != groundingWarn {
+		return nil, fmt.Errorf("invalid grounding mode %q", mode)
+	}
 	// condensedText is non-empty only when chapterText was too large to send directly. In that
 	// case it becomes the final Text field verbatim: asking the same synthesis call that
 	// produces the other structured fields to ALSO reproduce this much prose is unreliable in
@@ -114,6 +151,14 @@ func Distill(ctx context.Context, src *config.Source, objectives []config.Course
 			return nil, fmt.Errorf("verify consistency: %w", err)
 		}
 		dc.VerificationWarnings = warnings
+	}
+
+	findings, err := VerifyGrounding(ctx, llm, &dc, chapterText)
+	if err != nil {
+		return nil, fmt.Errorf("verify grounding: %w", err)
+	}
+	if err := applyGroundingPolicy(&dc, findings, mode); err != nil {
+		return nil, err
 	}
 
 	// Populate fields from config that the LLM doesn't set.

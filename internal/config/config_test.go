@@ -39,6 +39,8 @@ func TestLoad_Table(t *testing.T) {
 		{name: "whitespace PDF JSON", raw: `{"version":1,"sources":[{"id":"pdf","pdf":" "}]}`, wantErr: true, errLike: "pdf must not be empty"},
 		{name: "null PDF JSON", raw: `{"version":1,"sources":[{"id":"pdf","pdf":null}]}`, wantErr: true, errLike: "pdf must not be empty"},
 		{name: "null context JSON", raw: `{"version":1,"sources":[{"id":"md","context":null}]}`, wantErr: true, errLike: "context must not be null"},
+		{name: "invalid default grounding mode", raw: `{"version":1,"defaults":{"distill":{"grounding":{"mode":"ignore"}}},"sources":[{"id":"s","pdf":"s.pdf"}]}`, wantErr: true, errLike: "defaults.distill.grounding.mode"},
+		{name: "invalid source grounding mode", raw: `{"version":1,"sources":[{"id":"s","pdf":"s.pdf","distill":{"grounding":{"mode":"ignore"}}}]}`, wantErr: true, errLike: "sources[0].distill.grounding.mode"},
 	}
 
 	for _, tt := range tests {
@@ -66,6 +68,30 @@ func TestLoad_Table(t *testing.T) {
 				if len(cfg.Sources) != tt.wantNumSrc {
 					t.Errorf("sources=%d want=%d", len(cfg.Sources), tt.wantNumSrc)
 				}
+			}
+		})
+	}
+}
+
+func TestEffectiveGroundingMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		defaultMode string
+		sourceMode  string
+		want        string
+	}{
+		{name: "implicit fail", want: "fail"},
+		{name: "default drop", defaultMode: "drop", want: "drop"},
+		{name: "source overrides default", defaultMode: "drop", sourceMode: "warn", want: "warn"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.Config{Defaults: config.Defaults{Distill: config.Distill{Grounding: config.Grounding{Mode: tt.defaultMode}}}}
+			src := &config.Source{Distill: &config.Distill{Grounding: config.Grounding{Mode: tt.sourceMode}}}
+			if got := cfg.EffectiveGroundingMode(src); got != tt.want {
+				t.Fatalf("mode=%q want=%q", got, tt.want)
 			}
 		})
 	}

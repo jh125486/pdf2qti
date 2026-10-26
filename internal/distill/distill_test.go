@@ -18,8 +18,34 @@ type stubLLM struct {
 	err      error
 }
 
-func (s *stubLLM) Complete(_ context.Context, _ string, _ *distill.Schema) (string, error) {
+func (s *stubLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
+	if strings.HasPrefix(prompt, "GROUNDING_") {
+		return groundingTestReply(prompt, "text"), nil
+	}
 	return s.response, s.err
+}
+
+func groundingTestReply(prompt, quote string) string {
+	var raw string
+	if strings.HasPrefix(prompt, "GROUNDING_EVIDENCE:") {
+		raw = strings.SplitN(strings.SplitN(prompt, "CANDIDATES:\n", 2)[1], "\nORIGINAL SOURCE CHUNK:", 2)[0]
+	} else {
+		raw = strings.SplitN(prompt, "CANDIDATES AND VERIFIED EVIDENCE:\n", 2)[1]
+	}
+	var candidates []struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(raw), &candidates)
+	items := make([]map[string]any, len(candidates))
+	for i, candidate := range candidates {
+		if strings.HasPrefix(prompt, "GROUNDING_EVIDENCE:") {
+			items[i] = map[string]any{"id": candidate.ID, "evidence_quotes": []string{quote}}
+		} else {
+			items[i] = map[string]any{"id": candidate.ID, "supported": true, "reason": ""}
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"items": items})
+	return string(b)
 }
 
 func validLLMResponse() string {
@@ -73,6 +99,8 @@ type chunkAwareLLM struct {
 
 func (c *chunkAwareLLM) Complete(_ context.Context, prompt string, _ *distill.Schema) (string, error) {
 	switch {
+	case strings.HasPrefix(prompt, "GROUNDING_"):
+		return groundingTestReply(prompt, "a"), nil
 	case strings.Contains(prompt, "pre-processing part"):
 		c.digestCalls++
 		return "DIGEST", nil

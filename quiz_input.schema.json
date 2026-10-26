@@ -71,6 +71,21 @@
         }
       }
     },
+    "distill": {
+      "type": "object",
+      "properties": {
+        "grounding": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["fail", "drop", "warn"],
+              "description": "Handling for distilled factual content unsupported by original source; defaults to fail."
+            }
+          }
+        }
+      }
+    },
     "validation": {
       "type": "object",
       "properties": {
@@ -101,6 +116,7 @@
       "properties": {
         "quiz": { "$ref": "#/definitions/quiz" },
         "generation": { "$ref": "#/definitions/generation" },
+		"distill": { "$ref": "#/definitions/distill" },
         "validation": { "$ref": "#/definitions/validation" },
         "workflow": { "$ref": "#/definitions/workflow" }
       }
@@ -136,6 +152,7 @@
         },
         "quiz": { "$ref": "#/definitions/quiz" },
         "generation": { "$ref": "#/definitions/generation" },
+		"distill": { "$ref": "#/definitions/distill" },
         "validation": { "$ref": "#/definitions/validation" },
         "workflow": { "$ref": "#/definitions/workflow" }
       }

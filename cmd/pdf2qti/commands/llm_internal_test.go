@@ -1,4 +1,4 @@
-// Whitebox package: selectLLM and stubSummaryJSON are unexported and not otherwise reachable in
+// Whitebox package: selectLLM, stubReconcileOutlineJSON, and stubSummaryJSON are unexported and not otherwise reachable in
 // a way that exercises their specific success/edge branches from outside the package (every
 // other command test runs with no API key configured, so selectLLM always falls back to the
 // stub, and always drives prompts containing at least one chapter heading).
@@ -6,6 +6,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -70,5 +71,33 @@ func TestStubSummaryJSON_NoChapterHeadingsDefaultsToOneBullet(t *testing.T) {
 	got := stubSummaryJSON("prompt with no chapter headings at all")
 	if strings.Count(got, `"placeholder"`) != 1 {
 		t.Fatalf("expected exactly 1 placeholder bullet when no chapter headings match, got: %s", got)
+	}
+}
+
+func TestStubReconcileOutlineJSON_QuotedFields(t *testing.T) {
+	t.Parallel()
+	prompt := `1. [tag"quoted] (chunk 12) Title "quoted" \ path — Focus "quoted" \ path`
+	raw := stubReconcileOutlineJSON(prompt)
+	var response struct {
+		Outline []struct {
+			Tag          string `json:"tag"`
+			Title        string `json:"title"`
+			Focus        string `json:"focus"`
+			ChunkIndices []int  `json:"chunk_indices"`
+		} `json:"outline"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
+		t.Fatalf("invalid JSON %q: %v", raw, err)
+	}
+	if len(response.Outline) != 1 {
+		t.Fatalf("outline=%v", response.Outline)
+	}
+	entry := response.Outline[0]
+	if entry.Tag != `tag"quoted` || entry.Title != `Title "quoted" \ path` || entry.Focus != `Focus "quoted" \ path` || len(entry.ChunkIndices) != 1 || entry.ChunkIndices[0] != 12 {
+		t.Fatalf("entry=%+v", entry)
+	}
+	if len(response.Warnings) != 0 {
+		t.Fatalf("warnings=%v", response.Warnings)
 	}
 }

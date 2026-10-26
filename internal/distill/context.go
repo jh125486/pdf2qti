@@ -192,10 +192,8 @@ type DistilledContext struct {
 	// these per-chapter fields — until that wiring lands, callers must populate them manually.
 	Agenda []string `json:"agenda"` // 3-8 top-level topics, one per major section
 	Slides []Slide  `json:"slides"` // one per Content slide to generate
-	// VerificationWarnings lists contradictions or issues verifyConsistency found but couldn't
-	// auto-resolve (e.g. a formula stated two different ways in different parts of Text). Only
-	// populated when the chapter was large enough to require chunked distillation; empty
-	// otherwise since there's no cross-chunk inconsistency risk to check in a single LLM call.
+	// VerificationWarnings lists unresolved chunk-consistency issues and source-grounding
+	// findings retained or dropped under the configured grounding policy.
 	VerificationWarnings []string `json:"verification_warnings,omitempty"`
 }
 
