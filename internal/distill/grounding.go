@@ -151,10 +151,14 @@ var quoteFolder = strings.NewReplacer(
 	"\u2018", "'", "\u2019", "'", "\u201C", `"`, "\u201D", `"`,
 	"\u2013", "-", "\u2014", "-", "\u2026", "...",
 	"`", "", "*", "",
+	`\n`, " ", `\t`, " ", `\r`, " ",
 )
 
 // normalizeForQuote collapses whitespace, folds curly quotes, dashes and the ellipsis character to
-// ASCII, and removes backticks and asterisks. Underscores are kept because identifiers use them.
+// ASCII, and removes backticks and asterisks. Literal backslash escapes for newline, tab and carriage
+// return (which models emit when joining a multi-line quote) count as whitespace. Both sides are
+// normalized alike, so a literal "\n" in source code still matches. Underscores are kept because
+// identifiers use them.
 func normalizeForQuote(s string) string {
 	return strings.Join(strings.Fields(quoteFolder.Replace(s)), " ")
 }
