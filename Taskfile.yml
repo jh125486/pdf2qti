@@ -1,0 +1,109 @@
+version: '3'
+
+vars:
+  BINARY_NAME: pdf2qti
+  BUILD_DIR: bin
+  TOOL: go tool -modfile=tools.mod
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  init:
+    desc: Initialize development environment (git hooks)
+    cmds:
+      - mkdir -p .git/hooks
+      - cp .githooks/pre-push .git/hooks/pre-push
+      - chmod +x .git/hooks/pre-push
+      - echo "Development environment initialized ✓"
+
+  test:
+    desc: Run all tests with coverage
+    cmds:
+      - '{{.TOOL}} gotestsum -- -race -shuffle=on -coverprofile=coverage.txt ./...'
+
+  tidy:
+    desc: Tidy Go modules
+    cmds:
+      - go mod tidy
+
+  fmt:
+    desc: Format code
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint with auto-fix enabled
+    cmds:
+      - '{{.TOOL}} golangci-lint version'
+      - '{{.TOOL}} golangci-lint run --fix ./...'
+
+  vuln-check:
+    desc: Check for known vulnerabilities
+    cmds:
+      - '{{.TOOL}} govulncheck -version'
+      - '{{.TOOL}} govulncheck ./...'
+
+  fix:
+    desc: Apply go fix modernizers
+    cmds:
+      - go fix ./...
+
+  static:
+    desc: Run all linting tools
+    cmds:
+      - task: tidy
+      - task: vet
+      - task: lint
+      - task: vuln-check
+      - task: fix
+
+  check:
+    desc: Run all checks (tidy, format, static analysis, test)
+    cmds:
+      - task: tidy
+      - task: fmt
+      - task: static
+      - task: test
+
+  build:
+    desc: Build the binary
+    cmds:
+      - go build -o {{.BUILD_DIR}}/{{.BINARY_NAME}} .
+
+  install:
+    desc: Install the binary
+    cmds:
+      - go install .
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}/ out/ coverage.txt
+
+  outdated:
+    desc: List outdated direct dependencies
+    cmds:
+      - |
+        go list -u -m -f '{{"{{if not .Indirect}}{{.}}{{end}}"}}' all 2>/dev/null | grep '\[' || echo "All direct dependencies are up to date"
+
+  upgrade-pkgs:
+    desc: Upgrade go.mod packages to latest versions
+    cmds:
+      - go get -u -t ./...
+      - go mod tidy
+
+  upgrade-tools:
+    desc: Upgrade tools.mod tools (golangci-lint, govulncheck, gotestsum, task) to latest
+    cmds:
+      # Per-tool @latest (not `-u tool`): -u also bumps transitive deps past what the tools
+      # support (e.g. gobwas/glob v1 breaks depguard inside golangci-lint).
+      - go get -tool -modfile=tools.mod github.com/go-task/task/v3/cmd/task@latest github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest golang.org/x/vuln/cmd/govulncheck@latest gotest.tools/gotestsum@latest

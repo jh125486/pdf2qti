@@ -561,20 +561,24 @@ Use these conventions for new or refactored Go tests in this repository:
 4. Prefer blackbox package tests (`package <name>_test`).
 5. If a whitebox test package is required (for unexported helpers), add a short justification comment at file top.
 
-Use the Makefile to run common development tasks.
+Use [Task](https://taskfile.dev) to run common development tasks (`task --list` shows all of them). Build tools (golangci-lint, govulncheck, gotestsum, task) are pinned in `tools.mod`, so `go tool -modfile=tools.mod task <name>` works without installing anything.
 
 ```bash
 # Run all checks (format, vet, lint, test)
-make check
+task check
 
 # Run tests with coverage
-make test
+task test
 
 # Build the binary
-make build
+task build
 
 # Install the binary
-make install
+task install
+
+# Upgrade go.mod packages / tools.mod tools
+task upgrade-pkgs
+task upgrade-tools
 ```
 
 ## License
