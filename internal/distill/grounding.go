@@ -47,69 +47,90 @@ func VerifyGrounding(ctx context.Context, llm LLM, dc *DistilledContext, chapter
 	var findings []GroundingFinding
 	found := make(map[string]bool)
 	for _, batch := range groundingBatches(items) {
-		quotes := make(map[string][]string, len(batch))
-		for chunkIndex, chunk := range chunks {
-			prompt := groundingEvidencePrompt(batch, chunk)
-			raw, err := llm.Complete(ctx, prompt, nil)
-			if err != nil {
-				return nil, fmt.Errorf("collect evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
-			}
-			var response struct {
-				Items []groundingEvidence `json:"items"`
-			}
-			if err := json.Unmarshal([]byte(raw), &response); err != nil {
-				return nil, fmt.Errorf("parse grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
-			}
-			if err := validateGroundingIDs(batch, evidenceIDs(response.Items)); err != nil {
-				return nil, fmt.Errorf("grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
-			}
-			for _, item := range response.Items {
-				if item.Quotes == nil {
-					return nil, fmt.Errorf("grounding evidence %s: missing evidence_quotes array", item.ID)
-				}
-				for _, quote := range *item.Quotes {
-					if !sourceContainsQuote(chunk, quote) {
-						return nil, fmt.Errorf("grounding evidence %s: quote is empty or absent from original source chunk %d/%d", item.ID, chunkIndex+1, len(chunks))
-					}
-					quotes[item.ID] = append(quotes[item.ID], quote)
-				}
-			}
-		}
-		prompt := groundingDecisionPrompt(batch, quotes)
-		raw, err := llm.Complete(ctx, prompt, nil)
+		quotes, err := collectGroundingEvidence(ctx, llm, batch, chunks)
 		if err != nil {
-			return nil, fmt.Errorf("decide grounding: %w", err)
+			return nil, err
 		}
-		var response struct {
-			Items []groundingDecision `json:"items"`
+		batchFindings, err := decideGrounding(ctx, llm, batch, quotes)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal([]byte(raw), &response); err != nil {
-			return nil, fmt.Errorf("parse grounding decision: %w", err)
-		}
-		if err := validateGroundingIDs(batch, decisionIDs(response.Items)); err != nil {
-			return nil, fmt.Errorf("grounding decision: %w", err)
-		}
-		for _, item := range response.Items {
-			if item.Supported == nil {
-				return nil, fmt.Errorf("grounding decision %s: missing supported boolean", item.ID)
-			}
-			pedagogicalOnly := item.ID == "/teaching_notes" && item.PedagogicalOnly != nil && *item.PedagogicalOnly
-			if *item.Supported && len(quotes[item.ID]) == 0 && !pedagogicalOnly {
-				return nil, fmt.Errorf("grounding decision %s: supported without verified evidence", item.ID)
-			}
-			if !*item.Supported {
-				reason := strings.TrimSpace(item.Reason)
-				if reason == "" {
-					reason = "source evidence does not support every factual claim"
-				}
-				if !found[item.ID] {
-					findings = append(findings, GroundingFinding{ID: item.ID, Reason: boundedGroundingReason(reason)})
-					found[item.ID] = true
-				}
+		for _, finding := range batchFindings {
+			if !found[finding.ID] {
+				found[finding.ID] = true
+				findings = append(findings, finding)
 			}
 		}
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].ID < findings[j].ID })
+	return findings, nil
+}
+
+// collectGroundingEvidence gathers verified source quotes for every item in batch across all chunks.
+func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingItem, chunks []string) (map[string][]string, error) {
+	quotes := make(map[string][]string, len(batch))
+	for chunkIndex, chunk := range chunks {
+		raw, err := llm.Complete(ctx, groundingEvidencePrompt(batch, chunk), nil)
+		if err != nil {
+			return nil, fmt.Errorf("collect evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+		}
+		var response struct {
+			Items []groundingEvidence `json:"items"`
+		}
+		if err := unmarshalRepaired(raw, &response); err != nil {
+			return nil, fmt.Errorf("parse grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+		}
+		if err := validateGroundingIDs(batch, evidenceIDs(response.Items)); err != nil {
+			return nil, fmt.Errorf("grounding evidence chunk %d/%d: %w", chunkIndex+1, len(chunks), err)
+		}
+		for _, item := range response.Items {
+			if item.Quotes == nil {
+				return nil, fmt.Errorf("grounding evidence %s: missing evidence_quotes array", item.ID)
+			}
+			for _, quote := range *item.Quotes {
+				if !sourceContainsQuote(chunk, quote) {
+					return nil, fmt.Errorf("grounding evidence %s: quote is empty or absent from original source chunk %d/%d", item.ID, chunkIndex+1, len(chunks))
+				}
+				quotes[item.ID] = append(quotes[item.ID], quote)
+			}
+		}
+	}
+	return quotes, nil
+}
+
+// decideGrounding asks the model whether the verified quotes support each item in batch.
+func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes map[string][]string) ([]GroundingFinding, error) {
+	raw, err := llm.Complete(ctx, groundingDecisionPrompt(batch, quotes), nil)
+	if err != nil {
+		return nil, fmt.Errorf("decide grounding: %w", err)
+	}
+	var response struct {
+		Items []groundingDecision `json:"items"`
+	}
+	if err := unmarshalRepaired(raw, &response); err != nil {
+		return nil, fmt.Errorf("parse grounding decision: %w", err)
+	}
+	if err := validateGroundingIDs(batch, decisionIDs(response.Items)); err != nil {
+		return nil, fmt.Errorf("grounding decision: %w", err)
+	}
+	findings := make([]GroundingFinding, 0, len(response.Items))
+	for _, item := range response.Items {
+		if item.Supported == nil {
+			return nil, fmt.Errorf("grounding decision %s: missing supported boolean", item.ID)
+		}
+		pedagogicalOnly := item.ID == "/teaching_notes" && item.PedagogicalOnly != nil && *item.PedagogicalOnly
+		if *item.Supported && len(quotes[item.ID]) == 0 && !pedagogicalOnly {
+			return nil, fmt.Errorf("grounding decision %s: supported without verified evidence", item.ID)
+		}
+		if *item.Supported {
+			continue
+		}
+		reason := strings.TrimSpace(item.Reason)
+		if reason == "" {
+			reason = "source evidence does not support every factual claim"
+		}
+		findings = append(findings, GroundingFinding{ID: item.ID, Reason: boundedGroundingReason(reason)})
+	}
 	return findings, nil
 }
 
@@ -188,7 +209,7 @@ func groundingDecisionPrompt(items []groundingItem, quotes map[string][]string) 
 func groundingBatches(items []groundingItem) [][]groundingItem {
 	const maxCandidateChars = 10000
 	var batches [][]groundingItem
-	var batch []groundingItem
+	batch := make([]groundingItem, 0, len(items))
 	size := 0
 	for _, item := range items {
 		duplicateID := false
@@ -200,7 +221,7 @@ func groundingBatches(items []groundingItem) [][]groundingItem {
 		}
 		if (size+len(item.Content) > maxCandidateChars || duplicateID) && len(batch) > 0 {
 			batches = append(batches, batch)
-			batch = nil
+			batch = make([]groundingItem, 0, len(items))
 			size = 0
 		}
 		batch = append(batch, item)
@@ -219,22 +240,8 @@ func splitGroundingItems(items []groundingItem) []groundingItem {
 	var parts []groundingItem
 	for _, item := range items {
 		contents := splitIntoChunks(item.Content, maxPartChars)
-		// Keep each linked object's identity alongside every long description piece.
-		if len(contents) > 1 && (strings.HasPrefix(item.ID, "/vocabulary/") || strings.HasPrefix(item.ID, "/theorems/") || strings.HasPrefix(item.ID, "/sections/")) {
-			if lineEnd := strings.IndexByte(item.Content, '\n'); lineEnd > 0 && lineEnd < maxPartChars/2 {
-				secondLabelEnd := strings.Index(item.Content[lineEnd+1:], ": ")
-				if secondLabelEnd < 0 {
-					secondLabelEnd = 0
-				} else {
-					secondLabelEnd += 2
-				}
-				headerEnd := lineEnd + 1 + secondLabelEnd
-				header := item.Content[:headerEnd]
-				contents = splitIntoChunks(item.Content[headerEnd:], maxPartChars-len(header))
-				for i := range contents {
-					contents[i] = header + contents[i]
-				}
-			}
+		if len(contents) > 1 && isLinkedGroundingID(item.ID) {
+			contents = splitLinkedContent(item.Content, contents, maxPartChars)
 		}
 		for _, content := range contents {
 			part := item
@@ -243,6 +250,32 @@ func splitGroundingItems(items []groundingItem) []groundingItem {
 		}
 	}
 	return parts
+}
+
+func isLinkedGroundingID(id string) bool {
+	return strings.HasPrefix(id, "/vocabulary/") || strings.HasPrefix(id, "/theorems/") || strings.HasPrefix(id, "/sections/")
+}
+
+// splitLinkedContent keeps each linked object's identity (its label lines) alongside every long
+// description piece. It returns fallback unchanged when content has no usable header.
+func splitLinkedContent(content string, fallback []string, maxPartChars int) []string {
+	lineEnd := strings.IndexByte(content, '\n')
+	if lineEnd <= 0 || lineEnd >= maxPartChars/2 {
+		return fallback
+	}
+	secondLabelEnd := strings.Index(content[lineEnd+1:], ": ")
+	if secondLabelEnd < 0 {
+		secondLabelEnd = 0
+	} else {
+		secondLabelEnd += 2
+	}
+	headerEnd := lineEnd + 1 + secondLabelEnd
+	header := content[:headerEnd]
+	contents := splitIntoChunks(content[headerEnd:], maxPartChars-len(header))
+	for i := range contents {
+		contents[i] = header + contents[i]
+	}
+	return contents
 }
 
 func groundingItems(dc *DistilledContext) []groundingItem {
@@ -257,49 +290,23 @@ func groundingItems(dc *DistilledContext) []groundingItem {
 	add("/overview", &dc.Overview)
 	add("/material_overview", &dc.MaterialOverview)
 	add("/teaching_notes", &dc.TeachingNotes)
-	for i := range dc.Objectives {
-		if dc.Objectives[i].CO != 0 || strings.TrimSpace(dc.Objectives[i].Text) != "" {
-			index := i
-			items = append(items, groundingItem{
-				ID:      fmt.Sprintf("/objectives/%d", i),
-				Content: fmt.Sprintf("This chapter satisfies course objective CO%d: %s", dc.Objectives[i].CO, dc.Objectives[i].Text),
-				Drop:    func() { dc.Objectives[index] = Objective{} },
-			})
-		}
-	}
+	items = appendLinkedItems(items, "objectives", dc.Objectives,
+		func(o Objective) bool { return o.CO != 0 || strings.TrimSpace(o.Text) != "" },
+		func(o Objective) string {
+			return fmt.Sprintf("This chapter satisfies course objective CO%d: %s", o.CO, o.Text)
+		})
 	for i := range dc.KeyConcepts {
 		add(fmt.Sprintf("/key_concepts/%d", i), &dc.KeyConcepts[i])
 	}
-	for i := range dc.Vocabulary {
-		if dc.Vocabulary[i].Term != "" || dc.Vocabulary[i].Definition != "" {
-			index := i
-			items = append(items, groundingItem{
-				ID:      fmt.Sprintf("/vocabulary/%d", i),
-				Content: fmt.Sprintf("Term: %s\nDefinition: %s", dc.Vocabulary[i].Term, dc.Vocabulary[i].Definition),
-				Drop:    func() { dc.Vocabulary[index] = VocabTerm{} },
-			})
-		}
-	}
-	for i := range dc.Theorems {
-		if dc.Theorems[i].Name != "" || dc.Theorems[i].Statement != "" {
-			index := i
-			items = append(items, groundingItem{
-				ID:      fmt.Sprintf("/theorems/%d", i),
-				Content: fmt.Sprintf("Name: %s\nStatement: %s", dc.Theorems[i].Name, dc.Theorems[i].Statement),
-				Drop:    func() { dc.Theorems[index] = Theorem{} },
-			})
-		}
-	}
-	for i := range dc.Sections {
-		if dc.Sections[i].Title != "" || dc.Sections[i].Summary != "" {
-			index := i
-			items = append(items, groundingItem{
-				ID:      fmt.Sprintf("/sections/%d", i),
-				Content: fmt.Sprintf("Title: %s\nSummary: %s", dc.Sections[i].Title, dc.Sections[i].Summary),
-				Drop:    func() { dc.Sections[index] = Section{} },
-			})
-		}
-	}
+	items = appendLinkedItems(items, "vocabulary", dc.Vocabulary,
+		func(v VocabTerm) bool { return v.Term != "" || v.Definition != "" },
+		func(v VocabTerm) string { return fmt.Sprintf("Term: %s\nDefinition: %s", v.Term, v.Definition) })
+	items = appendLinkedItems(items, "theorems", dc.Theorems,
+		func(t Theorem) bool { return t.Name != "" || t.Statement != "" },
+		func(t Theorem) string { return fmt.Sprintf("Name: %s\nStatement: %s", t.Name, t.Statement) })
+	items = appendLinkedItems(items, "sections", dc.Sections,
+		func(s Section) bool { return s.Title != "" || s.Summary != "" },
+		func(s Section) string { return fmt.Sprintf("Title: %s\nSummary: %s", s.Title, s.Summary) })
 	for i := range dc.Agenda {
 		add(fmt.Sprintf("/agenda/%d", i), &dc.Agenda[i])
 	}
@@ -312,6 +319,21 @@ func groundingItems(dc *DistilledContext) []groundingItem {
 			add(fmt.Sprintf("/slides/%d/diagram/alt", i), &dc.Slides[i].Diagram.Alt)
 			add(fmt.Sprintf("/slides/%d/diagram/caption", i), &dc.Slides[i].Diagram.Caption)
 		}
+	}
+	return items
+}
+
+// appendLinkedItems adds one grounding item per non-empty element of values; dropping it zeroes the element.
+func appendLinkedItems[T any](items []groundingItem, name string, values []T, nonEmpty func(T) bool, content func(T) string) []groundingItem {
+	for i := range values {
+		if !nonEmpty(values[i]) {
+			continue
+		}
+		items = append(items, groundingItem{
+			ID:      fmt.Sprintf("/%s/%d", name, i),
+			Content: content(values[i]),
+			Drop:    func() { var zero T; values[i] = zero },
+		})
 	}
 	return items
 }
@@ -330,42 +352,23 @@ func DropUngrounded(dc *DistilledContext, findings []GroundingFinding) {
 	// Empty list elements carry no factual content and need not remain in output.
 	dc.KeyConcepts = compactStrings(dc.KeyConcepts)
 	dc.Agenda = compactStrings(dc.Agenda)
-	keptObjectives := dc.Objectives[:0]
-	for _, objective := range dc.Objectives {
-		if objective.CO != 0 || objective.Text != "" {
-			keptObjectives = append(keptObjectives, objective)
-		}
-	}
-	dc.Objectives = keptObjectives
-	keptVocabulary := dc.Vocabulary[:0]
-	for _, term := range dc.Vocabulary {
-		if term.Term != "" || term.Definition != "" {
-			keptVocabulary = append(keptVocabulary, term)
-		}
-	}
-	dc.Vocabulary = keptVocabulary
-	keptTheorems := dc.Theorems[:0]
-	for _, theorem := range dc.Theorems {
-		if theorem.Name != "" || theorem.Statement != "" {
-			keptTheorems = append(keptTheorems, theorem)
-		}
-	}
-	dc.Theorems = keptTheorems
-	keptSections := dc.Sections[:0]
-	for _, section := range dc.Sections {
-		if section.Title != "" || section.Summary != "" {
-			keptSections = append(keptSections, section)
-		}
-	}
-	dc.Sections = keptSections
+	dc.Objectives = compact(dc.Objectives, func(o Objective) bool { return o.CO != 0 || o.Text != "" })
+	dc.Vocabulary = compact(dc.Vocabulary, func(v VocabTerm) bool { return v.Term != "" || v.Definition != "" })
+	dc.Theorems = compact(dc.Theorems, func(t Theorem) bool { return t.Name != "" || t.Statement != "" })
+	dc.Sections = compact(dc.Sections, func(s Section) bool { return s.Title != "" || s.Summary != "" })
 }
 
-func compactStrings(values []string) []string {
-	var kept []string
+// compact filters values in place, keeping elements for which nonEmpty is true.
+func compact[T any](values []T, nonEmpty func(T) bool) []T {
+	kept := values[:0]
 	for _, value := range values {
-		if value != "" {
+		if nonEmpty(value) {
 			kept = append(kept, value)
 		}
 	}
 	return kept
+}
+
+func compactStrings(values []string) []string {
+	return compact(values, func(value string) bool { return value != "" })
 }

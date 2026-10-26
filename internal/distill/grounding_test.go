@@ -40,6 +40,7 @@ func TestVerifyGrounding(t *testing.T) {
 	}{
 		{name: "verified quote supports", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
 		{name: "whitespace normalized quote", source: "Signals\nuse  SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
+		{name: "fenced JSON replies repaired", source: "Signals use SIGINT.", evidence: "```json\n{\"items\":[{\"id\":\"/overview\",\"evidence_quotes\":[]}]}\n```", decision: "Here you go: {\"items\":[{\"id\":\"/overview\",\"supported\":false,\"reason\":\"No source evidence for SIGHUP\"}]}", wantFinding: "/overview: No source evidence for SIGHUP"},
 		{name: "unsupported claim", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":false,"reason":"No source evidence for SIGHUP"}]}`, wantFinding: "/overview: No source evidence for SIGHUP"},
 		{name: "invented quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGHUP is ignored."]}]}`, wantError: "quote is empty or absent"},
 		{name: "missing ID", source: "Signals use SIGINT.", evidence: `{"items":[]}`, wantError: `missing item ID "/overview"`},
