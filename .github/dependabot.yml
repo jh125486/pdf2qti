@@ -10,9 +10,6 @@ updates:
       all:
         patterns:
           - "*"
-  # Build tools live in tools.mod (invoked via `go tool -modfile=tools.mod`). Dependabot's gomod
-  # ecosystem only looks for a file literally named go.mod, so it cannot track tools.mod;
-  # upgrade it with `task upgrade-tools` instead.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
