@@ -39,12 +39,12 @@ func (agenticHelpFlag) BeforeReset(ctx *kong.Context, docs Documentation) error 
 	doc.Schemas.Questions = generate.QuestionSchema().Definition
 	doc.Schemas.Slides.MediaType = "text/markdown"
 	doc.Schemas.Slides.Content = docs.SlideMarkdown
-	encoder := json.NewEncoder(ctx.Kong.Stdout)
+	encoder := json.NewEncoder(ctx.Stdout)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(doc); err != nil {
 		return fmt.Errorf("write agentic help: %w", err)
 	}
-	ctx.Kong.Exit(0)
+	ctx.Exit(0)
 	return nil
 }
 

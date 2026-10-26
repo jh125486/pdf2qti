@@ -1104,7 +1104,7 @@ func (c ChromedpImporter) recoverStuckImport(sessionCtx context.Context, run chr
 	// below baseline is retried too, since the list may lag a finished import;
 	// only growth past baseline (or running out of attempts) ends the loop.
 	backToList := false
-	for attempt := 0; attempt < recoverReadAttempts; attempt++ {
+	for attempt := range recoverReadAttempts {
 		if attempt > 0 {
 			// A failed open can leave the browser on the detail page (the
 			// click navigated, then the task was retried there), so return

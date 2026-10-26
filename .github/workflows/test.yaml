@@ -26,10 +26,10 @@ jobs:
           cache: true
 
       - name: Run static checks
-        run: make static
+        run: go tool -modfile=tools.mod task static
 
       - name: Run tests
-        run: make test
+        run: go tool -modfile=tools.mod task test
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7

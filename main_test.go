@@ -214,11 +214,11 @@ func assertAgenticMetadata(t *testing.T, got *agenticHelpDocument) {
 	}{
 		{name: "global config default and short flag", want: agenticHelpValue{
 			Name: "config", Description: "Path to config file.", Type: "string",
-			Default: pointerToString("quiz_input.json"), Enum: []string{}, Env: []string{}, Short: "c",
+			Default: new("quiz_input.json"), Enum: []string{}, Env: []string{}, Short: "c",
 		}},
 		{name: "bank behavior enum", command: "import-bank", want: agenticHelpValue{
 			Name: "on-existing", Description: "Existing bank behavior.", Type: "string",
-			Default: pointerToString("fail"), Enum: []string{"fail", "append"}, Env: []string{},
+			Default: new("fail"), Enum: []string{"fail", "append"}, Env: []string{},
 		}},
 		{name: "credential environment name", command: "publish", want: agenticHelpValue{
 			Name: "canvas-token", Description: "Canvas API token.", Type: "string",
@@ -261,5 +261,3 @@ func findAgenticValue(t *testing.T, values []agenticHelpValue, name string) agen
 	t.Fatalf("metadata missing for %q", name)
 	return agenticHelpValue{}
 }
-
-func pointerToString(value string) *string { return &value }

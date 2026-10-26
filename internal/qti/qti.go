@@ -250,7 +250,7 @@ func BuildAssessment(d *render.QuizDraft) (*Assessment, error) {
 // Follows CommonMark's delimiter-run rule rather than assuming every span
 // is exactly one backtick wide: a span opens with a run of N backticks and
 // closes at the next run of exactly N backticks, so content containing a
-// literal backtick can use a longer run (e.g. ``foo`bar``) without breaking
+// literal backtick can use a longer run (e.g. “foo`bar“) without breaking
 // the match.
 // backtickRunEnd returns the index just past the run of backticks beginning at
 // i, which callers must guarantee is a backtick. It starts scanning at i+1, so
@@ -306,7 +306,7 @@ func wrapCodeSpans(text string) string {
 // trimCodeSpanPadding applies CommonMark's code-span whitespace rule: if the
 // content begins and ends with a space (and isn't all spaces), one leading
 // and one trailing space are stripped — this is what lets a span start or
-// end with a backtick itself, e.g. `` `foo `` for a leading backtick.
+// end with a backtick itself, e.g. “ `foo “ for a leading backtick.
 func trimCodeSpanPadding(s string) string {
 	if len(s) >= 2 && s[0] == ' ' && s[len(s)-1] == ' ' && strings.TrimSpace(s) != "" {
 		return s[1 : len(s)-1]
