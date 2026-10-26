@@ -37,24 +37,37 @@ func TestVerifyGrounding(t *testing.T) {
 		decision    string
 		wantError   string
 		wantFinding string
+		wantPrompt  string // source text that must reach the decision prompt as evidence
+		notPrompt   string // model-altered text that must not reach the decision prompt
 	}{
 		{name: "verified quote supports", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
 		{name: "whitespace normalized quote", source: "Signals\nuse  SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
 		{name: "fenced JSON replies repaired", source: "Signals use SIGINT.", evidence: "```json\n{\"items\":[{\"id\":\"/overview\",\"evidence_quotes\":[]}]}\n```", decision: "Here you go: {\"items\":[{\"id\":\"/overview\",\"supported\":false,\"reason\":\"No source evidence for SIGHUP\"}]}", wantFinding: "/overview: No source evidence for SIGHUP"},
 		{name: "unsupported claim", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":false,"reason":"No source evidence for SIGHUP"}]}`, wantFinding: "/overview: No source evidence for SIGHUP"},
-		{name: "invented quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGHUP is ignored."]}]}`, wantError: "quote is empty or absent"},
+		{name: "typography and emphasis normalized quote", source: "Use `SIGINT` \u2014 it\u2019s **\u201Cfast\u201D**\u2026", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Use SIGINT - it's \"fast\"..."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
+		{name: "literal newline escape in multi-line quote", source: "char *getcwd(char *cwdbuf, size_t size);   /* Returns cwdbuf */\nint chdir(const char *pathname);", evidence: `{"items":[{"id":"/overview","evidence_quotes":["char *getcwd(char *cwdbuf, size_t size);   /* Returns cwdbuf */\\nint chdir(const char *pathname);"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
+		{name: "underscores are not stripped", source: "Call my_func now.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Call myfunc now."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantError: "all 1 offered quotes were absent"},
+		{name: "invented quote only fails loudly", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGHUP is ignored."]}]}`, wantError: "all 1 offered quotes were absent from the source"},
+		{name: "empty quote only fails loudly", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["  "]}]}`, wantError: "all 1 offered quotes were absent"},
+		{name: "valid and invalid quote still supports", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT.","SIGHUP is ignored."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: "Signals use SIGINT."},
+		{name: "dropped asterisk is not forwarded as evidence", source: "int *p = malloc(n);", evidence: `{"items":[{"id":"/overview","evidence_quotes":["int p = malloc(n);"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: "int *p = malloc(n);", notPrompt: "int p = malloc(n);"},
+		{name: "dropped power operator is not forwarded as evidence", source: "x ** 2", evidence: `{"items":[{"id":"/overview","evidence_quotes":["x 2"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: "x ** 2", notPrompt: `x 2`},
+		{name: "escaped newline quote forwards source text", source: `printf("a\nb");`, evidence: `{"items":[{"id":"/overview","evidence_quotes":["printf(\"a\\tb\");"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: `printf("a\nb");`, notPrompt: `a\tb`},
+		{name: "literal tab and CR escapes are whitespace", source: "x = 1;\ty = 2;\r\nz = 3;", evidence: `{"items":[{"id":"/overview","evidence_quotes":["x = 1;\\ty = 2;\\r\\nz = 3;"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: "x = 1;\ty = 2;\r\nz = 3;"},
+		{name: "evidence is source span with original typography", source: "Use `SIGINT` \u2014 it\u2019s fine.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGINT - it's"]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantPrompt: "SIGINT` \u2014 it\u2019s", notPrompt: "SIGINT - it's"},
 		{name: "missing ID", source: "Signals use SIGINT.", evidence: `{"items":[]}`, wantError: `missing item ID "/overview"`},
 		{name: "duplicate ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]},{"id":"/overview","evidence_quotes":[]}]}`, wantError: `duplicate item ID "/overview"`},
 		{name: "unknown ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/other","evidence_quotes":[]}]}`, wantError: `unknown item ID "/other"`},
 		{name: "missing evidence array", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview"}]}`, wantError: "missing evidence_quotes array"},
-		{name: "unsupported without verified quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantError: "supported without verified evidence"},
+		{name: "supported without verified quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantFinding: "/overview: no verbatim source quote could be verified"},
 		{name: "missing decision ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[]}`, wantError: `missing item ID "/overview"`},
 		{name: "missing decision support", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview"}]}`, wantError: "missing supported boolean"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			model := &groundingLLM{evidence: func(_ string) string { return tt.evidence }, decision: func(_ string) string { return tt.decision }}
+			var decisionPrompt string
+			model := &groundingLLM{evidence: func(_ string) string { return tt.evidence }, decision: func(prompt string) string { decisionPrompt = prompt; return tt.decision }}
 			findings, err := distill.VerifyGrounding(t.Context(), model, &distill.DistilledContext{Overview: "Signals use SIGHUP."}, tt.source)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
@@ -65,6 +78,12 @@ func TestVerifyGrounding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tt.wantPrompt != "" && !strings.Contains(decisionPrompt, jsonEscaped(tt.wantPrompt)) {
+				t.Fatalf("decision prompt lacks source evidence %q: %s", tt.wantPrompt, decisionPrompt)
+			}
+			if tt.notPrompt != "" && strings.Contains(decisionPrompt, jsonEscaped(tt.notPrompt)) {
+				t.Fatalf("decision prompt contains altered quote %q: %s", tt.notPrompt, decisionPrompt)
+			}
 			got := ""
 			if len(findings) > 0 {
 				got = findings[0].ID + ": " + findings[0].Reason
@@ -74,6 +93,12 @@ func TestVerifyGrounding(t *testing.T) {
 			}
 		})
 	}
+}
+
+// jsonEscaped returns s as it appears inside a JSON string literal.
+func jsonEscaped(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b[1 : len(b)-1])
 }
 
 func TestVerifyGroundingAcrossChunks(t *testing.T) {
@@ -97,13 +122,50 @@ func TestVerifyGroundingAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestVerifyGroundingInvalidQuoteInEarlierChunk(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunk2    string
+		wantError string
+	}{
+		{name: "valid quote only in later chunk", chunk2: "fact"},
+		{name: "no chunk has a valid quote", chunk2: "bogus too", wantError: "all 2 offered quotes were absent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			model := &groundingLLM{
+				evidence: func(prompt string) string {
+					if strings.Contains(prompt, "ORIGINAL SOURCE CHUNK:\nfact") {
+						return `{"items":[{"id":"/overview","evidence_quotes":["` + tt.chunk2 + `"]}]}`
+					}
+					return `{"items":[{"id":"/overview","evidence_quotes":["bogus"]}]}`
+				},
+				decision: func(_ string) string { return `{"items":[{"id":"/overview","supported":true,"reason":""}]}` },
+			}
+			source := strings.Repeat("a", 45000) + "\n\nfact"
+			findings, err := distill.VerifyGrounding(t.Context(), model, &distill.DistilledContext{Overview: "fact"}, source)
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("error=%v want %q", err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || len(findings) != 0 {
+				t.Fatalf("findings=%v err=%v", findings, err)
+			}
+		})
+	}
+}
+
 func TestVerifyGroundingTeachingAdvice(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, notes, decision, wantError, wantFinding string
 	}{
 		{name: "recommendation only", notes: "Start with a diagram.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":true,"reason":""}]}`},
-		{name: "mixed claim cannot bypass evidence", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":false,"reason":""}]}`, wantError: "supported without verified evidence"},
+		{name: "mixed claim cannot bypass evidence", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":false,"reason":""}]}`, wantFinding: "/teaching_notes: no verbatim source quote could be verified"},
 		{name: "mixed claim reported", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":false,"pedagogical_only":false,"reason":"fork claim absent"}]}`, wantFinding: "/teaching_notes: fork claim absent"},
 	}
 	for _, tt := range tests {
@@ -131,6 +193,25 @@ func TestVerifyGroundingTeachingAdvice(t *testing.T) {
 				t.Fatalf("finding=%q want=%q", got, tt.wantFinding)
 			}
 		})
+	}
+}
+
+func TestVerifyGroundingMixedBatch(t *testing.T) {
+	t.Parallel()
+	model := &groundingLLM{
+		evidence: func(_ string) string {
+			return `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]},{"id":"/text","evidence_quotes":["SIGHUP is ignored."]}]}`
+		},
+		decision: func(_ string) string {
+			return `{"items":[{"id":"/overview","supported":true,"reason":""},{"id":"/text","supported":true,"reason":""}]}`
+		},
+	}
+	findings, err := distill.VerifyGrounding(t.Context(), model, &distill.DistilledContext{Overview: "Signals use SIGINT.", Text: "SIGHUP is ignored."}, "Signals use SIGINT.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].ID != "/text" || findings[0].Reason != "no verbatim source quote could be verified (1 quote(s) discarded as not found in source)" {
+		t.Fatalf("findings=%v", findings)
 	}
 }
 
