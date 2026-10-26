@@ -42,12 +42,15 @@ func TestVerifyGrounding(t *testing.T) {
 		{name: "whitespace normalized quote", source: "Signals\nuse  SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
 		{name: "fenced JSON replies repaired", source: "Signals use SIGINT.", evidence: "```json\n{\"items\":[{\"id\":\"/overview\",\"evidence_quotes\":[]}]}\n```", decision: "Here you go: {\"items\":[{\"id\":\"/overview\",\"supported\":false,\"reason\":\"No source evidence for SIGHUP\"}]}", wantFinding: "/overview: No source evidence for SIGHUP"},
 		{name: "unsupported claim", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":false,"reason":"No source evidence for SIGHUP"}]}`, wantFinding: "/overview: No source evidence for SIGHUP"},
-		{name: "invented quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGHUP is ignored."]}]}`, wantError: "quote is empty or absent"},
+		{name: "typography and emphasis normalized quote", source: "Use `SIGINT` \u2014 it\u2019s **\u201Cfast\u201D**\u2026", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Use SIGINT - it's \"fast\"..."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`},
+		{name: "underscores are not stripped", source: "Call my_func now.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Call myfunc now."]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantFinding: "/overview: no verbatim source quote could be verified"},
+		{name: "invented quote discarded then unsupported", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["SIGHUP is ignored."]}]}`, decision: `{"items":[{"id":"/overview","supported":false,"reason":"no evidence"}]}`, wantFinding: "/overview: no evidence"},
+		{name: "empty quote discarded", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["  "]}]}`, decision: `{"items":[{"id":"/overview","supported":false,"reason":"no evidence"}]}`, wantFinding: "/overview: no evidence"},
 		{name: "missing ID", source: "Signals use SIGINT.", evidence: `{"items":[]}`, wantError: `missing item ID "/overview"`},
 		{name: "duplicate ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]},{"id":"/overview","evidence_quotes":[]}]}`, wantError: `duplicate item ID "/overview"`},
 		{name: "unknown ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/other","evidence_quotes":[]}]}`, wantError: `unknown item ID "/other"`},
 		{name: "missing evidence array", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview"}]}`, wantError: "missing evidence_quotes array"},
-		{name: "unsupported without verified quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantError: "supported without verified evidence"},
+		{name: "unsupported without verified quote", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":[]}]}`, decision: `{"items":[{"id":"/overview","supported":true,"reason":""}]}`, wantFinding: "/overview: no verbatim source quote could be verified"},
 		{name: "missing decision ID", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[]}`, wantError: `missing item ID "/overview"`},
 		{name: "missing decision support", source: "Signals use SIGINT.", evidence: `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]}]}`, decision: `{"items":[{"id":"/overview"}]}`, wantError: "missing supported boolean"},
 	}
@@ -103,7 +106,7 @@ func TestVerifyGroundingTeachingAdvice(t *testing.T) {
 		name, notes, decision, wantError, wantFinding string
 	}{
 		{name: "recommendation only", notes: "Start with a diagram.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":true,"reason":""}]}`},
-		{name: "mixed claim cannot bypass evidence", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":false,"reason":""}]}`, wantError: "supported without verified evidence"},
+		{name: "mixed claim cannot bypass evidence", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":true,"pedagogical_only":false,"reason":""}]}`, wantFinding: "/teaching_notes: no verbatim source quote could be verified"},
 		{name: "mixed claim reported", notes: "Start with a diagram. Fork duplicates threads.", decision: `{"items":[{"id":"/teaching_notes","supported":false,"pedagogical_only":false,"reason":"fork claim absent"}]}`, wantFinding: "/teaching_notes: fork claim absent"},
 	}
 	for _, tt := range tests {
@@ -131,6 +134,25 @@ func TestVerifyGroundingTeachingAdvice(t *testing.T) {
 				t.Fatalf("finding=%q want=%q", got, tt.wantFinding)
 			}
 		})
+	}
+}
+
+func TestVerifyGroundingMixedBatch(t *testing.T) {
+	t.Parallel()
+	model := &groundingLLM{
+		evidence: func(_ string) string {
+			return `{"items":[{"id":"/overview","evidence_quotes":["Signals use SIGINT."]},{"id":"/text","evidence_quotes":["SIGHUP is ignored."]}]}`
+		},
+		decision: func(_ string) string {
+			return `{"items":[{"id":"/overview","supported":true,"reason":""},{"id":"/text","supported":true,"reason":""}]}`
+		},
+	}
+	findings, err := distill.VerifyGrounding(t.Context(), model, &distill.DistilledContext{Overview: "Signals use SIGINT.", Text: "SIGHUP is ignored."}, "Signals use SIGINT.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].ID != "/text" || findings[0].Reason != "no verbatim source quote could be verified" {
+		t.Fatalf("findings=%v", findings)
 	}
 }
 

@@ -67,6 +67,9 @@ func VerifyGrounding(ctx context.Context, llm LLM, dc *DistilledContext, chapter
 }
 
 // collectGroundingEvidence gathers verified source quotes for every item in batch across all chunks.
+// Quotes the model could not reproduce from the chunk (modulo whitespace, typography and Markdown
+// emphasis) are discarded as invalid evidence rather than treated as errors; items left without
+// quotes are later reported as unsupported. Malformed model output is still an error.
 func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingItem, chunks []string) (map[string][]string, error) {
 	quotes := make(map[string][]string, len(batch))
 	for chunkIndex, chunk := range chunks {
@@ -89,7 +92,7 @@ func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingIte
 			}
 			for _, quote := range *item.Quotes {
 				if !sourceContainsQuote(chunk, quote) {
-					return nil, fmt.Errorf("grounding evidence %s: quote is empty or absent from original source chunk %d/%d", item.ID, chunkIndex+1, len(chunks))
+					continue
 				}
 				quotes[item.ID] = append(quotes[item.ID], quote)
 			}
@@ -99,6 +102,8 @@ func collectGroundingEvidence(ctx context.Context, llm LLM, batch []groundingIte
 }
 
 // decideGrounding asks the model whether the verified quotes support each item in batch.
+// An item the model calls supported without any verified quote (and not pedagogical-only
+// teaching notes) becomes a finding rather than an error.
 func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes map[string][]string) ([]GroundingFinding, error) {
 	raw, err := llm.Complete(ctx, groundingDecisionPrompt(batch, quotes), nil)
 	if err != nil {
@@ -120,7 +125,8 @@ func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes
 		}
 		pedagogicalOnly := item.ID == "/teaching_notes" && item.PedagogicalOnly != nil && *item.PedagogicalOnly
 		if *item.Supported && len(quotes[item.ID]) == 0 && !pedagogicalOnly {
-			return nil, fmt.Errorf("grounding decision %s: supported without verified evidence", item.ID)
+			findings = append(findings, GroundingFinding{ID: item.ID, Reason: "no verbatim source quote could be verified"})
+			continue
 		}
 		if *item.Supported {
 			continue
@@ -134,9 +140,23 @@ func decideGrounding(ctx context.Context, llm LLM, batch []groundingItem, quotes
 	return findings, nil
 }
 
+// sourceContainsQuote reports whether quote is a non-empty contiguous substring of chunk after
+// both are passed through normalizeForQuote.
 func sourceContainsQuote(chunk, quote string) bool {
-	q := strings.Join(strings.Fields(quote), " ")
-	return q != "" && strings.Contains(strings.Join(strings.Fields(chunk), " "), q)
+	q := normalizeForQuote(quote)
+	return q != "" && strings.Contains(normalizeForQuote(chunk), q)
+}
+
+var quoteFolder = strings.NewReplacer(
+	"\u2018", "'", "\u2019", "'", "\u201C", `"`, "\u201D", `"`,
+	"\u2013", "-", "\u2014", "-", "\u2026", "...",
+	"`", "", "*", "",
+)
+
+// normalizeForQuote collapses whitespace, folds curly quotes, dashes and the ellipsis character to
+// ASCII, and removes backticks and asterisks. Underscores are kept because identifiers use them.
+func normalizeForQuote(s string) string {
+	return strings.Join(strings.Fields(quoteFolder.Replace(s)), " ")
 }
 
 func boundedGroundingReason(reason string) string {
